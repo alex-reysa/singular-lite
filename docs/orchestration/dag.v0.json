@@ -1,183 +1,71 @@
 {
   "schema": "singular.orchestration.dag.v0",
-  "layers": ["contract", "engine_runtime", "evaluation"],
-  "kinds": ["contract", "runtime", "evaluation"],
-  "requiredNodes": ["rel-00-contract", "rel-99-release"],
+  "layers": [
+    "engine_runtime"
+  ],
+  "kinds": [
+    "runtime"
+  ],
+  "requiredNodes": [
+    "brain-package",
+    "context-service",
+    "context-invocations",
+    "memory-lifecycle",
+    "context-evaluation"
+  ],
   "nodes": [
     {
-      "id": "rel-00-contract",
-      "stage": "S0-contract",
-      "area": "eval",
-      "layer": "contract",
-      "kind": "contract",
+      "id": "brain-package",
+      "stage": "B1",
+      "area": "brain",
+      "layer": "engine_runtime",
+      "kind": "runtime",
       "dependsOn": [],
-      "requiredCompletion": "reliability sprint contract recorded: eight safety invariants, audited baseline failure modes with code anchors, explicit deferrals"
+      "requiredCompletion": "Pinned brain engine is installed and CLI-accessible; actual generated manifest is validated and normalized with correct roots, freshness, lifecycle, provenance and compatibility; B1 scenarios in docs/brain-build-plan/campaign.md are covered by the integrated end-to-end test."
     },
     {
-      "id": "rel-01-per-try-logs",
-      "stage": "S1-defect-fixes",
-      "area": "session",
+      "id": "context-service",
+      "stage": "B2",
+      "area": "brain",
       "layer": "engine_runtime",
       "kind": "runtime",
-      "dependsOn": ["rel-00-contract"],
-      "requiredCompletion": "an infra retry leaves every prior try's worker log, runner result, and provider envelope unchanged; the archive carries all sidecars; singular status is observational before every state/scaffold mutation; low-disk recovery's detached fixture waits and drains without racing its completion marker; the hermetic archive fixture captures the literal incoming caller paths before rebinding, executes twice inside one test process against distinct roots, drains late writers, and leaves every caller checkout/state/event byte unchanged"
-    },
-    {
-      "id": "rel-02-try-hygiene",
-      "stage": "S1-defect-fixes",
-      "area": "session",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-01-per-try-logs"],
-      "requiredCompletion": "stale worker output cannot mask a later try's failure classification, including the rc86 resume-refusal/fresh-fallback path; the try>0-fresh resume invariant is pinned by a driver-level regression test for both roles; the inherited-state archive proof is safe at maxConcurrent=3: a PID-bound sibling writer proves ready, acknowledged overlap with both nonce-bound same-process archive calls, an acknowledged final write, an exact write count, and zero exit; distinct fixture roots, independent nonce-free source-time decoy canaries, and fixed literal caller-checkout protected paths remain unchanged; nonce-bearing event emission appears only in each active fixture event log, never the literal caller event path or caller-state namespace; the archive nonce may otherwise appear only in deliberate fixture run IDs/markers; no whole shared-tree equality is used"
-    },
-    {
-      "id": "rel-03-integrity-reclass",
-      "stage": "S1-defect-fixes",
-      "area": "foundation",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-02-try-hygiene"],
-      "requiredCompletion": "a rerun-gate source-integrity violation classifies as integrity-violation and parks for a human before disable, repeat, budget, or model routing can relabel it, never as infrastructure; the terminal event remains bound to the exact audit-verification.json integrity artifact, the model is never invoked, and lease retryCount remains unchanged"
-    },
-    {
-      "id": "rel-04-evidence-remedy",
-      "stage": "S1-defect-fixes",
-      "area": "foundation",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-03-integrity-reclass"],
-      "requiredCompletion": "a revalidate-evidence verdict completes with zero implementer invocations and zero product-budget consumption"
-    },
-    {
-      "id": "rel-05-manifest-remedy-bound",
-      "stage": "S1-defect-fixes",
-      "area": "foundation",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-04-evidence-remedy"],
-      "requiredCompletion": "a single transient evidence-manifest or binding failure is retried within its own bound; Codex cached replay is not charged as fresh audit input; a completed auditor verdict is never discarded as an infrastructure park; exact-base REDs reproduce transient finalization, stale pre-accept packet binding, secret-bearing inbox import, catchable interruption, and unsafe accept-existing auto-heal before production edits; packet-only quiet secret preflight never persists matched bytes; native and deterministic existing-packet acceptance share one fail-closed stamp, post-stamp manifest, exact root/manifest/inbox binding, and publication transaction whose hit, failure, or interruption leaves no inbox, no running controls, and no published-acceptance ambiguity; a post-stamp accepted root is explicitly evidence-only and non-publishable unless bound root+manifest, accepted task+lease, and byte-identical inbox coexist"
-    },
-    {
-      "id": "rel-06-terminal-handoff",
-      "stage": "S1-defect-fixes",
-      "area": "foundation",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-05-manifest-remedy-bound"],
-      "requiredCompletion": "a driver killed at any point after terminal resolution, including SIGKILL, reconciles the lease and run status to the recorded outcome in one recovery cycle; native and waiver acceptance record accept-finalizing only after rel-05 packet secret preflight plus accepted root/manifest binding, and recovery revalidates that exact evidence before publishing accepted controls/inbox, while missing, tampered, secret-bearing, or mismatched evidence blocks and imports zero; under STOP, reset-only removes exactly one verified dead blocked/failed/superseded/cancelled task worktree and worker branch without creating a run, mutating control state, or dispatching a provider, and refuses every live, accepted, ambiguous, mismatched, or unfrozen case"
-    },
-    {
-      "id": "rel-07-run-control",
-      "stage": "S1-defect-fixes",
-      "area": "packets",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-00-contract"],
-      "requiredCompletion": "an externally signed, exact-run, monotonic deadline extension or sticky cancel takes effect within one poll interval in every bounded provider runner and gate loop; an already-expired effective deadline terminates before polling so late control cannot resurrect it, while the frozen Codex completion/grace result is preserved when terminal success collides with the original deadline; unsigned, modified, wrong-run/key, duplicate-member, malformed, semantically invalid RFC3339, oversized, replayed/lower-generation, symlink, any non-regular file, or changed-during-snapshot records within a bounded invocation fail closed without blocking; a same-UID child cannot author an honored extension or replace a verifier pinned before spawn through a root-owned non-group/other-writable canonical regular executable chain, or an equivalently immutable already-resident in-process verifier never executed through a mutable path; any post-spawn verifier executable, library, or imported-code origin is resolved and proven by the same rule before spawn, child cwd/PATH/PYTHONPATH shadows are inert, and the chosen RFC8032 verifier passes published valid, invalid, non-canonical, identity, and weak-key vectors; authoritative and consumer v1 schemas are byte-identical, match the runtime hard protocol ceiling, permit a lower configured per-invocation cap, clamp above-ceiling values down, and pass schema sync; a signed empty-reason record is honored once with the empty reason preserved in its event; one canonical exact-base behavioral RED remains byte-identical across retries; nested fixtures pin or deliberately clear capability identity and pass the authoritative host gate; a frozen-target behavioral golden proves the intended child actually ran and preserves no-valid-control child environment/output/exit/capture-state parity across all six providers and both gate loops, and valid signed extension or cancel records remain inert when timeout is zero"
-    },
-    {
-      "id": "rel-08-route-transcript",
-      "stage": "S1-defect-fixes",
-      "area": "routing",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-00-contract"],
-      "requiredCompletion": "the literal unpinned reviewer probe fixture flips from fresh window-pressure on the exact base to exactly resume SID-reviewer after the reviewer routing adapter matches the driver-written auditor transcript; with context routing enabled, final-audit and paired-audit remain intentionally fresh-pinned under every subordinate routing knob, while master-off behavior remains legacy-identical"
-    },
-    {
-      "id": "rel-09-l1-lease-liveness",
-      "stage": "S1-defect-fixes",
-      "area": "session",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-00-contract"],
-      "requiredCompletion": "a live planning process is never reclaimed by wall-clock alone inside the hard cap; old-format leases keep today's behavior"
-    },
-    {
-      "id": "rel-10-failure-domains",
-      "stage": "S1-defect-fixes",
-      "area": "packets",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-03-integrity-reclass"],
-      "requiredCompletion": "every orchestration failure class maps to exactly one failureDomain recorded in the attempts index and decider events; the attempts-index record has a validating schema"
-    },
-    {
-      "id": "rel-11-supervised-job",
-      "stage": "S2-supervised-jobs",
-      "area": "graph",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-00-contract"],
-      "requiredCompletion": "the supervised-job primitive is an importable module with start, status, attach, bounded wait, and cancel; singular test runs on it with byte-compatible user surface"
-    },
-    {
-      "id": "rel-12-identity-canon",
-      "stage": "S2-supervised-jobs",
-      "area": "foundation",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-00-contract"],
-      "requiredCompletion": "one shared canonicalizer computes evidence binding byte-compatibly with history and pre-execution job identity; no hand-rolled recomputation remains"
-    },
-    {
-      "id": "rel-13-gate-attach",
-      "stage": "S2-supervised-jobs",
-      "area": "session",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-06-terminal-handoff", "rel-11-supervised-job", "rel-12-identity-canon"],
-      "requiredCompletion": "identical gates attach by exact identity; integration gates execute the exact staged tree in a disposable worktree and bind both parents; supervisor death reconciles interrupted; evidence binding stays unchanged"
-    },
-    {
-      "id": "rel-14-run-status-v1",
-      "stage": "S3-honest-status",
-      "area": "graph",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-06-terminal-handoff", "rel-09-l1-lease-liveness"],
-      "requiredCompletion": "liveness and progress advance independently in an additive v1 record correlating existing identity records; recovery defers the hard cap for a provably live tree; v0 bytes unchanged"
-    },
-    {
-      "id": "rel-15-snapshot-checkpoint",
-      "stage": "S4-preservation",
-      "area": "graph",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-01-per-try-logs", "rel-07-run-control"],
-      "requiredCompletion": "a timeout-killed worker try leaves a verifiable snapshot checkpoint of task-owned bytes on a private ref that cannot satisfy packet, audit, gate, integration, or promotion checks"
-    },
-    {
-      "id": "rel-16-infra-try-resume",
-      "stage": "S4-preservation",
-      "area": "session",
-      "layer": "engine_runtime",
-      "kind": "runtime",
-      "dependsOn": ["rel-02-try-hygiene", "rel-07-run-control"],
-      "requiredCompletion": "behind its default-off flag, an infrastructure-class try resumes the same role session only through the full identity gate set, with its own counter and untouched product budget"
-    },
-    {
-      "id": "rel-99-release",
-      "stage": "S5-release",
-      "area": "eval",
-      "layer": "evaluation",
-      "kind": "evaluation",
-      "authority": "operator",
-      "humanGate": {
-        "requestRef": "docs/orchestration/human-gates/rel-99-release.human-gate.json",
-        "approvalRef": "docs/orchestration/human-gates/rel-99-release.human-approval.json"
-      },
       "dependsOn": [
-        "rel-08-route-transcript",
-        "rel-09-l1-lease-liveness",
-        "rel-10-failure-domains",
-        "rel-13-gate-attach",
-        "rel-14-run-status-v1",
-        "rel-15-snapshot-checkpoint",
-        "rel-16-infra-try-resume"
+        "brain-package"
       ],
-      "requiredCompletion": "0.19.0 changelog and contract docs shipped; all version pins synchronized; full suite, field-report canary, and fresh-consumer checks green; every sampled paired audit and its operator disposition are enumerated, no unresolved rejection/disagreement/finding remains, and no paired-rejected packet was imported or integrated; exact release artifacts receive operator approval; schemaVersion stays v2 with a nothing-required migration note"
+      "requiredCompletion": "Shared context build/search/get/explain provides section-aware bounded immutable bundles over actual docs, code and retained run records; B2 scenarios in docs/brain-build-plan/campaign.md pass."
+    },
+    {
+      "id": "context-invocations",
+      "stage": "B3",
+      "area": "brain",
+      "layer": "engine_runtime",
+      "kind": "runtime",
+      "dependsOn": [
+        "context-service"
+      ],
+      "requiredCompletion": "Planner and first-attempt/retry worker prompts use opt-in shared context independent of rehydration, audit independence is preserved at the source boundary, and bundle provenance matches events; B3 scenarios in docs/brain-build-plan/campaign.md pass."
+    },
+    {
+      "id": "memory-lifecycle",
+      "stage": "B4",
+      "area": "brain",
+      "layer": "engine_runtime",
+      "kind": "runtime",
+      "dependsOn": [
+        "context-invocations"
+      ],
+      "requiredCompletion": "Project-local candidate/review/supersession/deletion lifecycle carries cited knowledge across tasks and process restarts without self-authorizing claims or a competing operational ledger; B4 scenarios in docs/brain-build-plan/campaign.md pass."
+    },
+    {
+      "id": "context-evaluation",
+      "stage": "B5",
+      "area": "brain",
+      "layer": "engine_runtime",
+      "kind": "runtime",
+      "dependsOn": [
+        "memory-lifecycle"
+      ],
+      "requiredCompletion": "Deterministic retrieval evaluation and campaign observation analysis report correct metrics and missing data, adoption and rollback docs exist, actual campaign findings are reported without causal overclaims, and B5 scenarios in docs/brain-build-plan/campaign.md pass."
     }
   ]
 }

@@ -1,50 +1,21 @@
 {
   "schemaVersion": "v2",
   "engineVersion": "0.21.0",
-  "targetBranch": "agent/integration",
+  "targetBranch": "codex/brain-integration",
   "gateCommand": "SINGULAR_TEST_JOBS=4 bash tests/run.sh",
-  "runner": "claude-run.sh",
+  "runner": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/tools/brain-campaign/codex-run.sh",
   "areaPrefix": "engine/",
   "areas": {
-    "foundation": [
-      "engine/",
-      "tests/",
-      "cli/"
-    ],
-    "session": [
-      "engine/",
-      "tests/"
-    ],
-    "plancritic": [
+    "brain": [
       "engine/",
       "tests/",
       "schemas/",
-      "templates/prompts/"
-    ],
-    "packets": [
-      "engine/",
-      "tests/",
-      "schemas/",
-      "templates/prompts/"
-    ],
-    "routing": [
-      "engine/",
-      "tests/"
-    ],
-    "graph": [
-      "engine/",
-      "tests/",
-      "schemas/",
-      "cli/"
-    ],
-    "eval": [
-      "docs/",
+      "cli/",
+      "vendor/",
+      "templates/",
+      "install.sh",
       "README.md",
-      "CHANGELOG.md",
-      "VERSION",
-      ".singular-version",
-      "singular.config.json",
-      "templates/singular.config.json"
+      "docs/brain-build-plan/"
     ]
   },
   "proofLayers": [],
@@ -145,7 +116,7 @@
   "resources": {
     "diskReserveBytes": 2147483648,
     "estimatedWorktreeBytes": 268435456,
-    "maxConcurrent": 3
+    "maxConcurrent": 2
   },
   "controlState": {
     "commitIntervalSeconds": 300
@@ -164,30 +135,39 @@
     }
   },
   "env": {
-    "SINGULAR_MAX_CONCURRENT": "3",
-    "SINGULAR_MAX_DISPATCH": "3",
+    "SINGULAR_TASKS_DIR": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/docs/orchestration/brain-tasks",
+    "SINGULAR_CODEX_BIN": "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "SINGULAR_CODEX_PLANNER_MODEL": "gpt-6-astra",
+    "SINGULAR_CODEX_DECIDER_MODEL": "gpt-6-astra",
+    "SINGULAR_CODEX_SUPERVISOR_MODEL": "gpt-6-astra",
+    "SINGULAR_CODEX_IMPLEMENTER_MODEL": "gpt-5.6-sol",
+    "SINGULAR_CODEX_AUDITOR_MODEL": "gpt-5.6-sol",
+    "SINGULAR_CODEX_CRITIC_MODEL": "gpt-5.6-sol",
+    "SINGULAR_CODEX_L1_REASONING_EFFORT": "high",
+    "SINGULAR_CODEX_L2_REASONING_EFFORT": "high",
+    "SINGULAR_CODEX_PLANNER_REASONING_EFFORT": "high",
+    "SINGULAR_CODEX_DECIDER_REASONING_EFFORT": "high",
+    "SINGULAR_CODEX_CRITIC_REASONING_EFFORT": "high",
+    "SINGULAR_CODEX_AUDITOR_REASONING_EFFORT": "high",
+    "SINGULAR_CODEX_READONLY_REASONING_EFFORT": "high",
+    "SINGULAR_PUSH": "0",
+    "SINGULAR_MAX_CONCURRENT": "2",
+    "SINGULAR_MAX_DISPATCH": "2",
+    "SINGULAR_MAX_HOURS": "8",
     "SINGULAR_ENABLE_L1_PARALLEL": "1",
-    "SINGULAR_CLAUDE_MODEL": "claude-opus-4-8",
-    "SINGULAR_CLAUDE_L2_MODEL": "claude-opus-4-8",
-    "SINGULAR_CLAUDE_L1_MODEL": "claude-opus-4-8",
-    "SINGULAR_CLAUDE_PLANNER_MODEL": "claude-opus-4-8",
-    "SINGULAR_CLAUDE_AUDITOR_MODEL": "claude-opus-4-8",
-    "SINGULAR_CLAUDE_DECIDER_MODEL": "claude-opus-4-8",
+    "SINGULAR_L2_SLICE_BUDGET": "4",
     "SINGULAR_PLANNER_SESSION": "1",
     "SINGULAR_PLAN_CRITIQUE": "1",
-    "SINGULAR_PAIRED_AUDIT_PCT": "25",
-    "SINGULAR_L2_SLICE_BUDGET": "3",
-    "SINGULAR_CODEX_MODEL": "gpt-5.6-sol",
-    "SINGULAR_CODEX_L1_REASONING_EFFORT": "high",
-    "SINGULAR_CODEX_L2_REASONING_EFFORT": "medium",
-    "SINGULAR_CODEX_PLANNER_REASONING_EFFORT": "high",
-    "SINGULAR_CODEX_AUDITOR_REASONING_EFFORT": "high",
-    "SINGULAR_CODEX_CRITIC_REASONING_EFFORT": "high",
-    "SINGULAR_CODEX_DECIDER_REASONING_EFFORT": "high",
-    "SINGULAR_CODEX_READONLY_REASONING_EFFORT": "high",
+    "SINGULAR_PLAN_REVISE_MAX": "1",
     "SINGULAR_CTX_PACKET": "1",
     "SINGULAR_CTX_ROUTING": "1",
     "SINGULAR_CTX_ARTIFACT_SCAN": "1",
-    "SINGULAR_SUPERVISOR_INTERVAL_MIN": "15"
-  }
+    "SINGULAR_PAIRED_AUDIT_PCT": "25",
+    "SINGULAR_CTX_ARMSTATE": "1",
+    "SINGULAR_REHYDRATE": "0",
+    "SINGULAR_CTX_MANIFEST": "0",
+    "SINGULAR_CTX_GRAPH": "0",
+    "SINGULAR_SUPERVISOR_INTERVAL_MIN": "0"
+  },
+  "promoter": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/campaign-policy/promote-gate.sh"
 }
