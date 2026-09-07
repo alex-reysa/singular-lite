@@ -83,10 +83,11 @@ new_repo() { # dir
 
 # .singular-state/config.local.sh is sourced after singular.config.json, so it is
 # the one place a fixture can pin the provider a migrated config will select.
-pin_stub_provider() { # repo
+pin_stub_provider() { # repo [engine-home]
+  local engine_home="${2:-$ROOT}"
   mkdir -p "$1/.singular-state"
   cat >"$1/.singular-state/config.local.sh" <<SH
-export SINGULAR_RUNNER="$ROOT/engine/codex-run.sh"
+export SINGULAR_RUNNER="$engine_home/engine/codex-run.sh"
 export SINGULAR_CODEX_BIN="$stub_bin/codex"
 SH
 }
@@ -456,37 +457,79 @@ assert_eq "$(printf '%s\n' "$out" | grep -c '^Next: ')" "1" "(i) still exactly o
 #   j1  an installed engine (no tests/ at all)   -> SINGULAR_TEST_SUITE_UNAVAILABLE
 #   j2  a suite present in a non-checkout tree   -> SINGULAR_TEST_SOURCE_UNSUPPORTED
 
-# install.sh's payload list, reproduced. Copying it (rather than running the
-# installer) keeps this hermetic: install.sh also links into /usr/local/bin when
-# that is writable, which a test must never do.
-install_like() { # dest
-  mkdir -p "$1"
-  local item
-  for item in engine schemas promoters templates plugin singular-ext cli migrations \
-              VERSION SCHEMA_VERSION CHANGELOG.md; do
-    [[ -e "$ROOT/$item" ]] || continue
-    cp -Rp "$ROOT/$item" "$1/"
-  done
+# Exercise install.sh itself in isolated storage. Putting the disposable bin on
+# PATH takes the installer's existing "already on PATH" branch, so it never
+# attempts its optional /usr/local/bin convenience link.
+run_installer() { # source singular-home
+  local source="$1" singular_home="$2"
+  mkdir -p "$singular_home/bin"
+  env HOME="$tmp/home" SINGULAR_HOME="$singular_home" \
+    PATH="$singular_home/bin:$PATH" bash "$source/install.sh" 2>&1
 }
 
-# ...and the list itself is the thing under test, so pin it: `tests` shipping
-# again would put the failure back where the auditor found it (a run dir, a
-# manifest and a supervisor created before run.sh's own preflight refuses).
-grep -q '^for item in engine schemas promoters templates plugin singular-ext cli migrations VERSION SCHEMA_VERSION CHANGELOG.md; do$' \
-  "$ROOT/install.sh" \
-  || fail "(j) install.sh's payload list changed; an installed engine must not ship tests/"
+installed_payload_contract() { # installed engine root
+  [[ ! -e "$1/tests" ]] || {
+    echo "installed payload unexpectedly contains tests/" >&2
+    return 1
+  }
+  [[ ! -e "$1/.git" ]] || {
+    echo "installed payload unexpectedly contains .git" >&2
+    return 1
+  }
+}
 
-engine_installed="$tmp/engine-installed"
-install_like "$engine_installed"
-[[ ! -e "$engine_installed/tests" ]] || fail "(j1) fixture must not ship tests/"
-[[ ! -e "$engine_installed/.git" ]] || fail "(j1) fixture must not be a Git checkout"
+install_home="$tmp/install-home"
+install_out="$(run_installer "$ROOT" "$install_home")"
+rc=$?
+[[ "$rc" -eq 0 ]] || fail "(j) real installer failed in isolated storage (rc=$rc)\n$install_out"
+assert_not_contains "$install_out" "also linked /usr/local/bin/singular" \
+  "(j) isolated installer must not create a machine-global link"
+engine_installed="$install_home/versions/$ENGINE_VERSION"
+[[ -x "$install_home/bin/singular" ]] || fail "(j) installer did not create its scoped launcher"
+[[ "$(readlink "$install_home/current")" == "$engine_installed" ]] \
+  || fail "(j) installer current link does not select the installed engine"
+installed_payload_contract "$engine_installed" \
+  || fail "(j1) real installed payload violated the runtime payload contract"
+
+# Additive payload directories are legitimate. Build a disposable source tree,
+# add a harmless vendor sentinel to its install loop, and prove the real
+# installer preserves it without weakening the exclusions above.
+installer_variant="$tmp/installer-variant"
+mkdir -p "$installer_variant"
+cp -Rp "$ROOT/." "$installer_variant/"
+mkdir -p "$installer_variant/vendor"
+printf 'TASK-1009 harmless vendor sentinel\n' \
+  >"$installer_variant/vendor/TASK-1009-sentinel.txt"
+python3 - "$installer_variant/install.sh" vendor <<'PY'
+import sys
+
+path, item = sys.argv[1:3]
+with open(path, encoding="utf-8") as handle:
+    source = handle.read()
+needle = "for item in "
+assert needle in source, "installer payload loop not found"
+source = source.replace(needle, "%s%s " % (needle, item), 1)
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(source)
+PY
+
+additive_home="$tmp/install-home-additive"
+install_out="$(run_installer "$installer_variant" "$additive_home")"
+rc=$?
+[[ "$rc" -eq 0 ]] || fail "(j) additive installer variant failed (rc=$rc)\n$install_out"
+engine_additive="$additive_home/versions/$ENGINE_VERSION"
+installed_payload_contract "$engine_additive" \
+  || fail "(j) additive installed payload violated the runtime payload contract"
+[[ "$(cat "$engine_additive/vendor/TASK-1009-sentinel.txt")" == \
+    "TASK-1009 harmless vendor sentinel" ]] \
+  || fail "(j) additive vendor sentinel was not preserved by the installer"
 
 repo_j="$tmp/j"
 new_repo "$repo_j"
-pin_stub_provider "$repo_j"
+pin_stub_provider "$repo_j" "$engine_installed"
 # NOT --no-test: the default path is the one that used to die at step 13.
 out="$(cd "$repo_j" && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$engine_installed" \
-  bash "$CLI" setup 2>&1)"
+  bash "$install_home/bin/singular" setup 2>&1)"
 rc=$?
 [[ "$rc" -eq 0 ]] || fail "(j1) an engine that cannot self-test must not fail a good repo (rc=$rc)\n$out"
 assert_contains "$out" "SINGULAR_TEST_SUITE_UNAVAILABLE" "(j1) the stable code is still reported"
@@ -504,7 +547,7 @@ assert_eq "$(json_field "$repo_j/.singular-state/setup/state.json" state)" "vali
 # a consumer reading only --json must be able to see why stopped-ready was not
 # reached without parsing the human stream.
 stdout_only="$(cd "$repo_j" && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$engine_installed" \
-  bash "$CLI" setup --json 2>/dev/null)"
+  bash "$install_home/bin/singular" setup --json 2>/dev/null)"
 rc=$?
 [[ "$rc" -eq 0 ]] || fail "(j1) setup --json should exit 0 (rc=$rc)"
 python3 - "$stdout_only" <<'PY' || fail "(j1) --json did not carry the suite verdict"
@@ -522,18 +565,37 @@ assert step["status"] == "skip", step
 assert "<engine checkout>" in report["nextAction"]["command"], report["nextAction"]
 PY
 
-# j2: the suite is present but the tree has no history — the auditor's fixture.
-engine_nogit="$tmp/engine-nogit"
-install_like "$engine_nogit"
-cp -Rp "$ROOT/tests" "$engine_nogit/tests"
+# j2: a negative installer variant deliberately ships tests/. The same payload
+# contract must reject it, while setup still reports the stable non-checkout
+# suite warning when this deliberately invalid runtime is exercised.
+python3 - "$installer_variant/install.sh" tests <<'PY'
+import sys
+
+path, item = sys.argv[1:3]
+with open(path, encoding="utf-8") as handle:
+    source = handle.read()
+needle = "for item in "
+assert needle in source, "installer payload loop not found"
+source = source.replace(needle, "%s%s " % (needle, item), 1)
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(source)
+PY
+unsafe_home="$tmp/install-home-with-tests"
+install_out="$(run_installer "$installer_variant" "$unsafe_home")"
+rc=$?
+[[ "$rc" -eq 0 ]] || fail "(j2) negative installer variant did not install (rc=$rc)\n$install_out"
+engine_nogit="$unsafe_home/versions/$ENGINE_VERSION"
 [[ -f "$engine_nogit/tests/run.sh" ]] || fail "(j2) fixture must ship the suite"
 [[ ! -e "$engine_nogit/.git" ]] || fail "(j2) fixture must not be a Git checkout"
+if installed_payload_contract "$engine_nogit" >/dev/null 2>&1; then
+  fail "(j2) payload contract accepted an installed engine that ships tests/"
+fi
 
 repo_j2="$tmp/j2"
 new_repo "$repo_j2"
-pin_stub_provider "$repo_j2"
+pin_stub_provider "$repo_j2" "$engine_nogit"
 out="$(cd "$repo_j2" && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$engine_nogit" \
-  bash "$CLI" setup 2>&1)"
+  bash "$unsafe_home/bin/singular" setup 2>&1)"
 rc=$?
 [[ "$rc" -eq 0 ]] || fail "(j2) a non-checkout engine must not fail a good repo (rc=$rc)\n$out"
 assert_contains "$out" "SINGULAR_TEST_SOURCE_UNSUPPORTED" "(j2) the source code is reported"
