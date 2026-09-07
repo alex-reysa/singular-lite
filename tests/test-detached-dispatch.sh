@@ -215,6 +215,83 @@ EOF
   chmod +x "$stub"
 }
 
+# Run one fixture-owned reconcile/autonomate invocation in a fresh process
+# group. The deadline is diagnostic only: marker ordering remains every test's
+# correctness assertion. If a regression waits for a controlled worker, this
+# emits the relevant fixture files and terminates only this invocation group;
+# the EXIT trap then releases or kills any recorded detached worker groups.
+run_with_watchdog() { # seconds output description command...
+  local seconds="$1" output="$2" description="$3"
+  shift 3
+  python3 - "$seconds" "$output" "$description" "$SINGULAR_STATE_DIR" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+seconds, output, description, state_dir = sys.argv[1:5]
+command = sys.argv[5:]
+with open(output, "w", encoding="utf-8") as log:
+    process = subprocess.Popen(
+        command,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        return_code = process.wait(timeout=float(seconds))
+    except subprocess.TimeoutExpired:
+        snapshot = []
+        for relative in ("fixture-workers", "dispatch", "locks"):
+            root = os.path.join(state_dir, relative)
+            if not os.path.exists(root):
+                snapshot.append("%s=<absent>" % relative)
+                continue
+            for current, directories, files in os.walk(root):
+                directories.sort()
+                files.sort()
+                rel = os.path.relpath(current, state_dir)
+                if not files and not directories:
+                    snapshot.append("%s/" % rel)
+                snapshot.extend(os.path.join(rel, name) for name in files)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=2)
+        with open(output, "a", encoding="utf-8") as diagnostic:
+            diagnostic.write(
+                "WATCHDOG_TIMEOUT: %s exceeded %ss\n" % (description, seconds)
+            )
+            diagnostic.write("fixture-state:\n")
+            for entry in snapshot:
+                diagnostic.write("  %s\n" % entry)
+        raise SystemExit(124)
+raise SystemExit(return_code)
+PY
+}
+
+run_fixture_command() { # seconds output description command...
+  local seconds="$1" output="$2" description="$3" rc=0
+  shift 3
+  run_with_watchdog "$seconds" "$output" "$description" "$@" || rc=$?
+  if [[ "$rc" -eq 124 ]]; then
+    cat "$output" >&2
+    fail "$description hit its bounded watchdog"
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    cat "$output" >&2
+    fail "$description exited $rc"
+  fi
+}
+
 actuate() {
   SINGULAR_L1_DRIVER="$1" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 \
     SINGULAR_MAX_CONCURRENT="$2" SINGULAR_MAX_DISPATCH="$2" SINGULAR_DETACHED_DISPATCH="$3" \
@@ -223,10 +300,17 @@ actuate() {
 
 actuate_to_file() { # driver max detached output
   local driver="$1" max="$2" detached="$3" output="$4"
-  SINGULAR_L1_DRIVER="$driver" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 \
-    SINGULAR_MAX_CONCURRENT="$max" SINGULAR_MAX_DISPATCH="$max" \
-    SINGULAR_DETACHED_DISPATCH="$detached" \
-    "$SCRIPT_DIR/reconcile.sh" --actuate >"$output" 2>&1 || true
+  run_fixture_command 30 "$output" "controlled reconcile --actuate" \
+    env SINGULAR_L1_DRIVER="$driver" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 \
+      SINGULAR_MAX_CONCURRENT="$max" SINGULAR_MAX_DISPATCH="$max" \
+      SINGULAR_DETACHED_DISPATCH="$detached" \
+      "$SCRIPT_DIR/reconcile.sh" --actuate
+}
+
+drain_to_file() { # output description
+  local output="$1" description="$2"
+  run_fixture_command 35 "$output" "$description" \
+    env SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain
 }
 
 field_of() {
@@ -303,17 +387,6 @@ test_detached_cycle_returns_fast_and_releases_lock() {
   assert_workers_held 2 "detached workers"
   [[ ! -f "$SINGULAR_STATE_DIR/locks/origin.lock.json" ]] || fail "origin lock still held after detached cycle"
 
-  # Negative control: the same ordering assertion must reject a worker already
-  # completed when its cycle claims to have returned detached.
-  local negative_state="$SINGULAR_ROOT/negative-control-state"
-  mkdir -p "$negative_state/fixture-workers/TASK-NEG" "$negative_state/dispatch"
-  : >"$negative_state/fixture-workers/TASK-NEG/started"
-  : >"$negative_state/fixture-workers/TASK-NEG/completed"
-  if (SINGULAR_STATE_DIR="$negative_state" SINGULAR_DISPATCH_DIR="$negative_state/dispatch" \
-      assert_workers_held 1 "synchronous negative-control worker") >/dev/null 2>&1; then
-    fail "ordering assertion accepted a synchronous/waiting negative control"
-  fi
-
   # While the stubs are explicitly held: pre-leases hold the slots and the next
   # cycle defers without duplicate dispatch.
   local out2
@@ -325,15 +398,62 @@ test_detached_cycle_returns_fast_and_releases_lock() {
   assert_workers_held 2 "detached workers after second cycle"
 
   # Explicit release lets drain observe completion and reap both.
-  local drain_out
+  local drain_file="$SINGULAR_STATE_DIR/fixture-drain.out" drain_out
   release_workers
-  drain_out="$(SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain 2>&1)" || fail "drain did not exit cleanly"
+  drain_to_file "$drain_file" "detached worker drain"
+  drain_out="$(cat "$drain_file")"
   assert_contains "$drain_out" "no launched dispatch records remain" "drain completed"
   assert_eq "2" "$(fixture_worker_count released)" "both detached workers observed fixture release"
   assert_eq "2" "$(fixture_worker_count completed)" "both detached workers completed after release"
   assert_contains "$(cat "$SINGULAR_DISPATCH_DIR/TASK-0001.json")" '"state": "reaped"' "TASK-0001 record finalized"
   assert_contains "$(cat "$SINGULAR_DISPATCH_DIR/TASK-0002.json")" '"state": "reaped"' "TASK-0002 record finalized"
   [[ -z "$(find "$SINGULAR_DISPATCH_DIR" -name '*.exit' 2>/dev/null)" ]] || fail "exit files not cleaned up after reap"
+}
+
+test_waiting_invocation_negative_control() {
+  with_fixture
+  write_task TASK-0099 ready internal/artifact/waiting.go "[]"
+  local stub="$SINGULAR_ROOT/stub.sh"
+  make_controlled_stub "$stub"
+
+  # Model the forbidden synchronous behavior without changing production: the
+  # wrapper runs a real detached reconcile, proves that call returned, and then
+  # deliberately waits for the worker. With release withheld, the fixture's
+  # invocation watchdog must reject this path within its bounded deadline.
+  local waiting="$SINGULAR_ROOT/waiting-reconcile.sh"
+  cat >"$waiting" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+"$SCRIPT_DIR/reconcile.sh" --actuate
+echo "waiting-negative-control: reconcile returned; now waiting for completion"
+while [[ ! -f "\$SINGULAR_STATE_DIR/fixture-workers/TASK-0099/completed" ]]; do
+  sleep 0.1
+done
+SH
+  chmod +x "$waiting"
+
+  local output="$SINGULAR_STATE_DIR/waiting-negative-control.out" rc=0 out
+  run_with_watchdog 15 "$output" "deliberately waiting reconcile negative control" \
+    env SINGULAR_L1_DRIVER="$stub" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 \
+      SINGULAR_MAX_CONCURRENT=1 SINGULAR_MAX_DISPATCH=1 SINGULAR_DETACHED_DISPATCH=1 \
+      "$waiting" || rc=$?
+  out="$(cat "$output")"
+  assert_eq "124" "$rc" "waiting negative control rejected by invocation watchdog"
+  assert_contains "$out" "waiting-negative-control: reconcile returned" \
+    "negative control reached its genuinely waiting tail"
+  assert_contains "$out" "WATCHDOG_TIMEOUT: deliberately waiting reconcile negative control" \
+    "negative control emitted bounded watchdog diagnosis"
+  assert_contains "$out" "fixture-workers/TASK-0099/started" \
+    "watchdog diagnosis captured worker-start state"
+  assert_workers_held 1 "waiting negative-control worker"
+  [[ ! -f "$SINGULAR_STATE_DIR/locks/origin.lock.json" ]] \
+    || fail "negative-control reconcile retained the origin lock"
+
+  local drain_file="$SINGULAR_STATE_DIR/waiting-negative-drain.out"
+  release_workers
+  drain_to_file "$drain_file" "waiting negative-control drain"
+  assert_eq "1" "$(fixture_worker_count completed)" \
+    "waiting negative-control worker completed only after release"
 }
 
 test_detached_pre_lease_blocks_scope_overlap() {
@@ -358,9 +478,9 @@ test_detached_pre_lease_blocks_scope_overlap() {
   assert_eq "1" "$(wc -l <"$SINGULAR_STATE_DIR/dispatch.log" | tr -d ' ')" "driver invoked exactly once"
   assert_workers_held 1 "overlap owner after second cycle"
 
+  local drain_file="$SINGULAR_STATE_DIR/overlap-drain.out"
   release_workers
-  SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain >/dev/null 2>&1 \
-    || fail "overlap fixture drain did not exit cleanly"
+  drain_to_file "$drain_file" "overlap fixture drain"
   assert_eq "1" "$(fixture_worker_count completed)" "overlap owner completed after release"
 }
 
@@ -466,17 +586,19 @@ test_autonomate_breaker_semantics_detached() {
 
   # Dispatch-only cycle: NOT progress (no reset) and NOT failure (no trip).
   local breaker_out="$SINGULAR_STATE_DIR/fixture-breaker.out" out
-  (cd "$SINGULAR_ROOT" && SINGULAR_L1_DRIVER="$stub" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 SINGULAR_PUSH=0 \
-    SINGULAR_MAX_CONCURRENT=1 SINGULAR_MAX_DISPATCH=1 SINGULAR_DETACHED_DISPATCH=1 \
-    "$SCRIPT_DIR/autonomate.sh" --once >"$breaker_out" 2>&1) || true
+  (cd "$SINGULAR_ROOT" && run_fixture_command 30 "$breaker_out" \
+    "controlled autonomate --once" env \
+      SINGULAR_L1_DRIVER="$stub" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 SINGULAR_PUSH=0 \
+      SINGULAR_MAX_CONCURRENT=1 SINGULAR_MAX_DISPATCH=1 SINGULAR_DETACHED_DISPATCH=1 \
+      "$SCRIPT_DIR/autonomate.sh" --once)
   out="$(cat "$breaker_out")"
   assert_contains "$out" "dispatched_this_run=1" "autonomate cycle dispatched"
   assert_workers_held 1 "breaker dispatch-only worker"
   assert_not_contains "$out" "breaker ->" "dispatch-only detached cycle must not trip the breaker"
   assert_eq "0" "$(singular_breaker_count)" "breaker untouched by dispatch-only cycle"
+  local drain_file="$SINGULAR_STATE_DIR/breaker-drain.out"
   release_workers
-  SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain >/dev/null 2>&1 \
-    || fail "breaker fixture drain did not exit cleanly"
+  drain_to_file "$drain_file" "breaker fixture drain"
   assert_eq "1" "$(fixture_worker_count completed)" "breaker worker completed after release"
 
   # Reap-failure cycle (a previously detached worker failed): trips the breaker.
@@ -510,6 +632,7 @@ test_atomic_state_writes_leave_no_tmp() {
 }
 
 test_detached_cycle_returns_fast_and_releases_lock
+test_waiting_invocation_negative_control
 test_detached_pre_lease_blocks_scope_overlap
 test_detached_reap_attributes_ok_and_failed
 test_detached_crash_detected_by_pid
