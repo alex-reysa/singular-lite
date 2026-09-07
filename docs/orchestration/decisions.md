@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-07T18:49:55Z — TASK-1004 — escalate-parked
+
+- Run: `RUN-20260907T173821Z-18674`
+- Branch: `codex/brain/TASK-1004-brain-manifest-consumer`
+- Authority: l1
+- Rationale: no product progress: attempt 2 left the exact candidate unchanged after gate-red; another implement/audit pass would evaluate identical source.
+
 ### 2026-09-07T18:39:46Z — TASK-1004 — decide:retry
 
 - Run: `RUN-20260907T173821Z-18674`
