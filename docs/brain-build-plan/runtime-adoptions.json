@@ -1,0 +1,41 @@
+{
+  "schema": "singular.operator.runtime-adoptions.v1",
+  "updatedAt": "2026-09-07T21:33:08.968282+00:00",
+  "activeAtObservation": {
+    "campaign": "BRAIN-20260907-ASTRA-SOL-R2",
+    "sourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+    "runtimePath": ".singular-state/runtime/0.21.0-brain-bootstrap"
+  },
+  "pending": [
+    {
+      "id": "MODEL-POLICY-ASTRA-FAST",
+      "status": "probe-passed-awaiting-controlled-boundary",
+      "config": ".singular-state/campaign-policy/config-astra-fast.json",
+      "relatedIssues": [
+        "DF-001",
+        "DF-012"
+      ]
+    },
+    {
+      "id": "FIRST-LIFECYCLE-ADOPTION",
+      "status": "awaiting-TASK-1013-full-integration",
+      "dependsOn": [
+        "TASK-1013"
+      ],
+      "doesNotRequire": [
+        "TASK-1014",
+        "B1",
+        "B2",
+        "B3",
+        "B4",
+        "B5"
+      ],
+      "relatedIssues": [
+        "DF-005",
+        "DF-011",
+        "DF-012"
+      ]
+    }
+  ],
+  "completed": []
+}

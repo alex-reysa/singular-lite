@@ -1,0 +1,265 @@
+{
+  "schema": "singular.operator.dogfooding-issues.v1",
+  "updatedAt": "2026-09-07T21:33:08.968282+00:00",
+  "issues": [
+    {
+      "id": "DF-001",
+      "title": "Native model selection by role",
+      "category": "product-gap",
+      "status": "native-queued",
+      "relatedTasks": [
+        "TASK-1005"
+      ],
+      "observed": "The release runner uses a global model; the original mixed-model campaign required a per-role wrapper.",
+      "nextAction": "Implement generic role selection; retain latest Astra Medium/High Fast campaign preference.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1005.md",
+          "sha256": "695d23f5deaee74a8871ab42e0353eb72fb6fc53a92d7cbf40c6498e48551a3a"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-002",
+      "title": "Effective custom configuration differs across surfaces",
+      "category": "product-gap",
+      "status": "native-queued",
+      "relatedTasks": [
+        "TASK-1006"
+      ],
+      "observed": "CLI, doctor and console do not consistently resolve custom configuration/task paths.",
+      "nextAction": "Implement shared effective selection and compare actual entrypoints.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1006.md",
+          "sha256": "7cd669929c59b9eec8efc17aca8bfe10fec541351083b088e1000840f99349d7"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-003",
+      "title": "Task scope and mandatory content parsing",
+      "category": "product-defect",
+      "status": "native-queued",
+      "relatedTasks": [
+        "TASK-1007"
+      ],
+      "observed": "Annotated backticked paths can retain prose as ownership; multiline acceptance continuations can be dropped.",
+      "nextAction": "Repair parser and complete worker/auditor obligation delivery.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1007.md",
+          "sha256": "e96113178930fafd1ba06baf760b56604babace912a189f7b22b3da73cfdc5a5"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-004",
+      "title": "Parallel planner rewrites immutable candidate",
+      "category": "product-defect",
+      "status": "native-queued",
+      "relatedTasks": [
+        "TASK-1008"
+      ],
+      "observed": "Readonly canonical candidate import failed before dispatch.",
+      "nextAction": "Publish private copies and preserve original hashes/critique binding.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1008.md",
+          "sha256": "3e98583c1a1c85383642c3870a6095a581f718a3e28c5bc8ce223174140f6b65"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-005",
+      "title": "Accepted candidate lifecycle and stale cleanup",
+      "category": "product-defect",
+      "status": "implementation-running",
+      "relatedTasks": [
+        "TASK-1013"
+      ],
+      "observed": "Same-branch reservation and status-only cleanup can overwrite/delete accepted authority; a stale wrapper can delete a newer reservation.",
+      "nextAction": "Complete identity/CAS repair, audit and fully gate it, then adopt immediately at a controlled boundary.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1013.md",
+          "sha256": "ae2dda145d9d9976049a4ca9c5dea98e64e45eb85949fb9dd3d4b11565ff24be"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/expert-adoption/drive-TASK-1013.log",
+          "sha256": "412deed0f34164e3881f6e4f3aae85bd882a5ffe8e4baae8b81fd84c030eb848"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-006",
+      "title": "Worker versus host verification classification",
+      "category": "product-gap",
+      "status": "native-queued",
+      "relatedTasks": [
+        "TASK-1014"
+      ],
+      "observed": "Shared Git registry restrictions can prevent a worker preflight while focused behavioral checks need host responsibility to remain explicit.",
+      "nextAction": "Preserve host authority and report unavailable checks honestly.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1014.md",
+          "sha256": "b049201814f6261a0aa5d86017e03bbffc4cceefbea209a8518fd2b0c84ae2ef"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-007",
+      "title": "Repeated historical reconciliation work",
+      "category": "efficiency-observation",
+      "status": "planned",
+      "relatedTasks": [
+        "TASK-1015"
+      ],
+      "observed": "Earlier campaign snapshots repeatedly revalidated historical incompatible packets; elapsed/cost benefit of an index is not yet measured.",
+      "nextAction": "Use a rebuildable index and fair sweep; measure historical validations, reads, processes and time.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1015.md",
+          "sha256": "52a7558f7b97e85128342fee3950e7876d3fe71fbc3caf41784bb685967c7a55"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-008",
+      "title": "Incomplete whole-invocation context observability",
+      "category": "observability-gap",
+      "status": "planned",
+      "relatedTasks": [
+        "TASK-1016"
+      ],
+      "observed": "Cumulative cached input does not measure instantaneous context occupancy; hidden skills/history/tool content can remain unknown.",
+      "nextAction": "Extend actual B2/B3 services with managed/observable/unknown accounting; never report unknown as zero.",
+      "evidence": [
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1016.md",
+          "sha256": "bf118acd6f15379fa3c959698d3cb821d03e420151c11872dff1ca6278e17625"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-009",
+      "title": "Brain consumer schema mirror omitted",
+      "category": "product-integration-omission",
+      "status": "native-queued",
+      "relatedTasks": [
+        "TASK-1010",
+        "TASK-1017"
+      ],
+      "observed": "The exact merged-tree consumer gate reported 209 passed and 6 failed. The canonical brain schema had no schemas/orchestration mirror.",
+      "nextAction": "Integrate standalone schema-pair repair; retain consumer candidate and require applicable current-campaign audit and full gate.",
+      "evidence": [
+        {
+          "path": ".singular-state/runs/OPERATOR-20260907T2024Z-integrate-TASK-1010-integrate-TASK-1010/gate-check.log",
+          "sha256": "f1cac3f35f0f763ea07d6d6c6c69ed8b0ae1c9604cec14718e338a7cd64cd0f9"
+        },
+        {
+          "path": ".singular-state/runs/OPERATOR-20260907T2024Z-integrate-TASK-1010/decision-integration-gate-red.json",
+          "sha256": "ab8858d59942a2366122745246ed1fbe5c6c6f325418b3f5299b8b942565187a"
+        },
+        {
+          "path": "docs/orchestration/brain-tasks/TASK-1017.md",
+          "sha256": "3b14a8abcf58d551d0dbb86e414d135269402648da3f9638a7ecd22038ebe19e"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-010",
+      "title": "Producer diagnostic assertion rejects changed capitalization",
+      "category": "diagnostic-test-compatibility",
+      "status": "needs-native-task",
+      "relatedTasks": [
+        "TASK-1011"
+      ],
+      "observed": "Producer integration reported 214 passed, 1 failed. test-config-conflict.sh requires case-sensitive \u201cRemove the legacy env override\u201d; the updated diagnostic prefixes the selected path and uses lowercase \u201cremove\u201d. The observed failure alone does not prove configuration resolution is wrong.",
+      "nextAction": "Follow native split-task decision with a bounded compatibility repair. Preserve conflict values, effective-source reporting, remediation meaning and concurrency approval wording; do not request unrelated live concurrency approval or weaken semantic assertions.",
+      "evidence": [
+        {
+          "path": ".singular-state/runs/MODEL-TRANSITION-DRAIN-TASK-1011-20260907-integrate-TASK-1011/gate-check.log",
+          "sha256": "71a1d1211e7875715a5d5a2b2d2de0a2a363a53d7cfc83c841b6e7c65dce84b5"
+        },
+        {
+          "path": ".singular-state/runs/MODEL-TRANSITION-DRAIN-TASK-1011-20260907/decision-integration-gate-red.json",
+          "sha256": "5e2175c87b056a6290af135ac8311bf3d55a9d2bdf62f133da245f1adbc4c900"
+        },
+        {
+          "path": "tests/test-config-conflict.sh",
+          "sha256": "55913720f56a2b0eb386ee62940be71f40b3ce85e64f41ed3b4db0096c1b02ba"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-011",
+      "title": "Long lifecycle invocation timed out and restarted fresh",
+      "category": "efficiency-observation",
+      "status": "investigate-after-checkpoint",
+      "relatedTasks": [
+        "TASK-1013"
+      ],
+      "observed": "The first lifecycle invocation exited 124 as timed-out. The runner default is 2400 seconds; one fresh worker infrastructure retry began, while product retryCount stayed 0. The timeout result has usage=null. Working files were preserved; repeated inspection/test work is visible, but duplicated tokens or dollars are unmeasured.",
+      "nextAction": "Inspect actual slow tests and retained changes at the next checkpoint. Consider bounded task scope, checkpoint-aware continuation and timeout classification; do not simply raise limits or claim missing usage is zero.",
+      "evidence": [
+        {
+          "path": ".singular-state/runs/RUN-20260907T202230Z-53859/implementer-attempt-1-try-0-runner-result.json",
+          "sha256": "4f0a055b987e131baf4a4d3aab734b8b88a6639e7cd9c7330cc5ce5ae55d375f"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/expert-adoption/drive-TASK-1013.log",
+          "sha256": "412deed0f34164e3881f6e4f3aae85bd882a5ffe8e4baae8b81fd84c030eb848"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-012",
+      "title": "Runtime/model adoption can wait behind long retries",
+      "category": "operational-efficiency",
+      "status": "checkpoint-pending",
+      "relatedTasks": [
+        "TASK-1013",
+        "TASK-1014"
+      ],
+      "observed": "The Astra Medium/Fast profile passed its real probe, but the active R2 run still uses Sol High while draining. Waiting for entire tasks or the whole stabilization tranche can defer benefits.",
+      "nextAction": "Use the earliest validated drained/fenced boundary, preserve candidates and identities, and prevent new old-policy work. Adopt each material integrated runtime improvement without waiting for all brain stages or TASK-1014 if TASK-1013 is ready.",
+      "evidence": [
+        {
+          "path": "docs/brain-build-plan/model-policy.md",
+          "sha256": "5d5178d002ba741dd2d87e5927b968b8b6ed42768b0200a0d4d0ef9e6cde29cf"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/astra-fast-transition/configuration-verification.json",
+          "sha256": "55bfbaafa3fd2e86ce2c0a78cfd296bf5c83dbd1a10a74421bac5db1058270d8"
+        }
+      ],
+      "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    }
+  ],
+  "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
+}

@@ -110,7 +110,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-07T21:08:50.562258+00:00",
+  "lastObservedAt": "2026-09-07T21:33:08.968282+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "ready",
@@ -145,5 +145,28 @@
     ],
     "unintegratedPriorAcceptance": "requires-current-campaign-reaudit-and-full-exact-tree-gate",
     "operatorStop": "written-2026-09-07-for-model-policy-transition"
+  },
+  "continuousDogfooding": {
+    "policy": "docs/brain-build-plan/continuous-dogfooding.md",
+    "issues": "docs/brain-build-plan/dogfooding-issues.json",
+    "adoptions": "docs/brain-build-plan/runtime-adoptions.json",
+    "trigger": "Each material freshly audited and fully integrated runtime improvement",
+    "nextFirstCodeAdoptionDependency": [
+      "TASK-1013"
+    ],
+    "laterVerificationAdoptionDependency": [
+      "TASK-1014"
+    ],
+    "producerIntegrationFailure": {
+      "passed": 214,
+      "failed": 1,
+      "issueId": "DF-010",
+      "nativeDecision": "split-task"
+    },
+    "lifecycleInfrastructureRetry": {
+      "issueId": "DF-011",
+      "firstExitCode": 124,
+      "productRetryCount": 0
+    }
   }
 }
