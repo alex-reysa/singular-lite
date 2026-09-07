@@ -2,7 +2,7 @@
 
 Status: ready
 Area: brain
-Node: <assigned DAG node>
+DAG node: <assigned DAG node>
 Target branch: `codex/brain-integration`
 Worker branch: `codex/brain/TASK-XXXX-<slug>`
 Test policy: `strict_test_first`

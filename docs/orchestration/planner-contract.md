@@ -43,3 +43,10 @@ the rendered Objective and complete single-line Acceptance Criteria, not only
 in extra sections. The context integration must later carry an immutable full
 task snapshot itself. Integration runs the full default suite for every task,
 so favor cohesive vertical tasks rather than tiny mechanical splits.
+
+Owned files and Forbidden files path entries must each contain only one bare
+backticked path on the line. Put explanations in Objective, never after a path: 
+0.21.0's parser treats trailing prose as part of the filename. Use the exact
+`DAG node:` header. The campaign uses the default single-node generator because
+the opt-in parallel importer cannot rewrite its immutable candidate snapshots.
+Final code audits and exact-tree integration gates remain required.

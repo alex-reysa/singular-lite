@@ -145,3 +145,11 @@ provider/sandbox limits, product defects, and test flakiness separately. The
 console and doctor in 0.21.0 do not consistently resolve custom task/config
 paths; use the runtime's configured paths and actual session/runner sidecars
 for this campaign. Do not claim the new memory layer caused baseline changes.
+
+The replacement campaign uses 0.21.0's default single-node planning path with
+Astra High. Its optional parallel planner path failed to import a read-only
+canonical candidate because the importer rewrites IDs in place. The initial B1
+plan received Sol High critiques; ongoing serial generation uses Astra's plan
+and the normal Sol High implementation/final/paired-audit pipeline. The
+original candidate and critique remain retained. The operator only normalized
+owned-path formatting before publishing that first reviewed task.
