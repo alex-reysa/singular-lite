@@ -3,6 +3,10 @@ set -euo pipefail
 # Consumer runner extension for the brain campaign. The upstream 0.21.0 runner
 # owns isolation, session identity, output capture, and audit/result contracts.
 # This wrapper only supplies its existing global model setting per invocation.
+# Advertise the v1 contract for the host's safe capability discovery.
+if [[ "${1:-}" == "--describe-contract" ]]; then
+  exec "${SINGULAR_BASH_BIN:-bash}" "${SINGULAR_ENGINE_HOME:?}/engine/codex-run.sh" "$@"
+fi
 role="${SINGULAR_RUNNER_ROLE:-unknown}"
 level=l2
 prompt=""
