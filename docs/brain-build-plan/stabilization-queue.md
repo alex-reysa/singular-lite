@@ -51,3 +51,7 @@ The latest user request supersedes older Sol High preferences above. See [model-
 ## Standing adoption instruction — latest user update
 
 [continuous-dogfooding.md](continuous-dogfooding.md) supersedes the earlier fixed two-task adoption batch: adopt material validated engine improvements at the earliest controlled boundary. A fully audited and integrated TASK-1013 can be adopted before TASK-1014; repeat adoption after TASK-1014 and other material runtime changes. Preserve all canary, identity and full-gate requirements. Track new findings in dogfooding-issues.json and actual replacement/observation evidence in runtime-adoptions.json. The producer now has a 214/215 full-gate failure recorded as DF-010; the lifecycle timeout/fresh retry and adoption delay are DF-011/DF-012. These are not completed fixes.
+
+## Latest model and speed correction
+
+The user superseded the pending Medium/Fast profile: use GPT-6 Astra Light (low reasoning effort) for implementation, critics and final/paired audits; retain Astra High for planning/difficult decisions; use normal speed for all roles. MODEL-POLICY-ASTRA-LIGHT and .singular-state/campaign-policy/config-astra-light.json replace the earlier Fast checkpoint. The old Medium/Fast probe is historical, not validation of the new profile. Perform the normal controlled replacement and required canary; do not activate the superseded Fast profile. This does not change the ongoing brain work or continuous adoption requirements.

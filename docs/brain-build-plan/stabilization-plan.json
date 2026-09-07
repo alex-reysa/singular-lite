@@ -110,7 +110,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-07T21:33:08.968282+00:00",
+  "lastObservedAt": "2026-09-07T21:37:55.606294+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "ready",
@@ -128,23 +128,25 @@
   },
   "requestedModels": {
     "allRolesModel": "gpt-6-astra",
-    "implementationCriticAuditorEffort": "medium",
+    "implementationCriticAuditorEffort": "low",
+    "userLabel": "Astra Light",
     "plannerDeciderSupervisorEffort": "high",
-    "serviceTier": "fast"
+    "serviceTier": "normal"
   },
   "modelPolicyTransition": {
-    "id": "MODEL-POLICY-ASTRA-FAST",
-    "status": "provider-probe-passed-waiting-for-inflight-drain",
-    "config": ".singular-state/campaign-policy/config-astra-fast.json",
+    "id": "MODEL-POLICY-ASTRA-LIGHT",
+    "status": "local-settings-validated-waiting-for-controlled-boundary-and-canary",
+    "config": ".singular-state/campaign-policy/config-astra-light.json",
     "sourceRuntimeCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
-    "evidenceDirectory": ".singular-state/campaign-evidence/astra-fast-transition",
+    "evidenceDirectory": ".singular-state/campaign-evidence/astra-light-transition",
     "priority": "before-new-implementation-and-before-TASK-1014",
     "preserveInFlight": [
       "TASK-1011",
       "TASK-1013"
     ],
     "unintegratedPriorAcceptance": "requires-current-campaign-reaudit-and-full-exact-tree-gate",
-    "operatorStop": "written-2026-09-07-for-model-policy-transition"
+    "operatorStop": "written-2026-09-07-for-model-policy-transition",
+    "supersedes": "MODEL-POLICY-ASTRA-FAST"
   },
   "continuousDogfooding": {
     "policy": "docs/brain-build-plan/continuous-dogfooding.md",

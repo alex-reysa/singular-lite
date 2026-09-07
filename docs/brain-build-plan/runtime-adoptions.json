@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.runtime-adoptions.v1",
-  "updatedAt": "2026-09-07T21:33:08.968282+00:00",
+  "updatedAt": "2026-09-07T21:37:55.606294+00:00",
   "activeAtObservation": {
     "campaign": "BRAIN-20260907-ASTRA-SOL-R2",
     "sourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
@@ -8,13 +8,14 @@
   },
   "pending": [
     {
-      "id": "MODEL-POLICY-ASTRA-FAST",
-      "status": "probe-passed-awaiting-controlled-boundary",
-      "config": ".singular-state/campaign-policy/config-astra-fast.json",
+      "id": "MODEL-POLICY-ASTRA-LIGHT",
+      "status": "local-settings-validated-awaiting-boundary-and-canary",
+      "config": ".singular-state/campaign-policy/config-astra-light.json",
       "relatedIssues": [
         "DF-001",
         "DF-012"
-      ]
+      ],
+      "supersedes": "MODEL-POLICY-ASTRA-FAST"
     },
     {
       "id": "FIRST-LIFECYCLE-ADOPTION",
