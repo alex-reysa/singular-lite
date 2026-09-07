@@ -1,0 +1,59 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1011",
+  "runId": "RUN-20260907T195540Z-41868",
+  "branch": "codex/brain/TASK-1011-recover-pinned-brain-producer",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json: head 2e5bd4f67c8a2084cff221cac2052e661a9b1fd1, passed gate/scope/secret checks, zero unexpected failures, and hashes for 34 committed files",
+    "audit-verification.json: evidence-only host verification bound to head 2e5bd4f67c8a2084cff221cac2052e661a9b1fd1 with sourceIntegrity.status=verified and outcome=not-rerun-evidence-verified",
+    "Compact red/green evidence: the retained red log includes the prior custom-configuration assertion failure (KeyError: config), while green.log records brain-package tests passed",
+    "Compact gate-check.log excerpt: all seven scoped host tests passed, including test-brain-package.sh, TASK-1009 setup, and detached-dispatch coverage",
+    "Compact direct-regression.log, vendor-audit.log, and source-audit.log: focused regressions passed; vendored hashes/snapshot comparison/provenance passed; shell, Python, and Node syntax checks passed",
+    "Committed re-audit delta 5a2880c39dc0c1ed5ca602c9541e94d2b2606332..2e5bd4f67c8a2084cff221cac2052e661a9b1fd1 in engine/doctor.py and tests/test-brain-package.sh",
+    "TASK-1011 acceptance criteria from codex/brain-integration:docs/orchestration/brain-tasks/TASK-1011.md",
+    "Scope diff 3a47a736b58d18d2da2b3dc9638cb07569c63719..HEAD and clean worktree status",
+    "Target drift inspection: codex/brain-integration is five commits ahead from the common base, but those commits modify only planning/orchestration documentation and do not overlap TASK-1011 owned files",
+    "Exact-head hash comparison: all 34 manifest-declared file hashes matched the worktree",
+    "audit-verdict.v1 schema",
+    "packet.json and reaudit-diff-attempt-2.patch declarations and SHA-256 bindings in the compact manifest; bounded raw retrieval was unavailable because evidence-show.sh could not create its required /tmp lock under the read-only audit sandbox",
+    "campaign-binding:campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08",
+    "reviewed-head-sha:2e5bd4f67c8a2084cff221cac2052e661a9b1fd1"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "/opt/homebrew/bin/bash -c SINGULAR_TEST_JOBS=4 bash tests/run.sh test-brain-package.sh test-campaign-freeze.sh test-doctor-json.sh test-doctor-blocking.sh test-config-loader.sh test-setup.sh test-detached-dispatch.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-report.json",
+        "gate-check.log",
+        "evidence-manifest.json#headSha=2e5bd4f67c8a2084cff221cac2052e661a9b1fd1"
+      ],
+      "rationale": "The host classified this exact-head gate as not-rerun-evidence-verified, with a hash-bound exit code 0, seven passing tests, no failure or infrastructure signals, and verified source integrity. Per the authoritative binding, the audit does not report this as passed or rerun."
+    }
+  ],
+  "commandsRun": [
+    "Read the source-command-sc-analyze SKILL.md",
+    "jq evidence-manifest.json and audit-verification.json; inspect git status, HEAD, and recent history",
+    "Attempt bounded evidence-show.sh retrieval for packet.json and reaudit-diff-attempt-2.patch; command failed because the read-only sandbox denied creation of /tmp/singular-evidence-retrieval-v0/*.lock",
+    "git diff --name-status and --check for 3a47a736..HEAD; inspect the re-audit diff stat and audit-verdict schema",
+    "git diff --unified=80 5a2880c39dc0c1ed5ca602c9541e94d2b2606332..2e5bd4f67c8a2084cff221cac2052e661a9b1fd1 -- engine/doctor.py tests/test-brain-package.sh",
+    "Inspect Doctor configuration selection, loader binding, execution order, and the added custom/default conflict assertions",
+    "Compare every manifest-declared file SHA-256 with the exact-head worktree",
+    "Inspect TASK-1011 from the target branch and compare target-branch drift and changed-path overlap",
+    "git range-diff the retained TASK-1003 candidate against the recovered TASK-1011 commit",
+    "Inspect manifest lifecycle, installation, doctor failure, fingerprint, CLI-help, and hermeticity coverage in tests/test-brain-package.sh",
+    "Inspect singular_json_config_to_env and selected-loader behavior in engine/lib.sh without modifying it"
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "rationale": "All four re-audit targets are resolved. Doctor.config_source_conflict() now uses self.config_path, binds that path through SINGULAR_JSON_CONFIG_FILE while sourcing the real loader, and includes the selected path in pass/warn/skip details, messages, and remediation. The conflicting fixtures deliberately give the default configuration values 2/7 and the custom configuration values 4/9; the test asserts the custom path and 4/9 values, preventing regression to the default file. The package test also introduces invalid routing metadata, requires public manifest lint to return exit 1, checks the diagnostic, and proves that the JSON manifest, Markdown catalog, and freshness sidecar remain unchanged. The exact committed head matches all manifest file hashes, modifies only owned paths, leaves forbidden paths untouched, preserves TASK-1009 boundary tests, and has no overlapping target-branch drift. Red/green, provenance, snapshot, syntax, scope, secret-scan, installation, lifecycle, doctor, fingerprint, and host-gate evidence support acceptance. The evidence helper's /tmp lock failure is an audit-sandbox limitation and is not treated as a product finding.",
+  "findingsStatus": {
+    "f-0f3a2d059407": "resolved",
+    "f-77138558caeb": "resolved",
+    "f-88c67179fc31": "resolved",
+    "f-cf38e9e290a9": "resolved"
+  }
+}

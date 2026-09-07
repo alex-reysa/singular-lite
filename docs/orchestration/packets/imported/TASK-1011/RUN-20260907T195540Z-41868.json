@@ -1,0 +1,234 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PACKET-RUN-20260907T195540Z-41868-TASK-1011-ATTEMPT-2",
+  "runId": "RUN-20260907T195540Z-41868",
+  "taskId": "TASK-1011",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "3a47a736b58d18d2da2b3dc9638cb07569c63719",
+  "branch": "codex/brain/TASK-1011-recover-pinned-brain-producer",
+  "headSha": "2e5bd4f67c8a2084cff221cac2052e661a9b1fd1",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1011",
+  "ownedFiles": [
+    "vendor/singular-brain/",
+    "tests/fixtures/singular-brain/knowledge-scope/",
+    "engine/brain_manifest.py",
+    "cli/singular",
+    "install.sh",
+    "engine/doctor.py",
+    "engine/campaign_manifest.py",
+    "tests/test-brain-package.sh"
+  ],
+  "changedFiles": [
+    "cli/singular",
+    "engine/brain_manifest.py",
+    "engine/campaign_manifest.py",
+    "engine/doctor.py",
+    "install.sh",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/.knowledge-freshness.json",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/KNOWLEDGE.json",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/KNOWLEDGE.md",
+    "tests/fixtures/singular-brain/knowledge-scope/handoffs/generated-summary.md",
+    "tests/fixtures/singular-brain/knowledge-scope/handoffs/session-2026-07-05.md",
+    "tests/fixtures/singular-brain/knowledge-scope/notes/decision-log.md",
+    "tests/fixtures/singular-brain/knowledge-scope/singular-brain.config.json",
+    "tests/fixtures/singular-brain/knowledge-scope/skills/example-skill/SKILL.md",
+    "tests/test-brain-package.sh",
+    "vendor/singular-brain/CHANGELOG.md",
+    "vendor/singular-brain/PROVENANCE.json",
+    "vendor/singular-brain/README.md",
+    "vendor/singular-brain/SCHEMA_VERSION",
+    "vendor/singular-brain/SHA256SUMS",
+    "vendor/singular-brain/VERSION",
+    "vendor/singular-brain/docs/AUDIT-BRIEF.md",
+    "vendor/singular-brain/docs/spec.md",
+    "vendor/singular-brain/engine/adapters/claude-skill.mjs",
+    "vendor/singular-brain/engine/adapters/markdown-doc.mjs",
+    "vendor/singular-brain/engine/cli.mjs",
+    "vendor/singular-brain/engine/config.mjs",
+    "vendor/singular-brain/engine/freshness.mjs",
+    "vendor/singular-brain/engine/frontmatter.mjs",
+    "vendor/singular-brain/engine/gates.mjs",
+    "vendor/singular-brain/engine/hash.mjs",
+    "vendor/singular-brain/engine/pipeline.mjs",
+    "vendor/singular-brain/engine/render/json.mjs",
+    "vendor/singular-brain/engine/render/markdown.mjs",
+    "vendor/singular-brain/engine/walk.mjs"
+  ],
+  "commands": [
+    {
+      "cmd": "bash tests/test-brain-package.sh >>.singular-evidence/red.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Test-first characterization preserved the original public-CLI baseline red and demonstrated that config.source-conflict lacked selected-custom-config details; the new lint exit-1 characterization completed before that failure."
+    },
+    {
+      "cmd": "bash tests/test-brain-package.sh >.singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Focused green proves lint exit 1 is preserved without generated-state mutation and doctor conflict diagnostics use and identify the selected custom JSON configuration."
+    },
+    {
+      "cmd": "SINGULAR_TEST_JOBS=4 bash tests/run.sh test-brain-package.sh test-campaign-freeze.sh test-doctor-json.sh test-doctor-blocking.sh test-config-loader.sh test-setup.sh test-detached-dispatch.sh >.singular-evidence/regression.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "The required host wrapper stopped at SINGULAR_TEST_SOURCE_UNSUPPORTED before test-body execution because this worker checkout cannot create disposable worktrees."
+    },
+    {
+      "cmd": "( env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-brain-package.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-campaign-freeze.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-doctor-json.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-doctor-blocking.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-config-loader.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-setup.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-detached-dispatch.sh ) >.singular-evidence/direct-regression.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/direct-regression.log",
+      "rationale": "Hermetic direct fallback passed all seven requested scripts, including the unchanged TASK-1009 setup and detached-dispatch boundaries."
+    },
+    {
+      "cmd": "SINGULAR_BRAIN_SNAPSHOT=/Users/alejandro/Desktop/999.\\ PROJECTS/singular-lite-brain-integration/.singular-state/upstream/singular-brain-0.2.0; ( cd vendor/singular-brain && shasum -a 256 -c SHA256SUMS && diff -qr engine \"$SINGULAR_BRAIN_SNAPSHOT/engine\" && diff -qr docs \"$SINGULAR_BRAIN_SNAPSHOT/docs\" && cmp CHANGELOG.md \"$SINGULAR_BRAIN_SNAPSHOT/CHANGELOG.md\" && cmp README.md \"$SINGULAR_BRAIN_SNAPSHOT/README.md\" && cmp VERSION \"$SINGULAR_BRAIN_SNAPSHOT/VERSION\" && cmp SCHEMA_VERSION \"$SINGULAR_BRAIN_SNAPSHOT/SCHEMA_VERSION\" && python3 -c 'import json; p=json.load(open(\"PROVENANCE.json\")); assert p[\"sourceRevision\"]==\"e05f259be5cabda2bb8caa241f23cc1f48e9f059\" and p[\"license\"] is None and \"no LICENSE\" in p[\"licenseNote\"]' ) >.singular-evidence/vendor-audit.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/vendor-audit.log",
+      "rationale": "Fresh audit verifies the inventory, exact upstream engine/docs bytes, pinned versions and revision, and accurate absent-license provenance."
+    },
+    {
+      "cmd": "( bash -n cli/singular install.sh tests/test-brain-package.sh && python3 -c 'import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(encoding=\"utf-8\"), filename=p) for p in (\"engine/brain_manifest.py\",\"engine/doctor.py\",\"engine/campaign_manifest.py\")]' && find vendor/singular-brain/engine -type f -name '*.mjs' -exec node --check {} \\; && echo 'source syntax audit passed' ) >.singular-evidence/source-audit.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/source-audit.log",
+      "rationale": "Shell, Python, and vendored JavaScript syntax checks passed."
+    }
+  ],
+  "tests": [
+    {
+      "name": "test-brain-package.sh",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "test-brain-package.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "scoped-host-gate",
+      "phase": "regression",
+      "status": "worker-preflight-failed",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "name": "test-brain-package.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-campaign-freeze.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-doctor-json.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-doctor-blocking.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-config-loader.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-setup.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-detached-dispatch.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "vendored-upstream-integrity",
+      "phase": "audit",
+      "status": "passed",
+      "logRef": ".singular-evidence/vendor-audit.log"
+    },
+    {
+      "name": "owned-source-syntax",
+      "phase": "audit",
+      "status": "passed",
+      "logRef": ".singular-evidence/source-audit.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "test-first-red",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "focused-green",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "worker-source-preflight",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "direct-seven-script-regression",
+      "ref": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "kind": "upstream-byte-integrity",
+      "ref": ".singular-evidence/vendor-audit.log"
+    },
+    {
+      "kind": "source-syntax-audit",
+      "ref": ".singular-evidence/source-audit.log"
+    },
+    {
+      "kind": "upstream-hash-inventory",
+      "ref": "vendor/singular-brain/SHA256SUMS"
+    },
+    {
+      "kind": "upstream-provenance",
+      "ref": "vendor/singular-brain/PROVENANCE.json"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260907T195540Z-41868/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260907T195540Z-41868/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260907T195540Z-41868/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260907T195540Z-41868/evidence-manifest.json"
+    }
+  ],
+  "blockers": [
+    {
+      "code": "SINGULAR_TEST_SOURCE_UNSUPPORTED",
+      "kind": "worker-source-preflight",
+      "message": "The required tests/run.sh host gate cannot create disposable worktrees from this worker checkout and stopped before test-body execution. All seven requested scripts passed through the hermetic direct fallback; a clean-source host rerun remains required."
+    }
+  ],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-07T20:52:39Z"
+}

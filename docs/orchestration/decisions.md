@@ -2,6 +2,27 @@
 
 ## Decision Log
 
+### 2026-09-07T21:04:01Z — TASK-1011 — accept
+
+- Run: `RUN-20260907T195540Z-41868`
+- Branch: `codex/brain/TASK-1011-recover-pinned-brain-producer`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
+### 2026-09-07T20:40:16Z — TASK-1011 — decide:retry
+
+- Run: `RUN-20260907T195540Z-41868`
+- Branch: `codex/brain/TASK-1011-recover-pinned-brain-producer`
+- Authority: policy
+- Rationale: fast-path: audit-needs-fix -> retry
+
+### 2026-09-07T20:37:24Z — TASK-1010 — decide:split-task
+
+- Run: `OPERATOR-20260907T2024Z-integrate-TASK-1010`
+- Branch: `codex/brain/TASK-1010-recover-brain-ingestion`
+- Authority: decider
+- Rationale: integration-gate-red -> split-task: The retry budget is exhausted, and the gate identifies a concrete missing consumer schema mirror, brain-documents.v1.schema.json. Split out a bounded schema-bundle repair task, then require successful integration verification before promoting TASK-1010.
+
 ### 2026-09-07T20:02:35Z — TASK-1010 — accept
 
 - Run: `RUN-20260907T185331Z-83024`
