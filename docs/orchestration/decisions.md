@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-07T20:02:35Z — TASK-1010 — accept
+
+- Run: `RUN-20260907T185331Z-83024`
+- Branch: `codex/brain/TASK-1010-recover-brain-ingestion`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
 ### 2026-09-07T19:52:45Z — TASK-1009 — integrate
 
 - Run: `ORIGIN-20260907T193843Z-75782`
