@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-07T19:16:51Z — TASK-1009 — decide:retry
+
+- Run: `RUN-20260907T184110Z-98004`
+- Branch: `codex/brain/TASK-1009-integration-regression-fixtures`
+- Authority: policy
+- Rationale: fast-path: audit-needs-fix -> retry
+
 ### 2026-09-07T18:49:55Z — TASK-1004 — escalate-parked
 
 - Run: `RUN-20260907T173821Z-18674`
