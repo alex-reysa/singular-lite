@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-07T18:39:46Z — TASK-1004 — decide:retry
+
+- Run: `RUN-20260907T173821Z-18674`
+- Branch: `codex/brain/TASK-1004-brain-manifest-consumer`
+- Authority: policy
+- Rationale: fast-path: gate-red -> retry
+
 ### 2026-09-07T18:37:05Z — TASK-1003 — decide:retry
 
 - Run: `ORIGIN-20260907T181924Z-60581`
