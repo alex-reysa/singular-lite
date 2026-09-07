@@ -77,10 +77,31 @@ consumer_state="$consumer/state"
 consumer_worktrees="$consumer/worktrees"
 consumer_config_reads="$consumer/config-reads.log"
 hostile_gate="$consumer/hostile-gate.sh"
-mkdir -p "$consumer_tasks" "$consumer_state" "$consumer_worktrees"
+bash_pin_calls="$consumer/bash-pin-calls.log"
+bash_fallbacks="$consumer/bash-fallbacks.log"
+lifecycle_path="$consumer/lifecycle-path"
+pinned_bash="$consumer/pinned-bash"
+real_bash="$(command -v bash)"
+mkdir -p "$consumer_tasks" "$consumer_state" "$consumer_worktrees" "$lifecycle_path"
 printf 'host task sentinel\n' >"$consumer_tasks/HOST-TASK.md"
 printf 'host state sentinel\n' >"$consumer_state/sentinel"
 printf 'host worktree sentinel\n' >"$consumer_worktrees/sentinel"
+cat >"$pinned_bash" <<'SH'
+#!/bin/sh
+printf 'pin|%s|bootstrapped=%s\n' "$*" "${SINGULAR_BASH_BOOTSTRAPPED:-unset}" >>"${CANARY_BASH_PIN_CALLS:?}"
+exec "${CANARY_REAL_BASH:?}" "$@"
+SH
+chmod +x "$pinned_bash"
+cat >"$lifecycle_path/bash" <<'SH'
+#!/bin/sh
+if [ -n "${SINGULAR_BASH_BIN:-}" ] && [ -x "$SINGULAR_BASH_BIN" ]; then
+  exec "$SINGULAR_BASH_BIN" "$@"
+fi
+printf 'unpinned|%s\n' "$*" >>"${CANARY_BASH_FALLBACKS:?}"
+echo "fixture lifecycle lost the configured Bash selection" >&2
+exit 91
+SH
+chmod +x "$lifecycle_path/bash"
 cat >"$hostile_gate" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -119,6 +140,11 @@ if ! live_out="$(
     CANARY_PROVIDER_CALLS="$provider_calls" \
     CANARY_CONFIG_READS="$consumer_config_reads" \
     CANARY_HOST_MUTATION="$consumer/host-mutated" \
+    CANARY_BASH_PIN_CALLS="$bash_pin_calls" \
+    CANARY_BASH_FALLBACKS="$bash_fallbacks" \
+    CANARY_REAL_BASH="$real_bash" \
+    PATH="$lifecycle_path:$PATH" \
+    SINGULAR_BASH_BIN="$pinned_bash" \
     SINGULAR_JSON_CONFIG_FILE="$consumer/singular.config.json" \
     SINGULAR_CAMPAIGN_PROBE_CAPABILITY_PROFILE="consumer-production-policy" \
     SINGULAR_ENGINE_HOME="$ROOT" \
@@ -153,6 +179,29 @@ PY
 if grep -q '/lifecycle-repo$' "$consumer_config_reads"; then
   echo "fixture lifecycle reread consumer external config" >&2
   cat "$consumer_config_reads" >&2
+  exit 1
+fi
+[[ ! -s "$bash_fallbacks" ]] || {
+  echo "fixture lifecycle fell back from the configured Bash selection" >&2
+  cat "$bash_fallbacks" >&2
+  exit 1
+}
+for expected_bash_call in \
+  'l1-drive.sh TASK-9999' \
+  'fixture-v1-runner.sh --role implementer' \
+  'fixture-v1-runner.sh --role auditor' \
+  'pin|-c true|bootstrapped=unset' \
+  'import-packet.sh ' \
+  'integrate.sh --task TASK-9999'; do
+  grep -F -- "$expected_bash_call" "$bash_pin_calls" >/dev/null || {
+    echo "configured Bash did not cover fixture lifecycle stage: $expected_bash_call" >&2
+    cat "$bash_pin_calls" >&2
+    exit 1
+  }
+done
+if grep -q 'bootstrapped=1' "$bash_pin_calls"; then
+  echo "fixture lifecycle inherited SINGULAR_BASH_BOOTSTRAPPED" >&2
+  cat "$bash_pin_calls" >&2
   exit 1
 fi
 

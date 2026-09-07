@@ -25,6 +25,7 @@ worktree="$tmp/bootstrap-worktree"
 fixture_repo="$tmp/lifecycle-repo"
 fixture_runner="$tmp/fixture-v1-runner.sh"
 source_target_sha=""
+validated_bash_bin=""
 lifecycle_audit_verification="not-run"
 provider_probe_state="not-run"
 provider_probe_invoked="no"
@@ -94,7 +95,9 @@ EOF
 
 check_bash() {
   local bash_bin; bash_bin="$(singular_bash_bin)"
-  [[ "$bash_bin" == /* && -x "$bash_bin" ]] && "$bash_bin" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]'
+  [[ "$bash_bin" == /* && -x "$bash_bin" ]] || return 1
+  "$bash_bin" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' || return 1
+  validated_bash_bin="$bash_bin"
 }
 check_target_branch() {
   source_target_sha="$(git -C "$SINGULAR_ROOT" rev-parse --verify "$SINGULAR_TARGET_BRANCH" 2>/dev/null)"
@@ -240,6 +243,7 @@ EOF
 check_fixture_lifecycle() {
   local lifecycle_env=(
     SINGULAR_ROOT="$fixture_repo" SINGULAR_ENGINE_HOME="$SCRIPT_DIR/.."
+    SINGULAR_BASH_BIN="$validated_bash_bin"
     SINGULAR_JSON_CONFIG_FILE="$fixture_repo/singular.config.json"
     SINGULAR_CONFIG_FILE=/dev/null SINGULAR_LOCAL_CONFIG_FILE=/dev/null
     SINGULAR_ORCH_DIR="$fixture_repo/docs/orchestration"
