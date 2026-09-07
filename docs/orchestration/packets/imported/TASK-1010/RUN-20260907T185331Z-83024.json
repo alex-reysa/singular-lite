@@ -1,0 +1,141 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "TASK-1010-attempt-2-20260907T195249Z",
+  "runId": "RUN-20260907T185331Z-83024",
+  "taskId": "TASK-1010",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "71d51ff1018e1d46614688a5eea385d09dc9d581",
+  "branch": "codex/brain/TASK-1010-recover-brain-ingestion",
+  "headSha": "afa542ff71425788ed148d5b09b430e1b8810108",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1010",
+  "ownedFiles": [
+    "engine/brain_documents.py",
+    "engine/ctx-rehydrate-authored-config.sh",
+    "engine/ctx-rehydrate-event.sh",
+    "engine/l1-drive.sh",
+    "schemas/brain-documents.v1.schema.json",
+    "tests/test-brain-manifest-consumer.sh",
+    "tests/fixtures/brain-manifest-consumer/",
+    "README.md"
+  ],
+  "changedFiles": [
+    "README.md",
+    "engine/brain_documents.py",
+    "engine/ctx-rehydrate-authored-config.sh",
+    "engine/ctx-rehydrate-event.sh",
+    "engine/l1-drive.sh",
+    "schemas/brain-documents.v1.schema.json",
+    "tests/fixtures/brain-manifest-consumer/CAPTURE-PROVENANCE.json",
+    "tests/fixtures/brain-manifest-consumer/corpus/handoffs/generated-summary.md",
+    "tests/fixtures/brain-manifest-consumer/corpus/handoffs/session-2026-07-05.md",
+    "tests/fixtures/brain-manifest-consumer/corpus/notes/decision-log.md",
+    "tests/fixtures/brain-manifest-consumer/corpus/skills/example-skill/SKILL.md",
+    "tests/fixtures/brain-manifest-consumer/expected/.knowledge-freshness.json",
+    "tests/fixtures/brain-manifest-consumer/expected/KNOWLEDGE.json",
+    "tests/fixtures/brain-manifest-consumer/singular-brain.config.json",
+    "tests/test-brain-manifest-consumer.sh"
+  ],
+  "commands": [
+    {
+      "cmd": "bash tests/test-brain-manifest-consumer.sh >.singular-evidence/red.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Fresh test-first red: the real second worker ran, but selected brain content did not reach its prompt when durable sources were empty."
+    },
+    {
+      "cmd": "bash tests/test-brain-manifest-consumer.sh >.singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Focused green after preserving refused-resume rehydration for an enabled explicit brain descriptor."
+    },
+    {
+      "cmd": "SINGULAR_TEST_JOBS=4 bash tests/run.sh test-brain-manifest-consumer.sh test-ctx-rehydrate-authored-config.sh test-ctx-rehydrate-authored-packet.sh test-ctx-rehydrate-authored-event.sh test-ctx-rehydrate-authored-inject-drive.sh test-ctx-rehydrate-authored-node-wirein.sh >.singular-evidence/regression.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "The mandated wrapper stopped at the known worker-sandbox source preflight because disposable source worktrees cannot be created; no test body ran."
+    },
+    {
+      "cmd": "bash -c 'set -e; for test_name in test-brain-manifest-consumer.sh test-ctx-rehydrate-authored-config.sh test-ctx-rehydrate-authored-packet.sh test-ctx-rehydrate-authored-event.sh test-ctx-rehydrate-authored-inject-drive.sh test-ctx-rehydrate-authored-node-wirein.sh; do bash \"tests/$test_name\"; done' >.singular-evidence/regression-direct.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/regression-direct.log",
+      "rationale": "Direct execution of all six scoped test bodies passed under their hermetic disposable repositories and stub providers."
+    }
+  ],
+  "tests": [
+    {
+      "name": "brain-manifest-consumer-empty-durable-real-driver",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "brain-manifest-consumer-empty-durable-real-driver",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "scoped-tests-run-wrapper",
+      "phase": "regression",
+      "status": "infrastructure-limited",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "name": "scoped-six-test-direct-gate",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression-direct.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "test-first-red",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "focused-green",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "sandbox-source-preflight",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "direct-regression-green",
+      "ref": ".singular-evidence/regression-direct.log"
+    },
+    {
+      "kind": "captured-upstream-provenance",
+      "ref": "tests/fixtures/brain-manifest-consumer/CAPTURE-PROVENANCE.json"
+    },
+    {
+      "kind": "retained-task-1004-failure-reviewed",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T173821Z-18674/gate-report.json"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260907T185331Z-83024/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260907T185331Z-83024/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260907T185331Z-83024/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260907T185331Z-83024/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-07T19:52:49Z"
+}

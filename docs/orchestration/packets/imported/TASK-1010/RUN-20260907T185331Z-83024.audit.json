@@ -1,0 +1,68 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1010",
+  "runId": "RUN-20260907T185331Z-83024",
+  "branch": "codex/brain/TASK-1010-recover-brain-ingestion",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json at RUN-20260907T185331Z-83024",
+    "audit-verification.json exact-head host binding",
+    "gate-check.log and gate-report.json",
+    "worker-evidence/red.log",
+    "worker-evidence/green.log",
+    "worker-evidence/regression-direct.log",
+    "worker-evidence/fixture-root-red.log",
+    "TASK-1010 acceptance criteria from codex/brain-integration",
+    "task delta 71d51ff1018e1d46614688a5eea385d09dc9d581..afa542ff71425788ed148d5b09b430e1b8810108",
+    "re-audit delta c777384a77a97e199cdcf3ce0863ccc29435a3f8..afa542ff71425788ed148d5b09b430e1b8810108",
+    "README.md",
+    "engine/brain_documents.py",
+    "engine/ctx-rehydrate-authored-config.sh",
+    "engine/ctx-rehydrate-event.sh",
+    "engine/l1-drive.sh",
+    "schemas/brain-documents.v1.schema.json",
+    "tests/test-brain-manifest-consumer.sh",
+    "tests/fixtures/brain-manifest-consumer/",
+    "campaign-binding:campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08",
+    "reviewed-head-sha:afa542ff71425788ed148d5b09b430e1b8810108"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "/opt/homebrew/bin/bash -c SINGULAR_TEST_JOBS=4 bash tests/run.sh test-brain-manifest-consumer.sh test-ctx-rehydrate-authored-config.sh test-ctx-rehydrate-authored-packet.sh test-ctx-rehydrate-authored-event.sh test-ctx-rehydrate-authored-inject-drive.sh test-ctx-rehydrate-authored-node-wirein.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-check.log",
+        "gate-report.json",
+        "evidence-manifest.json#commands[4]"
+      ],
+      "rationale": "The authoritative host report hash-binds the worker gate evidence to exact head afa542ff71425788ed148d5b09b430e1b8810108, reports source integrity verified with no changed paths, and records 6 passed and 0 failed tests. Per the host binding, this is evidence verification rather than an auditor rerun."
+    }
+  ],
+  "commandsRun": [
+    "jq '.' evidence-manifest.json",
+    "jq '.' audit-verification.json",
+    "jq '.' schemas/orchestration/audit-verdict.v1.schema.json",
+    "git status --short --branch && git rev-parse HEAD",
+    "evidence-show.sh evidence-manifest.json reaudit-diff-attempt-2.patch 12000",
+    "git diff --name-status 71d51ff1018e1d46614688a5eea385d09dc9d581..HEAD",
+    "git diff --check 71d51ff1018e1d46614688a5eea385d09dc9d581..HEAD",
+    "git diff --unified=100 c777384a77a97e199cdcf3ce0863ccc29435a3f8..HEAD -- README.md engine/ctx-rehydrate-authored-config.sh engine/l1-drive.sh tests/test-brain-manifest-consumer.sh",
+    "bash -n engine/ctx-rehydrate-authored-config.sh engine/ctx-rehydrate-event.sh engine/l1-drive.sh tests/test-brain-manifest-consumer.sh",
+    "python3 -c static AST and JSON parsing for engine/brain_documents.py and schemas/brain-documents.v1.schema.json",
+    "SHA-256 comparison of every evidence-manifest file entry against current worktree bytes",
+    "git log --left-right --oneline codex/brain-integration...HEAD",
+    "git diff --name-only 71d51ff1018e1d46614688a5eea385d09dc9d581..codex/brain-integration",
+    "git show codex/brain-integration:docs/orchestration/brain-tasks/TASK-1010.md",
+    "Static inspection of rehydrate routing, injection, event projection, lifecycle, integrity, provenance, and acceptance tests"
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "rationale": "All prior findings are resolved. The re-audit delta modifies only four owned files, while the complete task delta from dispatch base 71d51ff1 contains only declared owned paths. The target branch has advanced, but its intervening changes do not overlap TASK-1010's owned files, so no conflicting branch drift was found. The new red evidence fails specifically because selected brain content does not reach the empty-durable real-driver prompt; the green evidence and exact-head host-bound gate then pass. The real-driver test now invokes run_driver with EMPTY_DURABLE=1, proves selected authored content reaches the second worker, verifies durable sources are empty while authored identities and live hashes match, and proves malformed and unsafe descriptors stop before the affected worker with actionable diagnostics. Static review confirms the bridge applies only to refused-resume reasons, remains behind the existing feature gates, runs a fresh tainted rehydrate session rather than resuming, and does not weaken auditor independence. Existing tests cover schema conformance, deterministic identities, lifecycle and review-state exclusions, quarantine and path containment, separate live/review hashes, reference-only provenance, legacy fail-soft behavior, section caps, and hostile environment isolation. Worktree bytes match every manifest hash, the worktree is clean, and syntax, AST, JSON, and diff-whitespace checks pass. Bounded raw-artifact retrieval again failed because the read-only audit sandbox cannot create evidence-show's /tmp lock; this is an infrastructure limitation and was not classified as a product defect.",
+  "findingsStatus": {
+    "f-297cbc022c32": "resolved",
+    "f-64b71b1b62d7": "resolved",
+    "f-6eb594104d75": "resolved"
+  }
+}
