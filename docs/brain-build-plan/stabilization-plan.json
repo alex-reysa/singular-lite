@@ -4,7 +4,7 @@
   "baseRelease": "0.21.0",
   "baseCommit": "0f92cba1fb1f2b51d6762b493b0ac7aaded8fdd9",
   "campaignAtAdoption": "BRAIN-20260907-ASTRA-SOL-R2",
-  "phase": "stabilization-queued",
+  "phase": "lifecycle-implementation-running",
   "generationMode": "operator-directed-native-until-runtime-replacement",
   "models": {
     "planner": "gpt-6-astra",
@@ -17,7 +17,11 @@
       "id": "TASK-1013",
       "kind": "native-task",
       "activation": "ready",
-      "dependsOn": []
+      "dependsOn": [],
+      "observedStatus": "running",
+      "runId": "RUN-20260907T202230Z-53859",
+      "dispatchBaseSha": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
+      "dispatchEvidence": ".singular-state/campaign-evidence/expert-adoption/dispatch-TASK-1013.json"
     },
     {
       "id": "TASK-1014",
@@ -104,5 +108,7 @@
     "status": "active",
     "automationId": "brain-stabilization-and-continuation",
     "intervalMinutes": 30
-  }
+  },
+  "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
+  "lastObservedAt": "2026-09-07T20:23:27.912391+00:00"
 }
