@@ -13,5 +13,5 @@ Tasks: 1
 Gates passed: 27/27
 
 Task statuses:
-- accepted: 1
+- integrated: 1
 <!-- singular:reconcile-snapshot:end -->
