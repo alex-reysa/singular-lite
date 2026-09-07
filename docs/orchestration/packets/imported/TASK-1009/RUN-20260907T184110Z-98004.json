@@ -1,0 +1,175 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PACKET-TASK-1009-RUN-20260907T184110Z-98004-A2",
+  "runId": "RUN-20260907T184110Z-98004",
+  "taskId": "TASK-1009",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "1a19b86fb0c36fca5fd7e61626b8ec35c2206e50",
+  "branch": "codex/brain/TASK-1009-integration-regression-fixtures",
+  "headSha": "3e58456a1d50dd694fe492776107be1e3d860a3c",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1009",
+  "ownedFiles": [
+    "tests/test-setup.sh",
+    "tests/test-detached-dispatch.sh"
+  ],
+  "changedFiles": [
+    "tests/test-detached-dispatch.sh",
+    "tests/test-setup.sh"
+  ],
+  "commands": [
+    {
+      "cmd": "red_tmp=\"$(mktemp -d)\"\nmkdir -p \"$red_tmp/fixtures\"\ncp -R . \"$red_tmp/source\"\nperl -0pi -e 's/^  sleep 4\\n//' \"$red_tmp/source/tests/test-detached-dispatch.sh\"\nperl -0pi -e 's/actuate_to_file \"\\$stub\" 2 1 \"\\$cycle_out\"/actuate_to_file \"\\$stub\" 2 0 \"\\$cycle_out\"/' \"$red_tmp/source/tests/test-detached-dispatch.sh\"\npython3 - \"$red_tmp/source\" \"$red_tmp/fixtures\" >>.singular-evidence/red.log 2>&1 <<'PY'\nimport glob\nimport os\nimport signal\nimport subprocess\nimport sys\n\nsource, fixture_tmp = sys.argv[1:3]\nenv = {\n    \"PATH\": os.environ[\"PATH\"],\n    \"HOME\": os.environ[\"HOME\"],\n    \"TMPDIR\": fixture_tmp,\n}\nproc = subprocess.Popen(\n    [\"bash\", \"tests/test-detached-dispatch.sh\"],\n    cwd=source,\n    env=env,\n    stdout=subprocess.PIPE,\n    stderr=subprocess.STDOUT,\n    text=True,\n    start_new_session=True,\n)\ntimed_out = False\ntry:\n    output, _ = proc.communicate(timeout=15)\nexcept subprocess.TimeoutExpired:\n    timed_out = True\n    started = glob.glob(fixture_tmp + \"/tmp.*/repo/.singular-state/fixture-workers/*/started\")\n    completed = glob.glob(fixture_tmp + \"/tmp.*/repo/.singular-state/fixture-workers/*/completed\")\n    exits = glob.glob(fixture_tmp + \"/tmp.*/repo/.singular-state/dispatch/*.exit\")\n    print(\"watchdog-fix red control: started=%d completed=%d exit_files=%d\" %\n          (len(started), len(completed), len(exits)))\n    print(\"FAIL: waiting reconcile exceeded the external evidence deadline because the fixture has no invocation watchdog\")\n    os.killpg(proc.pid, signal.SIGTERM)\n    try:\n        output, _ = proc.communicate(timeout=10)\n    except subprocess.TimeoutExpired:\n        os.killpg(proc.pid, signal.SIGKILL)\n        output, _ = proc.communicate(timeout=5)\n    if output:\n        print(output, end=\"\")\n    if not started or completed or exits:\n        raise SystemExit(\"red control did not isolate a started, incomplete worker\")\nif not timed_out:\n    if output:\n        print(output, end=\"\")\n    raise SystemExit(\"red control unexpectedly completed without an invocation watchdog\")\nPY\nred_rc=$?\ncase \"$red_tmp\" in\n  \"${TMPDIR%/}\"/tmp.*) find \"$red_tmp\" -depth -delete ;;\n  *) printf 'refusing to clean unexpected red fixture path: %s\\n' \"$red_tmp\" >&2; exit 1 ;;\nesac\nexit \"$red_rc\"",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Fresh audit-fix red control forced a genuinely waiting reconcile path. The external evidence deadline observed two started workers, zero completed workers, and zero exit files before terminating the unbounded old fixture."
+    },
+    {
+      "cmd": "{\n  env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-setup.sh\n  env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-detached-dispatch.sh\n} >.singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Final green run after adding bounded invocation watchdogs and the real waiting-path negative control."
+    },
+    {
+      "cmd": "SINGULAR_TEST_JOBS=4 bash tests/run.sh test-setup.sh test-detached-dispatch.sh test-versioning.sh test-cli-test-run.sh test-reap-classification.sh >.singular-evidence/regression.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "Required scoped gate was blocked during source preflight because the worker sandbox cannot create disposable Git worktrees."
+    },
+    {
+      "cmd": "{\n  env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-versioning.sh\n  env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-cli-test-run.sh\n  env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-reap-classification.sh\n} >.singular-evidence/direct-regression.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/direct-regression.log",
+      "rationale": "Direct fallback passed versioning and CLI test-run; reap classification reached the known sandbox-denied ps invocation."
+    },
+    {
+      "cmd": "bash -n tests/test-setup.sh tests/test-detached-dispatch.sh\nfixture_leaks=\"$(find \"${TMPDIR:-/tmp}\" -maxdepth 6 -path '*/repo/.singular-state/fixture-workers/*/started' -print 2>/dev/null | wc -l | tr -d ' ')\"\n[[ \"$fixture_leaks\" == \"0\" ]] || { printf 'fixture worker marker leaks: %s\\n' \"$fixture_leaks\" >&2; exit 1; }",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Final syntax and fixture-cleanup verification found no leaked controlled-worker markers."
+    }
+  ],
+  "tests": [
+    {
+      "name": "additive installer payload against old literal-line contract",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "controlled scheduling delay against old elapsed-time heuristic",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "genuinely waiting reconcile without invocation watchdog",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "tests/test-setup.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "tests/test-detached-dispatch.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "waiting reconcile watchdog negative control",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "tests/test-versioning.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "tests/test-cli-test-run.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "tests/test-reap-classification.sh",
+      "phase": "regression",
+      "status": "blocked",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "scoped tests/run.sh gate",
+      "phase": "regression",
+      "status": "blocked",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "red-test-log",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "green-test-log",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "scoped-gate-log",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "direct-regression-log",
+      "ref": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "kind": "retained-integration-gate-log",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/ORIGIN-20260907T181924Z-60581-integrate-TASK-1003/gate-check.log"
+    },
+    {
+      "kind": "retained-integration-gate-report",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/ORIGIN-20260907T181924Z-60581-integrate-TASK-1003/gate-report.json"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260907T184110Z-98004/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260907T184110Z-98004/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260907T184110Z-98004/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260907T184110Z-98004/evidence-manifest.json"
+    }
+  ],
+  "blockers": [
+    {
+      "code": "SINGULAR_TEST_SOURCE_UNSUPPORTED",
+      "summary": "The managed worker sandbox cannot create the disposable Git worktrees required by tests/run.sh.",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "code": "SANDBOX_PS_DENIED",
+      "summary": "Direct test-reap-classification.sh execution was blocked when Python attempted to execute ps; the other requested direct regression scripts passed.",
+      "logRef": ".singular-evidence/direct-regression.log"
+    }
+  ],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-07T19:29:36Z"
+}

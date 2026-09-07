@@ -2,6 +2,27 @@
 
 ## Decision Log
 
+### 2026-09-07T19:52:45Z — TASK-1009 — integrate
+
+- Run: `ORIGIN-20260907T193843Z-75782`
+- Branch: `codex/brain/TASK-1009-integration-regression-fixtures`
+- Authority: origin
+- Rationale: merged codex/brain/TASK-1009-integration-regression-fixtures (3e58456a1d50dd694fe492776107be1e3d860a3c) into codex/brain-integration as 3a47a736b58d18d2da2b3dc9638cb07569c63719; gate green; acceptance=accepted
+
+### 2026-09-07T19:38:38Z — TASK-1009 — accept
+
+- Run: `RUN-20260907T184110Z-98004`
+- Branch: `codex/brain/TASK-1009-integration-regression-fixtures`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
+### 2026-09-07T19:38:37Z — TASK-1010 — decide:retry
+
+- Run: `RUN-20260907T185331Z-83024`
+- Branch: `codex/brain/TASK-1010-recover-brain-ingestion`
+- Authority: policy
+- Rationale: fast-path: audit-needs-fix -> retry
+
 ### 2026-09-07T19:16:51Z — TASK-1009 — decide:retry
 
 - Run: `RUN-20260907T184110Z-98004`

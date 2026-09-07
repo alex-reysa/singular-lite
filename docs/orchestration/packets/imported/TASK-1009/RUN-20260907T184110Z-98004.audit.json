@@ -1,0 +1,57 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1009",
+  "runId": "RUN-20260907T184110Z-98004",
+  "branch": "codex/brain/TASK-1009-integration-regression-fixtures",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    ".singular-state/runs/RUN-20260907T184110Z-98004/evidence-manifest.json",
+    ".singular-state/runs/RUN-20260907T184110Z-98004/audit-verification.json",
+    "worker-evidence/red.log excerpt and SHA-256 binding in evidence-manifest.json",
+    "worker-evidence/green.log excerpt and SHA-256 binding in evidence-manifest.json",
+    "gate-check.log excerpt and SHA-256 binding in evidence-manifest.json",
+    "reaudit-diff-attempt-2.patch metadata and SHA-256 binding in evidence-manifest.json",
+    "schemas/orchestration/audit-verdict.v1.schema.json",
+    "docs/orchestration/brain-tasks/TASK-1009.md from codex/brain-integration",
+    "Committed source at 3e58456a1d50dd694fe492776107be1e3d860a3c",
+    "Git delta 27d090f4e64974c05610bc333748fc7e728ede34..3e58456a1d50dd694fe492776107be1e3d860a3c",
+    "Git task delta 1a19b86fb0c36fca5fd7e61626b8ec35c2206e50..3e58456a1d50dd694fe492776107be1e3d860a3c",
+    "campaign-binding:campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08",
+    "reviewed-head-sha:3e58456a1d50dd694fe492776107be1e3d860a3c"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "/opt/homebrew/bin/bash -c SINGULAR_TEST_JOBS=4 bash tests/run.sh test-setup.sh test-detached-dispatch.sh test-versioning.sh test-cli-test-run.sh test-reap-classification.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        ".singular-state/runs/RUN-20260907T184110Z-98004/audit-verification.json",
+        ".singular-state/runs/RUN-20260907T184110Z-98004/evidence-manifest.json",
+        "gate-check.log"
+      ],
+      "rationale": "The host classified verification as not-rerun-evidence-verified and hash-bound the successful gate evidence to exact head 3e58456a1d50dd694fe492776107be1e3d860a3c. The bound log reports all five selected tests passed, with sourceIntegrity.status verified and no changed paths."
+    }
+  ],
+  "commandsRun": [
+    "sed -n '1,240p' /Users/alejandro/.agents/skills/source-command-sc-analyze/SKILL.md",
+    "git status --short --branch; git rev-parse HEAD; git branch --show-current; jq . evidence-manifest.json; jq . audit-verification.json",
+    "evidence-show.sh evidence-manifest.json packet.json 12000",
+    "sed -n '1,220p' schemas/orchestration/audit-verdict.v1.schema.json; git show --stat HEAD; git diff-tree --no-commit-id --name-status -r HEAD; git log --oneline --decorate --graph -8",
+    "git diff 27d090f4e64974c05610bc333748fc7e728ede34..HEAD -- tests/test-detached-dispatch.sh",
+    "nl -ba tests/test-detached-dispatch.sh; rg -n 'reconcile\\.sh|autonomate\\.sh|actuate_to_file|drain_to_file|run_with_watchdog|run_fixture_command|make_controlled_stub|release_workers|assert_workers_held|cleanup_fixture' tests/test-detached-dispatch.sh",
+    "git diff 1a19b86fb0c36fca5fd7e61626b8ec35c2206e50..HEAD -- tests/test-setup.sh tests/test-detached-dispatch.sh",
+    "git diff --no-ext-diff --binary 1a19b86fb0c36fca5fd7e61626b8ec35c2206e50..HEAD | shasum -a 256; shasum -a 256 tests/test-setup.sh tests/test-detached-dispatch.sh; git merge-base HEAD codex/brain-integration",
+    "git show codex/brain-integration:docs/orchestration/brain-tasks/TASK-1009.md",
+    "nl -ba tests/test-setup.sh | sed -n '420,640p'; git diff --check 1a19b86fb0c36fca5fd7e61626b8ec35c2206e50..HEAD",
+    "bash -n tests/test-setup.sh tests/test-detached-dispatch.sh",
+    "git diff --name-status 1a19b86fb0c36fca5fd7e61626b8ec35c2206e50..codex/brain-integration"
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "rationale": "Acceptance is supported by exact-head evidence. The checkout is clean; its two task commits modify only tests/test-setup.sh and tests/test-detached-dispatch.sh. Their hashes and the independently computed 27,857-byte committed-diff hash match the compact manifest. The target branch advanced after dispatch only in orchestration documentation, with no changes to either owned file, so there is no relevant branch drift or hidden scope expansion. Fresh RED evidence records both original regression controls plus the missing-watchdog control; GREEN records both focused tests passing. The host-bound full gate then records five passes and no expected-failure waiver. The re-audit change adds process-group watchdogs with fixture-state diagnostics and TERM/KILL bounds around every reconcile, drain, or autonomate invocation that can encounter a controlled worker. The new negative control runs a real detached reconcile, enters a genuine completion wait, is rejected with exit 124 and a watchdog diagnostic, verifies the worker-started/not-completed/no-exit ordering markers, and releases and drains afterward. Positive correctness remains marker-based rather than elapsed-time-based. Fixture cleanup releases workers and restricts fallback termination to process groups identified by fixture-owned dispatch records. Direct unwrapped reconcile/autonomate calls use immediate-completion stubs, zero dispatch capacity, or already-crashed workers and therefore cannot encounter a held controlled worker. The setup fixture still exercises the real installer in isolated storage, accepts an additive vendor sentinel, rejects a tests-bearing payload, and preserves the existing state, warning, recovery, JSON, and no-run-state assertions. Worker-side full-suite attempts that encountered disposable-worktree and ps sandbox restrictions were infrastructure limitations; they were not converted into product findings because the exact-head host gate evidence is successful. Bounded packet retrieval was also unavailable because the read-only sandbox denied evidence-show.sh's /tmp lock creation; compact hash-bound evidence and committed-source inspection were sufficient.",
+  "findingsStatus": {
+    "f-e3b5f7e986b8": "resolved",
+    "f-e8def7058eec": "resolved",
+    "f-f377ec959a2b": "resolved"
+  }
+}
