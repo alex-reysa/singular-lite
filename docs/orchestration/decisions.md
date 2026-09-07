@@ -2,6 +2,27 @@
 
 ## Decision Log
 
+### 2026-09-07T16:13:35Z — TASK-1001 — unpark
+
+- Run: `ORIGIN-20260907T161335Z-94028`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: Operator resolved symbolic base drift; preserve prior source and redispatch with immutable base
+
+### 2026-09-07T16:10:14Z — TASK-1001 — escalate-infra
+
+- Run: `RUN-20260907T155437Z-8189`
+- Branch: `codex/brain/TASK-1001-canary-environment`
+- Authority: policy
+- Rationale: environment failure (audit-infra), not a product defect: the workspace could not run the gate. Repair the environment, then `singular unpark TASK-1001`.
+
+### 2026-09-07T16:10:14Z — TASK-1001 — decide:escalate-infra
+
+- Run: `RUN-20260907T155437Z-8189`
+- Branch: `codex/brain/TASK-1001-canary-environment`
+- Authority: policy
+- Rationale: fast-path: audit-infra -> escalate-infra
+
 ### 2026-08-16T16:20:00Z — RELEASE-0.19.0 — ship-before-recovery-resume
 
 - Run: `OPERATOR-20260816-RELEASE-0190`
