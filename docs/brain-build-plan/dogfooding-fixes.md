@@ -4,7 +4,7 @@ On 2026-09-07 the user explicitly requested that the four observed orchestration
 
 | Task | Repair | Integration dependencies |
 |---|---|---|
-| [TASK-1005](../orchestration/brain-tasks/TASK-1005.md) | Native model selection by role, fallback compatibility and safe session reuse | TASK-1003 and TASK-1010 |
+| [TASK-1005](../orchestration/brain-tasks/TASK-1005.md) | Native model selection by role, fallback compatibility and safe session reuse | TASK-1011, TASK-1010 and TASK-1014 |
 | [TASK-1006](../orchestration/brain-tasks/TASK-1006.md) | Effective configuration, runtime, task and state path parity across CLI, doctor and console | TASK-1005 |
 | [TASK-1007](../orchestration/brain-tasks/TASK-1007.md) | Unambiguous scope parsing, paths containing spaces and complete obligations in worker/auditor prompts | TASK-1006 |
 | [TASK-1008](../orchestration/brain-tasks/TASK-1008.md) | Read-only parallel candidate import using private publication copies and preserved critique binding | TASK-1007 |
@@ -18,3 +18,5 @@ Behavioral red/green evidence, fresh audits and the full host integration regres
 Planner output, source observations, native parsed task records, model/session metadata, publication hashes and the operator queue event are retained under `.singular-state/campaign-evidence/dogfood-fix-queue/`. Original observations remain in `operator-observations.ndjson`. These task definitions address verified product behavior; they do not turn operator-induced setup errors or unverified cost hypotheses into product defects.
 
 Dependency correction on 2026-09-07: TASK-1010 explicitly supersedes blocked TASK-1004. TASK-1005 now waits for TASK-1010 integration instead of the historical consumer task. TASK-1003 remains a required producer dependency; this edit does not clear its blocked state or claim integration.
+
+Expert-review adoption on 2026-09-07 supersedes the earlier dependency note: TASK-1011 is the producer successor to TASK-1003, and TASK-1005 now also waits for TASK-1014 stabilization. See stabilization-queue.md for the required runtime replacement and continuation order. Historical acceptance remains unchanged.

@@ -1,0 +1,108 @@
+{
+  "schema": "singular.operator.stabilization-plan.v1",
+  "createdAt": "2026-09-07T20:15:00.611865+00:00",
+  "baseRelease": "0.21.0",
+  "baseCommit": "0f92cba1fb1f2b51d6762b493b0ac7aaded8fdd9",
+  "campaignAtAdoption": "BRAIN-20260907-ASTRA-SOL-R2",
+  "phase": "stabilization-queued",
+  "generationMode": "operator-directed-native-until-runtime-replacement",
+  "models": {
+    "planner": "gpt-6-astra",
+    "implementer": "gpt-5.6-sol",
+    "auditor": "gpt-5.6-sol",
+    "reasoningEffort": "high"
+  },
+  "steps": [
+    {
+      "id": "TASK-1013",
+      "kind": "native-task",
+      "activation": "ready",
+      "dependsOn": []
+    },
+    {
+      "id": "TASK-1014",
+      "kind": "native-task",
+      "activation": "ready",
+      "dependsOn": [
+        "TASK-1013"
+      ]
+    },
+    {
+      "id": "RUNTIME-STABILIZATION",
+      "kind": "operator-milestone",
+      "status": "waiting-for-integration",
+      "dependsOn": [
+        "TASK-1013",
+        "TASK-1014"
+      ],
+      "requiredEvidence": [
+        "fresh-bound-audits",
+        "full-merged-tree-gates",
+        "integrated-ancestry",
+        "drained-or-fenced-processes",
+        "preserved-checkpoint",
+        "new-runtime-source-hash",
+        "fresh-canary-provider-assurance",
+        "new-campaign-binding",
+        "verified-native-operation"
+      ]
+    },
+    {
+      "id": "RESUME-BRAIN",
+      "kind": "operator-milestone",
+      "status": "waiting",
+      "dependsOn": [
+        "RUNTIME-STABILIZATION"
+      ],
+      "deliverables": [
+        "B1",
+        "B2",
+        "B3",
+        "B4",
+        "B5",
+        "TASK-1005",
+        "TASK-1006",
+        "TASK-1007",
+        "TASK-1008"
+      ]
+    },
+    {
+      "id": "TASK-1015",
+      "kind": "native-task",
+      "activation": "planned",
+      "dependsOn": [
+        "TASK-1014"
+      ],
+      "activationMilestones": [
+        "RUNTIME-STABILIZATION"
+      ],
+      "refreshContractBeforeActivation": true
+    },
+    {
+      "id": "TASK-1016",
+      "kind": "native-task",
+      "activation": "planned",
+      "dependsOn": [
+        "TASK-1007",
+        "TASK-1015"
+      ],
+      "activationMilestones": [
+        "B2-integrated",
+        "B3-integrated"
+      ],
+      "refreshContractBeforeActivation": true
+    }
+  ],
+  "preserved": {
+    "TASK-1009": "integrated",
+    "TASK-1010": "accepted-at-adoption",
+    "TASK-1011": "running-at-adoption"
+  },
+  "evidenceDirectory": ".singular-state/campaign-evidence/expert-adoption",
+  "followup": {
+    "kind": "same-task-heartbeat",
+    "status": "active",
+    "automationId": "brain-stabilization-and-continuation",
+    "intervalMinutes": 30
+  }
+}
