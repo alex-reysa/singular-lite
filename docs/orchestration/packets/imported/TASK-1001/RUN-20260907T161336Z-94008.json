@@ -1,0 +1,127 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "RUN-20260907T161336Z-94008-TASK-1001-attempt-2",
+  "runId": "RUN-20260907T161336Z-94008",
+  "taskId": "TASK-1001",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "0735ad6958c0d9abac0b44e6d798e52bcc634b05",
+  "branch": "codex/brain/TASK-1001-canary-environment",
+  "headSha": "b5b169bffe5c2631daa16ff13b0137e66afe31b1",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1001",
+  "ownedFiles": [
+    "engine/campaign-canary.sh",
+    "tests/test-campaign-canary.sh"
+  ],
+  "changedFiles": [
+    "engine/campaign-canary.sh",
+    "tests/test-campaign-canary.sh"
+  ],
+  "commands": [
+    {
+      "cmd": "env -i HOME=\"$HOME\" PATH=\"$PATH\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-campaign-canary.sh >.singular-evidence/red.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Attempt-2 red: the isolated fixture lost the validated configured Bash before l1-drive, while the production provider probe still passed."
+    },
+    {
+      "cmd": "env -i HOME=\"$HOME\" PATH=\"$PATH\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-campaign-canary.sh >.singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Attempt-2 green: the configured Bash outside lifecycle PATH covered worker, gate, auditor, import, and integration without preserving SINGULAR_BASH_BOOTSTRAPPED or leaking hostile consumer policy."
+    },
+    {
+      "cmd": "bash tests/run.sh test-campaign-canary.sh test-campaign-freeze.sh >.singular-evidence/regression.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "The required wrapper stopped before test discovery because the sandbox denied disposable-worktree registration in the parent Git common directory."
+    },
+    {
+      "cmd": "env -i HOME=\"$HOME\" PATH=\"$PATH\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-campaign-freeze.sh >.singular-evidence/regression-direct.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/regression-direct.log",
+      "rationale": "The campaign-freeze regression passed directly using its disposable fixture repositories."
+    }
+  ],
+  "tests": [
+    {
+      "name": "configured Bash preservation across isolated fixture lifecycle",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "configured Bash preservation across isolated fixture lifecycle",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "campaign canary hostile consumer environment regression",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "campaign freeze regression",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression-direct.log"
+    },
+    {
+      "name": "filtered campaign regression harness",
+      "phase": "regression",
+      "status": "failed",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "red",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "green",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "regression",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "direct-regression",
+      "ref": ".singular-evidence/regression-direct.log"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260907T161336Z-94008/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "legacy"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260907T161336Z-94008/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260907T161336Z-94008/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260907T161336Z-94008/evidence-manifest.json"
+    }
+  ],
+  "blockers": [
+    {
+      "kind": "sandbox-git-common-directory",
+      "detail": "The required tests/run.sh command cannot create its disposable preflight worktree because this sandbox cannot write the parent repository Git common directory.",
+      "affectedCommand": "bash tests/run.sh test-campaign-canary.sh test-campaign-freeze.sh >.singular-evidence/regression.log 2>&1",
+      "recovery": "Rerun the required filtered regression harness from an environment with writable Git worktree metadata."
+    }
+  ],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-07T16:38:02Z"
+}

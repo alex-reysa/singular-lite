@@ -1,0 +1,60 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1001",
+  "runId": "RUN-20260907T161336Z-94008",
+  "branch": "codex/brain/TASK-1001-canary-environment",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "docs/orchestration/brain-tasks/TASK-1001.md",
+    "schemas/orchestration/audit-verdict.v1.schema.json",
+    "engine/campaign-canary.sh at b5b169bffe5c2631daa16ff13b0137e66afe31b1",
+    "tests/test-campaign-canary.sh at b5b169bffe5c2631daa16ff13b0137e66afe31b1",
+    "Committed target-to-head diff for codex/brain-integration...b5b169bffe5c2631daa16ff13b0137e66afe31b1",
+    "Fix diff 255ff6084c7d19a16cf9eee5093a9b06a3eac08c..b5b169bffe5c2631daa16ff13b0137e66afe31b1",
+    "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/evidence-manifest.json",
+    "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/audit-verification.json",
+    "Manifest metadata, hashes, and excerpts for packet.json, worker-evidence/red.log, worker-evidence/green.log, worker-evidence/regression-direct.log, gate-check.log, scope-check-result.json, and secret-scan-result.json",
+    "Authoritative prior-finding ledger and re-audit verification targets",
+    "campaign-binding:legacy",
+    "reviewed-head-sha:b5b169bffe5c2631daa16ff13b0137e66afe31b1"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "/opt/homebrew/bin/bash -c bash tests/run.sh test-campaign-canary.sh test-campaign-freeze.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/audit-verification.json",
+        "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/evidence-manifest.json",
+        "gate-check.log"
+      ],
+      "rationale": "The authoritative host report classifies verification as not-rerun-evidence-verified, binds the worker gate evidence to exact head b5b169bffe5c2631daa16ff13b0137e66afe31b1, reports verified source integrity with no changed paths, raw exit code 0, no failure or infrastructure signals, and a gate log hash matching the manifest. The bound gate records both campaign-canary and campaign-freeze passing."
+    }
+  ],
+  "commandsRun": [
+    "git status --short --branch; git rev-parse HEAD; git branch --show-current; git log -5 --oneline --decorate",
+    "jq . /Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/evidence-manifest.json",
+    "jq . /Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/audit-verification.json",
+    "sed -n '1,280p' docs/orchestration/brain-tasks/TASK-1001.md",
+    "sed -n '1,260p' schemas/orchestration/audit-verdict.v1.schema.json",
+    "nl -ba engine/campaign-canary.sh",
+    "nl -ba tests/test-campaign-canary.sh",
+    "git rev-parse codex/brain-integration; git merge-base codex/brain-integration HEAD; git rev-list --left-right --count codex/brain-integration...HEAD; git diff --name-status codex/brain-integration...HEAD",
+    "git diff --no-ext-diff --unified=80 codex/brain-integration...HEAD -- engine/campaign-canary.sh tests/test-campaign-canary.sh",
+    "git diff --no-ext-diff --unified=30 255ff6084c7d19a16cf9eee5093a9b06a3eac08c..b5b169bffe5c2631daa16ff13b0137e66afe31b1 -- engine/campaign-canary.sh tests/test-campaign-canary.sh",
+    "rg -n -C 5 'singular_bash_bin|SINGULAR_BASH_BOOTSTRAPPED' engine/lib.sh engine --glob '*.sh'",
+    "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runtime/0.21.0/engine/evidence-show.sh /Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/evidence-manifest.json reaudit-diff-attempt-2.patch 6000",
+    "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runtime/0.21.0/engine/evidence-show.sh /Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/evidence-manifest.json packet.json 6000",
+    "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runtime/0.21.0/engine/evidence-show.sh /Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/evidence-manifest.json worker-evidence/red.log 2000",
+    "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runtime/0.21.0/engine/evidence-show.sh /Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/RUN-20260907T161336Z-94008/evidence-manifest.json worker-evidence/green.log 1000"
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "rationale": "The branch is clean, exactly two commits ahead and zero behind codex/brain-integration, and modifies only the two owned files. The implementation captures the successfully validated bootstrap Bash and explicitly restores it after clearing inherited SINGULAR_* variables for every fixture lifecycle entry point. The regression pins an executable Bash outside the lifecycle PATH, installs a failing PATH fallback, verifies implementer, gate, auditor, import, and integration invocations traverse the pin, and verifies SINGULAR_BASH_BOOTSTRAPPED is not inherited. It retains the hostile consumer configuration, provider-policy, host-path non-mutation, broken-provider, accepted-audit, lifecycle, and integration assertions. The manifest records a strict red failure for loss of the configured Bash selection followed by a green run, a separately passing campaign-freeze test, passing scope and secret checks, and an exact-head-bound aggregate gate. Bounded raw-artifact retrieval was unavailable because evidence-show.sh could not create its fixed /tmp lock under the read-only sandbox; this is an infrastructure limitation, not a product finding, and the compact manifest, committed source diff, and authoritative host binding provide sufficient evidence.",
+  "findingsStatus": {
+    "f-5e68cd2bfb6f": "resolved",
+    "f-7057d124b659": "resolved",
+    "f-907e3cd08d97": "resolved",
+    "f-a6b794f1e4d8": "resolved"
+  }
+}

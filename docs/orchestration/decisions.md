@@ -2,6 +2,20 @@
 
 ## Decision Log
 
+### 2026-09-07T16:46:08Z — TASK-1001 — accept
+
+- Run: `RUN-20260907T161336Z-94008`
+- Branch: `codex/brain/TASK-1001-canary-environment`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
+### 2026-09-07T16:31:37Z — TASK-1001 — decide:retry
+
+- Run: `RUN-20260907T161336Z-94008`
+- Branch: `codex/brain/TASK-1001-canary-environment`
+- Authority: policy
+- Rationale: fast-path: audit-needs-fix -> retry
+
 ### 2026-09-07T16:13:35Z — TASK-1001 — unpark
 
 - Run: `ORIGIN-20260907T161335Z-94028`
