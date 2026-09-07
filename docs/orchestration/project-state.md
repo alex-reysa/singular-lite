@@ -9,10 +9,11 @@ Durable semantic state (cycle heartbeat and process telemetry live under `.singu
 
 Target branch: `codex/brain-integration`
 Imported packets: 114
-Tasks: 7
+Tasks: 8
 Gates passed: 27/27
 
 Task statuses:
+- blocked: 1
 - integrated: 1
 - ready: 6
 <!-- singular:reconcile-snapshot:end -->
