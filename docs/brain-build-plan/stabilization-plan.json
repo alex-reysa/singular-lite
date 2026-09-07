@@ -110,7 +110,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-07T21:37:55.606294+00:00",
+  "lastObservedAt": "2026-09-07T21:41:12.922550+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "ready",
@@ -170,5 +170,19 @@
       "firstExitCode": 124,
       "productRetryCount": 0
     }
+  },
+  "timedPause": {
+    "schema": "singular.operator.timed-pause.v1",
+    "requestedAt": "2026-09-07T21:41:12.922550+00:00",
+    "status": "new-dispatch-paused-existing-run-draining",
+    "resumeAtUtc": "2026-09-08T01:00:00Z",
+    "resumeAtLocal": "2026-09-08T03:00:00+02:00",
+    "timezone": "Europe/Zurich",
+    "reason": "Explicit user request: pause when safe until 3am Zurich time",
+    "resumeAuthorized": true,
+    "automationId": "brain-stabilization-and-continuation",
+    "activeRunToPreserve": "RUN-20260907T202230Z-53859",
+    "stopSentinel": ".singular-state/STOP",
+    "resumePolicy": "No new tasks before resumeAtUtc; existing run may finish safely. At resume inspect live state and apply Astra Light (low)/High normal-speed model policy at a controlled boundary before new work. Respect later unrelated user stops."
   }
 }

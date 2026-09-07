@@ -55,3 +55,7 @@ The latest user request supersedes older Sol High preferences above. See [model-
 ## Latest model and speed correction
 
 The user superseded the pending Medium/Fast profile: use GPT-6 Astra Light (low reasoning effort) for implementation, critics and final/paired audits; retain Astra High for planning/difficult decisions; use normal speed for all roles. MODEL-POLICY-ASTRA-LIGHT and .singular-state/campaign-policy/config-astra-light.json replace the earlier Fast checkpoint. The old Medium/Fast probe is historical, not validation of the new profile. Perform the normal controlled replacement and required canary; do not activate the superseded Fast profile. This does not change the ongoing brain work or continuous adoption requirements.
+
+## Timed pause requested by the user
+
+New dispatch is paused until 03:00 Europe/Zurich on 8 September 2026 (01:00 UTC). Preserve the existing native run and allow it to finish safely. The recurring follow-up is rescheduled to start at that instant and then continue every 30 minutes. Resumption at that time is explicitly authorized; inspect live state and complete the pending Astra Light/normal-speed model-policy checkpoint before new implementation. Do not activate the superseded Medium/Fast profile or clear a later unrelated stop. Evidence: .singular-state/campaign-evidence/timed-pause/pause.json.
