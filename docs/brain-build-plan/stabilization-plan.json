@@ -110,5 +110,20 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-07T20:23:27.912391+00:00"
+  "lastObservedAt": "2026-09-07T21:07:56.798816+00:00",
+  "supplementalRecovery": {
+    "taskId": "TASK-1017",
+    "status": "ready",
+    "dependsOn": [],
+    "reason": "TASK-1010 full integration gate: missing consumer schema mirror",
+    "deciderAction": "split-task",
+    "candidateToPreserve": "afa542ff71425788ed148d5b09b430e1b8810108",
+    "failedIntegrationRunId": "OPERATOR-20260907T2024Z-integrate-TASK-1010",
+    "failedGateSummary": {
+      "passed": 209,
+      "failed": 6
+    },
+    "nextAfterRepair": "Explicit native TASK-1010 integration of its unchanged accepted candidate after TASK-1017 fully integrates; verify head/audit/campaign bindings and require fresh full exact merged-tree gate. No reset/re-dispatch or acceptance rebinding.",
+    "evidenceDirectory": ".singular-state/campaign-evidence/consumer-schema-repair"
+  }
 }
