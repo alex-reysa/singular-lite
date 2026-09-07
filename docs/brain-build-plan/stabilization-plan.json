@@ -110,7 +110,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-07T21:07:56.798816+00:00",
+  "lastObservedAt": "2026-09-07T21:08:50.562258+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "ready",
@@ -125,5 +125,25 @@
     },
     "nextAfterRepair": "Explicit native TASK-1010 integration of its unchanged accepted candidate after TASK-1017 fully integrates; verify head/audit/campaign bindings and require fresh full exact merged-tree gate. No reset/re-dispatch or acceptance rebinding.",
     "evidenceDirectory": ".singular-state/campaign-evidence/consumer-schema-repair"
+  },
+  "requestedModels": {
+    "allRolesModel": "gpt-6-astra",
+    "implementationCriticAuditorEffort": "medium",
+    "plannerDeciderSupervisorEffort": "high",
+    "serviceTier": "fast"
+  },
+  "modelPolicyTransition": {
+    "id": "MODEL-POLICY-ASTRA-FAST",
+    "status": "provider-probe-passed-waiting-for-inflight-drain",
+    "config": ".singular-state/campaign-policy/config-astra-fast.json",
+    "sourceRuntimeCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+    "evidenceDirectory": ".singular-state/campaign-evidence/astra-fast-transition",
+    "priority": "before-new-implementation-and-before-TASK-1014",
+    "preserveInFlight": [
+      "TASK-1011",
+      "TASK-1013"
+    ],
+    "unintegratedPriorAcceptance": "requires-current-campaign-reaudit-and-full-exact-tree-gate",
+    "operatorStop": "written-2026-09-07-for-model-policy-transition"
   }
 }
