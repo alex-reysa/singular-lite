@@ -2,6 +2,20 @@
 
 ## Decision Log
 
+### 2026-09-07T18:37:05Z — TASK-1003 — decide:retry
+
+- Run: `ORIGIN-20260907T181924Z-60581`
+- Branch: `codex/brain/TASK-1003-pinned-brain-cli`
+- Authority: decider
+- Rationale: integration-gate-red -> retry: One retry remains: have the worker correct the installer payload regression so installed engines exclude tests/, preserving the assertion. Investigate the detached-dispatch timing failure and rerun both failing tests and the integration gate without weakening checks.
+
+### 2026-09-07T18:19:21Z — TASK-1003 — accept
+
+- Run: `RUN-20260907T173445Z-8668`
+- Branch: `codex/brain/TASK-1003-pinned-brain-cli`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
 ### 2026-09-07T16:59:49Z — TASK-1001 — integrate
 
 - Run: `ORIGIN-20260907T164641Z-85659`

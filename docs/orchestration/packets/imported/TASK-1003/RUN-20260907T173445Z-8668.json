@@ -1,0 +1,184 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PACKET-RUN-20260907T173445Z-8668-TASK-1003",
+  "runId": "RUN-20260907T173445Z-8668",
+  "taskId": "TASK-1003",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "10daccd403013db001a2de4d9552b27a86d1c478",
+  "branch": "codex/brain/TASK-1003-pinned-brain-cli",
+  "headSha": "46d15abcf73cd1f7da29cb2d9ae8cd45b9c227c3",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1003",
+  "ownedFiles": [
+    "vendor/singular-brain/",
+    "tests/fixtures/singular-brain/knowledge-scope/",
+    "engine/brain_manifest.py",
+    "cli/singular",
+    "install.sh",
+    "engine/doctor.py",
+    "engine/campaign_manifest.py",
+    "tests/test-brain-package.sh"
+  ],
+  "changedFiles": [
+    "cli/singular",
+    "engine/brain_manifest.py",
+    "engine/campaign_manifest.py",
+    "engine/doctor.py",
+    "install.sh",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/.knowledge-freshness.json",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/KNOWLEDGE.json",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/KNOWLEDGE.md",
+    "tests/fixtures/singular-brain/knowledge-scope/handoffs/generated-summary.md",
+    "tests/fixtures/singular-brain/knowledge-scope/handoffs/session-2026-07-05.md",
+    "tests/fixtures/singular-brain/knowledge-scope/notes/decision-log.md",
+    "tests/fixtures/singular-brain/knowledge-scope/singular-brain.config.json",
+    "tests/fixtures/singular-brain/knowledge-scope/skills/example-skill/SKILL.md",
+    "tests/test-brain-package.sh",
+    "vendor/singular-brain/CHANGELOG.md",
+    "vendor/singular-brain/PROVENANCE.json",
+    "vendor/singular-brain/README.md",
+    "vendor/singular-brain/SCHEMA_VERSION",
+    "vendor/singular-brain/SHA256SUMS",
+    "vendor/singular-brain/VERSION",
+    "vendor/singular-brain/docs/AUDIT-BRIEF.md",
+    "vendor/singular-brain/docs/spec.md",
+    "vendor/singular-brain/engine/adapters/claude-skill.mjs",
+    "vendor/singular-brain/engine/adapters/markdown-doc.mjs",
+    "vendor/singular-brain/engine/cli.mjs",
+    "vendor/singular-brain/engine/config.mjs",
+    "vendor/singular-brain/engine/freshness.mjs",
+    "vendor/singular-brain/engine/frontmatter.mjs",
+    "vendor/singular-brain/engine/gates.mjs",
+    "vendor/singular-brain/engine/hash.mjs",
+    "vendor/singular-brain/engine/pipeline.mjs",
+    "vendor/singular-brain/engine/render/json.mjs",
+    "vendor/singular-brain/engine/render/markdown.mjs",
+    "vendor/singular-brain/engine/walk.mjs"
+  ],
+  "commands": [
+    {
+      "cmd": "mkdir -p .singular-evidence && bash tests/test-brain-package.sh >.singular-evidence/red.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Strict-test-first red: the integrated baseline rejected the public manifest command as unknown."
+    },
+    {
+      "cmd": "bash tests/test-brain-package.sh >.singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Final focused green covering checkout and installed producer behavior, path resolution, review ledger, diagnostics, and identity."
+    },
+    {
+      "cmd": "SINGULAR_TEST_JOBS=4 bash tests/run.sh test-brain-package.sh test-campaign-freeze.sh test-doctor-json.sh test-doctor-blocking.sh test-config-loader.sh >.singular-evidence/regression.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "Worker source preflight refused disposable worktrees; the raw permitted sandbox failure is retained."
+    },
+    {
+      "cmd": "( env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-brain-package.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-campaign-freeze.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-doctor-json.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-doctor-blocking.sh && env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash tests/test-config-loader.sh ) >.singular-evidence/direct-regression.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/direct-regression.log",
+      "rationale": "Hermetic direct execution after the host runner preflight failure; all five focused scripts passed."
+    }
+  ],
+  "tests": [
+    {
+      "name": "test-brain-package.sh",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "test-brain-package.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "scoped-host-gate",
+      "phase": "regression",
+      "status": "worker-preflight-failed",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "name": "test-brain-package.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-campaign-freeze.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-doctor-json.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-doctor-blocking.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "name": "test-config-loader.sh",
+      "phase": "direct-regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/direct-regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "test-first-red",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "focused-green",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "worker-source-preflight",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "direct-focused-regression",
+      "ref": ".singular-evidence/direct-regression.log"
+    },
+    {
+      "kind": "upstream-hash-inventory",
+      "ref": "vendor/singular-brain/SHA256SUMS"
+    },
+    {
+      "kind": "upstream-provenance",
+      "ref": "vendor/singular-brain/PROVENANCE.json"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260907T173445Z-8668/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260907T173445Z-8668/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260907T173445Z-8668/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260907T173445Z-8668/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-07T18:06:16Z"
+}

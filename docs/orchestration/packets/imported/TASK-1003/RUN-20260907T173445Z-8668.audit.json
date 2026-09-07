@@ -1,0 +1,57 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1003",
+  "runId": "RUN-20260907T173445Z-8668",
+  "branch": "codex/brain/TASK-1003-pinned-brain-cli",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json",
+    "audit-verification.json",
+    "gate-report.json and gate-check.log excerpts/hash bindings",
+    "worker-evidence/red.log excerpt/hash binding",
+    "worker-evidence/green.log excerpt/hash binding",
+    "worker-evidence/direct-regression.log excerpt/hash binding",
+    "committed diff SHA-256 1b8e79c4b95bf485f3f7b8381e1274f22f7a75bf4cbd7ac756da46301d0ab827",
+    "commit 46d15abcf73cd1f7da29cb2d9ae8cd45b9c227c3 and parent 10daccd403013db001a2de4d9552b27a86d1c478",
+    "docs/orchestration/brain-tasks/TASK-1003.md",
+    "docs/brain-build-plan/campaign.md",
+    "all 34 committed files in the owned scope",
+    "supplied singular-brain-0.2.0 upstream snapshot",
+    "schemas/orchestration/audit-verdict.v1.schema.json",
+    "campaign-binding:campaign:BRAIN-20260907-ASTRA-SOL-R2:sha256:c22b78b34ed969e82fa2e97be963c4313d9f976a2f33d6a716a3df78bedcf708:epoch:8bca5463e54a71ea11224f4ef8c0619e3ea24eaed9e6dc08",
+    "reviewed-head-sha:46d15abcf73cd1f7da29cb2d9ae8cd45b9c227c3"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "/opt/homebrew/bin/bash -c SINGULAR_TEST_JOBS=4 bash tests/run.sh test-brain-package.sh test-campaign-freeze.sh test-doctor-json.sh test-doctor-blocking.sh test-config-loader.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-check.log",
+        "gate-report.json",
+        "evidence-manifest.json"
+      ],
+      "rationale": "The host hash-bound the worker gate evidence to committed HEAD 46d15abcf73cd1f7da29cb2d9ae8cd45b9c227c3. The bound gate reports 5 passed and 0 failed, with verified source integrity and no unexpected or infrastructure failure signals."
+    }
+  ],
+  "commandsRun": [
+    "Read the compact evidence manifest and authoritative host verification report",
+    "git status --short --branch; git rev-parse HEAD; git branch --show-current; git show -s; git diff-tree --name-status/--stat HEAD",
+    "git merge-base codex/brain-integration HEAD; git rev-list --left-right --count codex/brain-integration...HEAD; git diff --name-status codex/brain-integration...HEAD; git diff --check codex/brain-integration...HEAD",
+    "Compared target-branch changes since the merge base and confirmed they are limited to non-overlapping orchestration documentation/control files",
+    "Inspected engine/brain_manifest.py and committed diffs for cli/singular, install.sh, engine/doctor.py, and engine/campaign_manifest.py",
+    "Inspected tests/test-brain-package.sh and relevant campaign-freeze coverage",
+    "diff -qr against the supplied upstream engine and knowledge-scope fixture",
+    "cd vendor/singular-brain && shasum -a 256 -c SHA256SUMS",
+    "Verified VERSION, SCHEMA_VERSION, provenance revision, and absence of upstream LICENSE/COPYING/NOTICE files",
+    "bash -n cli/singular install.sh tests/test-brain-package.sh",
+    "Parsed modified Python sources with ast.parse and checked all vendored .mjs files with node --check",
+    "Hashed the local committed diff and matched evidence-manifest diffSha256",
+    "Compared evidence-manifest file paths with git diff-tree and confirmed all 34 paths match",
+    "Attempted bounded packet.json retrieval through evidence-show.sh; retrieval was unavailable because the read-only sandbox denied creation of its /tmp lock file"
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "rationale": "The committed tree is clean, matches the evidence-bound HEAD and diff hash, and modifies only owned paths; forbidden campaign controls, frozen runtime, ingestion completion test, and gate-result records are untouched. The worker branch is five commits behind the target, but those target-only commits modify non-overlapping orchestration documentation/control files, so no material branch drift was found. Strict test-first evidence shows the required public-command red failure before implementation and a subsequent green package test. The vendored engine and copied fixture match the supplied snapshot byte-for-byte, hashes verify, versions and provenance are correct, and absent licensing is recorded without invention. Static review and tests cover real producer execution, argument/exit-code forwarding, config precedence and path bases, review-ledger lifecycle, isolated installation, doctor read-only behavior and diagnostics, and future campaign identity. Both advisory should-fix items are implemented and tested: conflicting default/custom configuration selects the custom brainConfig, and doctor diagnoses a present wrong-version payload as well as a missing payload. The worker's failed tests/run.sh attempt contains the anticipated SINGULAR_TEST_SOURCE_UNSUPPORTED infrastructure preflight and is not treated as a product failure; focused scripts passed and the committed host gate is evidence-verified. Bounded packet retrieval was independently infrastructure-limited, but the compact evidence, committed sources, tests, and host binding provide sufficient corroborating evidence for acceptance."
+}
