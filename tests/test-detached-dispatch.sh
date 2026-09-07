@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# singular-test: serial — asserts wall-clock bounds (a detached cycle must return before
-# its stubs finish / a headless browser must settle focus) that a loaded machine breaks.
+# singular-test: serial — fixture workers are explicitly started, held, released,
+# and observed complete; watchdogs bound hangs without making timing the verdict.
 set -euo pipefail
 
 # Detached dispatch (SINGULAR_DETACHED_DISPATCH=1): reconcile spawns workers and
@@ -33,6 +33,54 @@ assert_not_contains() {
   local haystack="$1" needle="$2" msg="$3"
   [[ "$haystack" != *"$needle"* ]] || fail "$msg: unexpectedly found '$needle' in: $haystack"
 }
+
+FIXTURE_ROOTS=()
+FIXTURE_TMP_PARENT="${TMPDIR:-/tmp}"
+FIXTURE_TMP_PARENT="${FIXTURE_TMP_PARENT%/}"
+
+cleanup_fixtures() {
+  local rc=$? fixture_root state record task_id record_state pid pid_start current_start
+  trap - EXIT INT TERM
+
+  # First release every controlled worker. This is the normal assertion-failure
+  # path and lets dispatch-wrap persist its exit file cleanly.
+  for fixture_root in "${FIXTURE_ROOTS[@]}"; do
+    state="$fixture_root/repo/.singular-state"
+    [[ -d "$state" ]] || continue
+    : >"$state/fixture-release"
+  done
+  sleep 0.5
+
+  # A watchdog or hard assertion may leave a wrapper that did not cooperate.
+  # Kill only process groups named by fixture-owned dispatch records; the
+  # engine helper verifies that each group is a setsid leader before signaling.
+  for fixture_root in "${FIXTURE_ROOTS[@]}"; do
+    state="$fixture_root/repo/.singular-state"
+    [[ -d "$state/dispatch" ]] || continue
+    SINGULAR_ROOT="$fixture_root/repo"
+    SINGULAR_STATE_DIR="$state"
+    SINGULAR_DISPATCH_DIR="$state/dispatch"
+    SINGULAR_RUNS_DIR="$state/runs"
+    for record in "$state"/dispatch/*.json; do
+      [[ -f "$record" ]] || continue
+      record_state="$(singular_json_field "$record" state 2>/dev/null || true)"
+      [[ "$record_state" == "launched" ]] || continue
+      pid="$(singular_json_field "$record" pid 2>/dev/null || true)"
+      pid_start="$(singular_json_field "$record" pidStart 2>/dev/null || true)"
+      current_start="$(singular_dispatch_pid_start "$pid" 2>/dev/null || true)"
+      [[ -n "$pid_start" && "$current_start" == "$pid_start" ]] || continue
+      task_id="$(basename "$record" .json)"
+      singular_kill_dispatch_pgroup "$task_id" >/dev/null 2>&1 || true
+    done
+  done
+
+  for fixture_root in "${FIXTURE_ROOTS[@]}"; do
+    [[ -n "$fixture_root" && "$fixture_root" == "$FIXTURE_TMP_PARENT"/tmp.* ]] || continue
+    rm -rf -- "$fixture_root"
+  done
+  exit "$rc"
+}
+trap cleanup_fixtures EXIT INT TERM
 
 make_repo() {
   local root="$1"
@@ -102,6 +150,7 @@ EOF
 with_fixture() {
   local tmp
   tmp="$(mktemp -d)"
+  FIXTURE_ROOTS+=("$tmp")
   make_repo "$tmp/repo"
   export SINGULAR_ROOT="$tmp/repo"
   export SINGULAR_ORCH_DIR="$SINGULAR_ROOT/docs/orchestration"
@@ -125,7 +174,32 @@ with_fixture() {
   source "$SCRIPT_DIR/lib.sh"
 }
 
-# Stub driver that sleeps then exits with a per-task code (default 0).
+# Stub driver that announces startup, waits for an explicit fixture release,
+# announces completion, then exits with a per-task code (default 0).
+make_controlled_stub() {
+  local stub="$1"
+  cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+tid="$1"
+worker_dir="$SINGULAR_STATE_DIR/fixture-workers/$tid"
+mkdir -p "$worker_dir"
+echo "$tid" >>"$SINGULAR_STATE_DIR/dispatch.log"
+: >"$worker_dir/started"
+while [[ ! -f "$SINGULAR_STATE_DIR/fixture-release" ]]; do
+  sleep 0.1
+done
+: >"$worker_dir/released"
+ec_file="$SINGULAR_STATE_DIR/$tid.ec"
+ec=0
+[[ -f "$ec_file" ]] && ec="$(cat "$ec_file")"
+: >"$worker_dir/completed"
+exit "$ec"
+EOF
+  chmod +x "$stub"
+}
+
+# Immediate-completion stub retained for reap and batch-accounting cases.
 make_sleep_stub() {
   local stub="$1" secs="$2"
   cat >"$stub" <<EOF
@@ -147,6 +221,14 @@ actuate() {
     "$SCRIPT_DIR/reconcile.sh" --actuate 2>&1 || true
 }
 
+actuate_to_file() { # driver max detached output
+  local driver="$1" max="$2" detached="$3" output="$4"
+  SINGULAR_L1_DRIVER="$driver" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 \
+    SINGULAR_MAX_CONCURRENT="$max" SINGULAR_MAX_DISPATCH="$max" \
+    SINGULAR_DETACHED_DISPATCH="$detached" \
+    "$SCRIPT_DIR/reconcile.sh" --actuate >"$output" 2>&1 || true
+}
+
 field_of() {
   printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -1
 }
@@ -160,34 +242,95 @@ wait_for_exit_files() {
   done
 }
 
+fixture_worker_count() { # marker
+  find "$SINGULAR_STATE_DIR/fixture-workers" -name "$1" 2>/dev/null \
+    | wc -l | tr -d ' '
+}
+
+wait_for_worker_marker() { # marker count description
+  local marker="$1" count="$2" description="$3" tries=0
+  while [[ "$(fixture_worker_count "$marker")" -lt "$count" ]]; do
+    tries=$((tries + 1))
+    if [[ "$tries" -ge 100 ]]; then
+      find "$SINGULAR_STATE_DIR/fixture-workers" "$SINGULAR_DISPATCH_DIR" \
+        -maxdepth 3 -type f -print 2>/dev/null >&2 || true
+      fail "watchdog timed out waiting for $description ($count $marker marker(s))"
+    fi
+    sleep 0.1
+  done
+}
+
+assert_workers_held() { # count description
+  local count="$1" description="$2"
+  wait_for_worker_marker started "$count" "$description to start"
+  assert_eq "0" "$(fixture_worker_count completed)" \
+    "$description completed before fixture release"
+  assert_eq "0" "$(find "$SINGULAR_DISPATCH_DIR" -name '*.exit' 2>/dev/null | wc -l | tr -d ' ')" \
+    "$description produced exit files before fixture release"
+}
+
+release_workers() {
+  : >"$SINGULAR_STATE_DIR/fixture-release"
+}
+
+wait_for_process_group_gone() { # pgid description
+  local pgid="$1" description="$2" tries=0
+  while singular_pgroup_alive "$pgid"; do
+    tries=$((tries + 1))
+    [[ "$tries" -lt 50 ]] \
+      || fail "watchdog timed out waiting for $description process group $pgid to exit"
+    sleep 0.1
+  done
+}
+
 test_detached_cycle_returns_fast_and_releases_lock() {
   with_fixture
   write_task TASK-0001 ready internal/artifact/a.go "[]"
   write_task TASK-0002 ready internal/artifact/b.go "[]"
   local stub="$SINGULAR_ROOT/stub.sh"
-  make_sleep_stub "$stub" 5
+  make_controlled_stub "$stub"
 
-  local start out elapsed
-  start="$(date +%s)"
-  out="$(actuate "$stub" 2 1)"
-  elapsed=$(( $(date +%s) - start ))
+  # This scheduling delay deliberately exceeds the old four-second heuristic.
+  # Correctness is instead the observable ordering below: reconcile returns,
+  # its origin lock is gone, and both workers are still held by the fixture.
+  sleep 4
+  local cycle_out="$SINGULAR_STATE_DIR/fixture-cycle.out" out
+  actuate_to_file "$stub" 2 1 "$cycle_out"
+  out="$(cat "$cycle_out")"
 
   assert_eq "2" "$(field_of "$out" dispatched_this_run)" "detached cycle dispatched both tasks"
   assert_eq "1" "$(field_of "$out" detached_dispatch)" "detached flag reported"
-  [[ "$elapsed" -lt 4 ]] || fail "detached cycle blocked on workers (took ${elapsed}s with 5s stubs)"
+  assert_workers_held 2 "detached workers"
   [[ ! -f "$SINGULAR_STATE_DIR/locks/origin.lock.json" ]] || fail "origin lock still held after detached cycle"
 
-  # While the stubs sleep: pre-leases hold the slots and the next cycle defers.
+  # Negative control: the same ordering assertion must reject a worker already
+  # completed when its cycle claims to have returned detached.
+  local negative_state="$SINGULAR_ROOT/negative-control-state"
+  mkdir -p "$negative_state/fixture-workers/TASK-NEG" "$negative_state/dispatch"
+  : >"$negative_state/fixture-workers/TASK-NEG/started"
+  : >"$negative_state/fixture-workers/TASK-NEG/completed"
+  if (SINGULAR_STATE_DIR="$negative_state" SINGULAR_DISPATCH_DIR="$negative_state/dispatch" \
+      assert_workers_held 1 "synchronous negative-control worker") >/dev/null 2>&1; then
+    fail "ordering assertion accepted a synchronous/waiting negative control"
+  fi
+
+  # While the stubs are explicitly held: pre-leases hold the slots and the next
+  # cycle defers without duplicate dispatch.
   local out2
-  out2="$(actuate "$stub" 2 1)"
+  actuate_to_file "$stub" 2 1 "$cycle_out"
+  out2="$(cat "$cycle_out")"
   assert_eq "0" "$(field_of "$out2" dispatched_this_run)" "no double dispatch while workers run"
   assert_eq "2" "$(field_of "$out2" workers_running)" "both workers observed running at cycle start"
   assert_contains "$out2" "max-concurrent cap reached" "ready tasks deferred while slots are held"
+  assert_workers_held 2 "detached workers after second cycle"
 
-  # Drain: blocks until the stubs finish, then reaps both.
+  # Explicit release lets drain observe completion and reap both.
   local drain_out
+  release_workers
   drain_out="$(SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain 2>&1)" || fail "drain did not exit cleanly"
   assert_contains "$drain_out" "no launched dispatch records remain" "drain completed"
+  assert_eq "2" "$(fixture_worker_count released)" "both detached workers observed fixture release"
+  assert_eq "2" "$(fixture_worker_count completed)" "both detached workers completed after release"
   assert_contains "$(cat "$SINGULAR_DISPATCH_DIR/TASK-0001.json")" '"state": "reaped"' "TASK-0001 record finalized"
   assert_contains "$(cat "$SINGULAR_DISPATCH_DIR/TASK-0002.json")" '"state": "reaped"' "TASK-0002 record finalized"
   [[ -z "$(find "$SINGULAR_DISPATCH_DIR" -name '*.exit' 2>/dev/null)" ]] || fail "exit files not cleaned up after reap"
@@ -198,20 +341,27 @@ test_detached_pre_lease_blocks_scope_overlap() {
   write_task TASK-0001 ready internal/artifact/shared.go "[]"
   write_task TASK-0002 ready internal/artifact/shared.go "[]"
   local stub="$SINGULAR_ROOT/stub.sh"
-  make_sleep_stub "$stub" 4
+  make_controlled_stub "$stub"
 
-  local out
-  out="$(actuate "$stub" 2 1)"
+  local cycle_out="$SINGULAR_STATE_DIR/fixture-cycle.out" out
+  actuate_to_file "$stub" 2 1 "$cycle_out"
+  out="$(cat "$cycle_out")"
   assert_eq "1" "$(field_of "$out" dispatched_this_run)" "only one task dispatched for a shared owned file"
+  assert_workers_held 1 "overlap owner"
 
   # While TASK-0001 runs under its pre-lease, the overlapping TASK-0002 must
   # stay blocked even though a slot is free.
   local out2
-  out2="$(actuate "$stub" 2 1)"
+  actuate_to_file "$stub" 2 1 "$cycle_out"
+  out2="$(cat "$cycle_out")"
   assert_eq "0" "$(field_of "$out2" dispatched_this_run)" "scope overlap with a pre-leased running task blocks dispatch"
   assert_eq "1" "$(wc -l <"$SINGULAR_STATE_DIR/dispatch.log" | tr -d ' ')" "driver invoked exactly once"
+  assert_workers_held 1 "overlap owner after second cycle"
 
-  SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain >/dev/null 2>&1 || true
+  release_workers
+  SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain >/dev/null 2>&1 \
+    || fail "overlap fixture drain did not exit cleanly"
+  assert_eq "1" "$(fixture_worker_count completed)" "overlap owner completed after release"
 }
 
 test_detached_reap_attributes_ok_and_failed() {
@@ -253,11 +403,13 @@ test_detached_crash_detected_by_pid() {
   with_fixture
   write_task TASK-0001 ready internal/artifact/a.go "[]"
   local stub="$SINGULAR_ROOT/stub.sh"
-  make_sleep_stub "$stub" 30
+  make_controlled_stub "$stub"
 
-  local out
-  out="$(actuate "$stub" 1 1)"
+  local cycle_out="$SINGULAR_STATE_DIR/fixture-cycle.out" out
+  actuate_to_file "$stub" 1 1 "$cycle_out"
+  out="$(cat "$cycle_out")"
   assert_eq "1" "$(field_of "$out" dispatched_this_run)" "worker dispatched"
+  assert_workers_held 1 "crash-control worker"
 
   local pid
   pid="$(singular_json_field "$SINGULAR_DISPATCH_DIR/TASK-0001.json" pid)"
@@ -265,7 +417,7 @@ test_detached_crash_detected_by_pid() {
   # Kill the detached session (wrapper + stub) without letting it write an
   # exit file -- simulates a hard crash / SIGKILL.
   kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
-  sleep 1
+  wait_for_process_group_gone "$pid" "crashed worker"
 
   local out2
   # 0.5.0 tree-liveness treats recent run-dir writes as maybe-alive (bounded
@@ -310,17 +462,22 @@ test_autonomate_breaker_semantics_detached() {
   with_fixture
   write_task TASK-0001 ready internal/artifact/a.go "[]"
   local stub="$SINGULAR_ROOT/stub.sh"
-  make_sleep_stub "$stub" 4
+  make_controlled_stub "$stub"
 
   # Dispatch-only cycle: NOT progress (no reset) and NOT failure (no trip).
-  local out
-  out="$(cd "$SINGULAR_ROOT" && SINGULAR_L1_DRIVER="$stub" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 SINGULAR_PUSH=0 \
+  local breaker_out="$SINGULAR_STATE_DIR/fixture-breaker.out" out
+  (cd "$SINGULAR_ROOT" && SINGULAR_L1_DRIVER="$stub" SINGULAR_GENERATE=0 SINGULAR_AUTO_INTEGRATE=0 SINGULAR_PUSH=0 \
     SINGULAR_MAX_CONCURRENT=1 SINGULAR_MAX_DISPATCH=1 SINGULAR_DETACHED_DISPATCH=1 \
-    "$SCRIPT_DIR/autonomate.sh" --once 2>&1)" || true
+    "$SCRIPT_DIR/autonomate.sh" --once >"$breaker_out" 2>&1) || true
+  out="$(cat "$breaker_out")"
   assert_contains "$out" "dispatched_this_run=1" "autonomate cycle dispatched"
+  assert_workers_held 1 "breaker dispatch-only worker"
   assert_not_contains "$out" "breaker ->" "dispatch-only detached cycle must not trip the breaker"
   assert_eq "0" "$(singular_breaker_count)" "breaker untouched by dispatch-only cycle"
-  SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain >/dev/null 2>&1 || true
+  release_workers
+  SINGULAR_DRAIN_TIMEOUT_SECS=30 "$SCRIPT_DIR/reconcile.sh" --drain >/dev/null 2>&1 \
+    || fail "breaker fixture drain did not exit cleanly"
+  assert_eq "1" "$(fixture_worker_count completed)" "breaker worker completed after release"
 
   # Reap-failure cycle (a previously detached worker failed): trips the breaker.
   with_fixture
