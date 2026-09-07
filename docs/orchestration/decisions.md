@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-07T16:59:49Z — TASK-1001 — integrate
+
+- Run: `ORIGIN-20260907T164641Z-85659`
+- Branch: `codex/brain/TASK-1001-canary-environment`
+- Authority: origin
+- Rationale: merged codex/brain/TASK-1001-canary-environment (b5b169bffe5c2631daa16ff13b0137e66afe31b1) into codex/brain-integration as 85937f90c7eb26953e15b52eb70d0b5c9ede043f; gate green; acceptance=accepted
+
 ### 2026-09-07T16:46:08Z — TASK-1001 — accept
 
 - Run: `RUN-20260907T161336Z-94008`

@@ -35,3 +35,11 @@ focused test commands for task gates where appropriate; preserve the final full
 host regression requirement and report sandbox failures accurately. Do not
 weaken tests or widen filesystem access. Retained operational observations are
 in the campaign root's .singular-state/campaign-evidence/ directory.
+
+The Objective must explicitly direct the worker to the complete task at
+"$SINGULAR_TASKS_DIR/TASK-XXXX.md" (using its actual task ID); newly generated
+tasks may not yet exist in the worker checkout. Put mandatory requirements in
+the rendered Objective and complete single-line Acceptance Criteria, not only
+in extra sections. The context integration must later carry an immutable full
+task snapshot itself. Integration runs the full default suite for every task,
+so favor cohesive vertical tasks rather than tiny mechanical splits.

@@ -1,17 +1,18 @@
 # TASK-XXXX: <title>
 
 Status: ready
-Area: core
-Target branch: `agent/integration`
-Worker branch: `agent/core/TASK-XXXX-<slug>`
+Area: brain
+Node: <assigned DAG node>
+Target branch: `codex/brain-integration`
+Worker branch: `codex/brain/TASK-XXXX-<slug>`
 Test policy: `strict_test_first`
-Gate command: `true`
+Gate command: `bash tests/test-<feature>.sh`
 Dispatch mode: canonical
 Depends on: []
 
 ## Objective
 
-Describe the smallest independently verifiable change.
+Read the full task at "$SINGULAR_TASKS_DIR/TASK-XXXX.md" and docs/brain-build-plan/campaign.md. Describe a complete, bounded capability and include all mandatory implementation requirements in this Objective and the flat Acceptance Criteria.
 
 ## Scope
 

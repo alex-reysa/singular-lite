@@ -1,0 +1,22 @@
+{
+  "schema": "singular.brain-campaign.runtime-baseline.v1",
+  "release": "0.21.0",
+  "releaseCommit": "0f92cba1fb1f2b51d6762b493b0ac7aaded8fdd9",
+  "runtimeSourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+  "runtimeDirectory": ".singular-state/runtime/0.21.0-brain-bootstrap",
+  "enginePayloadDifferencesFromRelease": [
+    "engine/campaign-canary.sh"
+  ],
+  "bootstrapTask": "TASK-1001",
+  "workerHead": "b5b169bffe5c2631daa16ff13b0137e66afe31b1",
+  "auditRun": "RUN-20260907T161336Z-94008",
+  "auditVerdict": "accepted",
+  "waiver": false,
+  "integrationTests": {
+    "passed": 214,
+    "failed": 0,
+    "log": ".singular-state/runs/ORIGIN-20260907T164641Z-85659-integrate-TASK-1001/gate-check.log"
+  },
+  "upstreamBrainCommit": "e05f259be5cabda2bb8caa241f23cc1f48e9f059",
+  "createdAt": "2026-09-07T17:03:19.139476+00:00"
+}

@@ -10,7 +10,9 @@ This campaign file defines the executable scope and completion requirements.
 The approved design replaces the historical context-evolution plan's rule that
 all new logic must be tiny ctx-*.sh wrappers. Prefer a cohesive Python service.
 
-The frozen orchestrator is in `.singular-state/runtime/0.21.0`. Changes to the
+The bootstrap TASK-1001 canary-isolation repair is an explicitly reviewed patch
+to the release baseline; its source revision is recorded in runtime-baseline.json.
+The frozen orchestrator is in `.singular-state/runtime/0.21.0-brain-bootstrap`. Changes to the
 product's engine must not change this runtime during the campaign. The launcher
 is `tools/brain-campaign/run.sh`. Campaign configuration, source snapshots, and
 raw observations stay in `.singular-state/`; do not commit runtime logs.
@@ -69,7 +71,9 @@ aggregate budget and explicit failure if mandatory content cannot fit.
 
 Build prompt text and provenance together from one read/immutable bundle, with
 atomic publication and deterministic ordering. Get must verify source integrity
-and refuse wrong-version reads. Any disposable cache must be rebuildable and
+and refuse wrong-version reads. Search/get/explain must work in a read-only
+agent sandbox, without writing cache locks or budget ledgers in /tmp or the
+source tree; place any required accounting at the host invocation boundary. Any disposable cache must be rebuildable and
 worktree-specific. Avoid mutating committed indexes inside a verification gate.
 
 Completion test `tests/test-context-service-e2e.sh`: actual generated corpus,
@@ -132,3 +136,12 @@ instructions and a findings report from actual retained campaign observations.
 Full regression is required before final delivery. Subsequent use of the newly
 built runtime is a replacement campaign with a new frozen identity, never a
 hot patch to this one.
+
+## Retained setup evidence
+
+Use .singular-state/campaign-evidence/operator-observations.ndjson and the
+native runs/events as the raw baseline. Classify operator-induced setup failures,
+provider/sandbox limits, product defects, and test flakiness separately. The
+console and doctor in 0.21.0 do not consistently resolve custom task/config
+paths; use the runtime's configured paths and actual session/runner sidecars
+for this campaign. Do not claim the new memory layer caused baseline changes.
