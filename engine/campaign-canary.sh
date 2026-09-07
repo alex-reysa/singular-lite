@@ -25,6 +25,7 @@ worktree="$tmp/bootstrap-worktree"
 fixture_repo="$tmp/lifecycle-repo"
 fixture_runner="$tmp/fixture-v1-runner.sh"
 source_target_sha=""
+validated_bash_bin=""
 lifecycle_audit_verification="not-run"
 provider_probe_state="not-run"
 provider_probe_invoked="no"
@@ -94,7 +95,9 @@ EOF
 
 check_bash() {
   local bash_bin; bash_bin="$(singular_bash_bin)"
-  [[ "$bash_bin" == /* && -x "$bash_bin" ]] && "$bash_bin" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]'
+  [[ "$bash_bin" == /* && -x "$bash_bin" ]] || return 1
+  "$bash_bin" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' || return 1
+  validated_bash_bin="$bash_bin"
 }
 check_target_branch() {
   source_target_sha="$(git -C "$SINGULAR_ROOT" rev-parse --verify "$SINGULAR_TARGET_BRANCH" 2>/dev/null)"
@@ -240,9 +243,22 @@ EOF
 check_fixture_lifecycle() {
   local lifecycle_env=(
     SINGULAR_ROOT="$fixture_repo" SINGULAR_ENGINE_HOME="$SCRIPT_DIR/.."
+    SINGULAR_BASH_BIN="$validated_bash_bin"
+    SINGULAR_JSON_CONFIG_FILE="$fixture_repo/singular.config.json"
+    SINGULAR_CONFIG_FILE=/dev/null SINGULAR_LOCAL_CONFIG_FILE=/dev/null
+    SINGULAR_ORCH_DIR="$fixture_repo/docs/orchestration"
+    SINGULAR_TASKS_DIR="$fixture_repo/docs/orchestration/tasks"
     SINGULAR_STATE_DIR="$fixture_repo/.singular-state" SINGULAR_TARGET_BRANCH="canary-target"
+    SINGULAR_WORKTREES_DIR="$fixture_repo/.worktrees"
     SINGULAR_RUNNER="$fixture_runner" SINGULAR_REQUIRE_AUDIT=1 SINGULAR_AUDIT_VERIFY=1
     SINGULAR_MAX_RETRIES=0 SINGULAR_AUTO_PROMOTE_GATES=0 SINGULAR_PUSH=0
+  )
+  run_isolated_fixture_lifecycle() (
+    local inherited
+    while IFS= read -r inherited; do
+      unset "$inherited" 2>/dev/null || true
+    done < <(compgen -A variable SINGULAR_)
+    env "${lifecycle_env[@]}" "$@"
   )
   git clone --quiet --no-hardlinks "$SINGULAR_ROOT" "$fixture_repo"
   git -C "$fixture_repo" config user.name campaign-canary
@@ -264,7 +280,7 @@ check_fixture_lifecycle() {
   git -C "$fixture_repo" commit -q -m "campaign canary lifecycle fixture baseline"
   (
     cd "$fixture_repo"
-    env "${lifecycle_env[@]}" "$SCRIPT_DIR/l1-drive.sh" TASK-9999 >"$tmp/l1-drive.log" 2>&1
+    run_isolated_fixture_lifecycle "$SCRIPT_DIR/l1-drive.sh" TASK-9999 >"$tmp/l1-drive.log" 2>&1
   ) || {
     cat "$tmp/l1-drive.log" >&2
     find "$fixture_repo/.singular-state/runs" -name 'worker-packet-validation.log' -exec cat {} \; >&2 2>/dev/null || true
@@ -284,8 +300,8 @@ PY
 )"
   (
     cd "$fixture_repo"
-    env "${lifecycle_env[@]}" "$SCRIPT_DIR/import-packet.sh" "$inbox" >"$tmp/import.log" 2>&1
-    env "${lifecycle_env[@]}" "$SCRIPT_DIR/integrate.sh" --task TASK-9999 --run-id "CANARY-INTEGRATE-$run_id" >"$tmp/integrate.log" 2>&1
+    run_isolated_fixture_lifecycle "$SCRIPT_DIR/import-packet.sh" "$inbox" >"$tmp/import.log" 2>&1
+    run_isolated_fixture_lifecycle "$SCRIPT_DIR/integrate.sh" --task TASK-9999 --run-id "CANARY-INTEGRATE-$run_id" >"$tmp/integrate.log" 2>&1
   ) || {
     cat "$tmp/import.log" "$tmp/integrate.log" >&2
     find "$fixture_repo/.singular-state/runs" -path '*integrate*/gate-report.json' -type f -exec cat {} \; >&2 2>/dev/null || true
