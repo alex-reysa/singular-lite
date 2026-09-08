@@ -4,7 +4,7 @@
   "baseRelease": "0.21.0",
   "baseCommit": "0f92cba1fb1f2b51d6762b493b0ac7aaded8fdd9",
   "campaignAtAdoption": "BRAIN-20260907-ASTRA-SOL-R2",
-  "phase": "operator-bridge-independent-artifact-review",
+  "phase": "host-verified-operator-bridge-review-budget-blocked",
   "generationMode": "operator-directed-native-until-runtime-replacement",
   "models": {
     "model": "gpt-6-astra",
@@ -112,7 +112,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-08T05:02:40.742116+00:00",
+  "lastObservedAt": "2026-09-08T06:05:47.410049+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "blocked-audit-infrastructure",
@@ -257,7 +257,7 @@
   "bootstrapRecovery": {
     "nativeDecisionRun": "PLAN-BOOTSTRAP-AUDIT-20260908",
     "decisionEvidence": ".singular-state/campaign-evidence/bootstrap-audit-decision/decision.json",
-    "status": "independent-artifact-review-running",
+    "status": "host-fixtures-passed-awaiting-sufficient-bounded-independent-review",
     "authorRunId": "AUTHOR-BOOTSTRAP-AUDIT-BRIDGE-20260908",
     "authorPid": 31828,
     "artifactDirectory": ".singular-state/campaign-evidence/bootstrap-audit-bridge",
@@ -278,9 +278,9 @@
     "artifactReviewRunId": "RECOVERY-TASK-1019-20260908-PROCEDURE-1",
     "artifactReviewEvidence": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-1",
     "fixtureTests": {
-      "passed": 13,
+      "passed": 17,
       "failed": 0,
-      "log": ".singular-state/campaign-evidence/bootstrap-audit-bridge/finalization/host-fixture-tests.log"
+      "receipt": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-2/host-fixture-receipt.json"
     },
     "authorOutcome": "timed-out-no-final-artifact-draft-preserved",
     "candidateAcceptanceChanged": false,
@@ -314,6 +314,20 @@
       "sourceIntegrity": "verified",
       "report": ".singular-state/runs/PREINTEGRATION-TASK-1019-STAGED-20260908/audit-verification.json",
       "limitation": "Supporting proof for target684ee018 only; subsequent control publication changes target. Bridge and final integration must freshly gate actual target/tree."
+    },
+    "artifactReviewOutcome": "blocked-v1-preserved",
+    "latestRepairRunId": "REPAIR-BOOTSTRAP-AUDIT-BRIDGE-20260908-2",
+    "latestRepairOutcome": "partial-unapproved-host-verification-now-passed",
+    "hostVerifiedArtifact": ".singular-state/campaign-evidence/bootstrap-audit-bridge/host-verified-artifact-v3",
+    "reviewPlanRunId": "PLAN-BOUNDED-RECOVERY-REVIEW-20260908",
+    "reviewPlanPid": 71853,
+    "reviewPlanEvidence": ".singular-state/campaign-evidence/bootstrap-audit-bridge/review-plan",
+    "remainingBlocker": "Sufficient fresh independent artifact review plus task review must fit unchanged181434 remaining retrieval bytes; no further delivery yet",
+    "ledger": {
+      "used": 80710,
+      "legacy": 0,
+      "composedTelemetry": 110252,
+      "unchanged": true
     }
   }
 }

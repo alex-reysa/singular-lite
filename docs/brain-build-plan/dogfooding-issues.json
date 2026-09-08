@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T05:02:40.742116+00:00",
+  "updatedAt": "2026-09-08T06:05:47.410049+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -329,7 +329,7 @@
       "id": "DF-015",
       "title": "Read-only auditor cannot use mandatory evidence retrieval helper",
       "category": "product-capability-boundary-defect",
-      "status": "operator-bridge-independent-artifact-review",
+      "status": "operator-bridge-host-verified-review-budget-blocked",
       "relatedTasks": [
         "TASK-1017",
         "TASK-1019",
@@ -339,7 +339,7 @@
         "TASK-1016"
       ],
       "observed": "First R3 schema task gate passed, but the fresh Astra Light auditor returned blocked: evidence-show.sh attempts a mutable /tmp/singular-evidence-retrieval-v0 ledger lock denied by the read-only sandbox. Driver parked with no product retry spent. This is evidence-access failure, not a failing schema implementation or acceptance.",
-      "nextAction": "Inspect real fresh native Low artifact verdict; resolve any findings, then host prepare/gate/fresh task audit and guarded publication. Preserve original records and cumulative accounting.",
+      "nextAction": "Complete sufficient fresh independent review within actual preserved budget before any prepare/publication. Existing v1 audit stays blocked; no live fix adopted.",
       "evidence": [
         {
           "path": ".singular-state/runs/RUN-20260908T030505Z-83392/audit.json",
@@ -439,6 +439,34 @@
       ],
       "lastReviewedAt": "2026-09-08T04:33:12.276072+00:00",
       "latestObservation": "Native High isolated file authoring succeeded at04:40:56Z; root reran13 disposable tests, all passed. Cumulative usage813564 input750080 cached13506 output, not cost or instantaneous context. Independent native Low review started; no live acceptance changed."
+    },
+    {
+      "id": "DF-019",
+      "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
+      "category": "operator-evidence-planning-inefficiency",
+      "status": "bounded-review-sufficiency-plan-running",
+      "relatedTasks": [
+        "TASK-1016",
+        "TASK-1022"
+      ],
+      "observed": "First source review consumed80710 retrieval bytes. Proposed retry includes full growing operator sources plus70720 native helper bytes; mandatory source/task lower bound237184 exceeds181434 remaining. No retry delivered and no ledger reset. Cumulative composed condition was added by operator artifact whereas native manifest enforces per-assembly size; proposed correction needs independent review and cannot solve retrieval excess alone.",
+      "nextAction": "Use sufficient bounded source selection and normal artifact refactoring; estimate full required source/task deliveries before consuming budget. Preserve old counters and verdicts; no replenishment or code omission hiding relevant behavior. Feed context-efficiency observations into TASK1016 after actual B2/B3 dependencies.",
+      "evidence": [
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-1/completion.json",
+          "sha256": "ecd3ece238f59f5f43bd5147ec69cea98c5c76d8fc45b1626bb43f2e358cbc73"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/ledger.json",
+          "sha256": "c933faaef2099eacab5d835f7cdd0e241610234f000b1e28c1ea3113fa79613b"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-2-checkpoint.json",
+          "sha256": "448005f89599fad2e6e09640739416e6b92e881d7227c07ae2788f3b3e7c67bf"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T05:34:37.316406+00:00",
+      "latestObservation": "Repair2 final-hash host verification passed17/17 including real native publication/import crash replay. Current fullsource/native/task package still exceeds181434 remaining; readonly native High assesses sufficient review and eligibility without growing code or spending ledger. No permission or budget change inferred."
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
