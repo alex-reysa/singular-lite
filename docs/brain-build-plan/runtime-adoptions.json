@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.runtime-adoptions.v1",
-  "updatedAt": "2026-09-08T03:13:08.498979+00:00",
+  "updatedAt": "2026-09-08T03:19:22.788023+00:00",
   "activeAtObservation": {
     "campaign": "BRAIN-20260908-ASTRA-LIGHT-R3",
     "sourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
@@ -75,13 +75,27 @@
         "finishedAt": "2026-09-08T03:11:15Z",
         "providerOutcome": "succeeded",
         "taskGate": "passed",
-        "auditAndIntegration": "pending-at-observation",
+        "auditAndIntegration": "Fresh auditor blocked on evidence helper ledger write; no integration",
         "usage": {
           "inputTokens": 1372880,
           "cachedInputTokens": 1291136,
           "outputTokens": 7784
         },
         "interpretation": "Cumulative invocation counters; not instantaneous context occupancy or monetary cost. Task and model differ from prior timeout run, so no causal efficiency claim."
+      },
+      "firstAuditObservation": {
+        "runId": "RUN-20260908T030505Z-83392",
+        "verdict": "blocked",
+        "role": "auditor",
+        "model": "gpt-6-astra",
+        "effort": "low",
+        "issue": "DF-015",
+        "usage": {
+          "inputTokens": 155647,
+          "cachedInputTokens": 130816,
+          "outputTokens": 1970
+        },
+        "candidatePreserved": true
       }
     }
   ]

@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-08T03:13:24Z — TASK-1017 — escalate-parked
+
+- Run: `RUN-20260908T030505Z-83392`
+- Branch: `codex/brain/TASK-1017-brain-schema-bundle`
+- Authority: decider
+- Rationale: decider terminal action after audit-blocked
+
 ### 2026-09-07T21:42:39Z — TASK-1013 — escalate-infra
 
 - Run: `RUN-20260907T202230Z-53859`

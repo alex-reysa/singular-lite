@@ -4,7 +4,7 @@
   "baseRelease": "0.21.0",
   "baseCommit": "0f92cba1fb1f2b51d6762b493b0ac7aaded8fdd9",
   "campaignAtAdoption": "BRAIN-20260907-ASTRA-SOL-R2",
-  "phase": "astra-light-active-bounded-recovery-queued",
+  "phase": "astra-light-active-fixture-running-evidence-repair-planning",
   "generationMode": "operator-directed-native-until-runtime-replacement",
   "models": {
     "model": "gpt-6-astra",
@@ -112,12 +112,12 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-08T03:13:08.498979+00:00",
+  "lastObservedAt": "2026-09-08T03:19:22.788023+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
-    "status": "running",
+    "status": "blocked-audit-infrastructure",
     "dependsOn": [],
-    "reason": "TASK-1010 full integration gate: missing consumer schema mirror",
+    "reason": "Read-only auditor evidence retrieval cannot write mandatory ledger; DF-015",
     "deciderAction": "split-task",
     "candidateToPreserve": "afa542ff71425788ed148d5b09b430e1b8810108",
     "failedIntegrationRunId": "OPERATOR-20260907T2024Z-integrate-TASK-1010",
@@ -125,10 +125,11 @@
       "passed": 209,
       "failed": 6
     },
-    "nextAfterRepair": "Explicit native TASK-1010 integration of its unchanged accepted candidate after TASK-1017 fully integrates; verify head/audit/campaign bindings and require fresh full exact merged-tree gate. No reset/re-dispatch or acceptance rebinding.",
+    "nextAfterRepair": "Preserve TASK-1017 candidate and blocked audit; obtain supported fresh independent audit and full integration after evidence-access recovery. No deterministic acceptance substitute or reset.",
     "evidenceDirectory": ".singular-state/campaign-evidence/consumer-schema-repair",
     "runId": "RUN-20260908T030505Z-83392",
-    "campaign": "BRAIN-20260908-ASTRA-LIGHT-R3"
+    "campaign": "BRAIN-20260908-ASTRA-LIGHT-R3",
+    "candidateHead": "3114c5cc3b31a441d2c5d84b471834193bd9d99e"
   },
   "requestedModels": {
     "allRolesModel": "gpt-6-astra",
@@ -204,7 +205,9 @@
       {
         "id": "TASK-1019",
         "status": "ready",
-        "dependsOn": []
+        "dependsOn": [],
+        "observedStatus": "running",
+        "runId": "RUN-20260908T031330Z-23710"
       },
       {
         "id": "TASK-1020",
@@ -228,5 +231,15 @@
       "TASK-1014"
     ],
     "obligationMapping": "Original TASK-1013 obligations are preserved as follows:\n\n| Original obligation | Successor and required proof |\n|---|---|\n| AC1: Fresh behavioral red/green, real entrypoints, complete accepted\u2192failed integration\u2192authorized repair/regate\u2192success, disposable providers, no weakened assertions | TASK-1020 establishes actual reservation/publication/failure-preservation behavior; TASK-1021 proves both complete recovery sequences through driver, decision, recovery and integration. Neither may substitute helper-only tests. |\n| AC2: Temporary ownership separate from durable acceptance; contract/attempt/commit/tree/campaign/audit binding; predecessor retention; existing locks/publication; no second database or transactional events | TASK-1020 owns the authoritative transition foundation, actual evidence validation and preservation; TASK-1021 extends it with bound recovery authorization and successor history. |\n| AC3: Failed acquisition prevents dispatch; owner/generation CAS across same/different branches, handoff/status/cleanup/exit/reaper attribution | TASK-1020 covers batch, detached and direct drive, raw lease operations, scope/budget mutations and stale callers using captured tokens. TASK-1021 preserves these guarantees for successor attempts and denied authorization. |\n| AC4: Crash before/after publication and restart replay; no Markdown acceptance, implicit reset, lineage loss or campaign rebinding | TASK-1020 covers reservation, accepted-evidence resume, publication/integration and cleanup boundaries. TASK-1021 covers authorization/successor publication and accounting replay. Missing or mismatched authority fails closed in both. |\n| AC5: Host-authorized repair in separate worktree; historical work preserved; changed/rebased candidate fresh audit; unchanged regate current-policy eligibility and exact-tree gate | TASK-1020 fences destructive reset and existing in-place rebase substitution immediately. TASK-1021 supplies validated repair/regate transitions, distinct successor identities and fresh audits even when only commit identity changes. |\n| AC6: Eligible failures counted once by domain; refusal/setup/evidence infrastructure cannot erase candidates or consume product budget | TASK-1020 preserves existing budgets and candidate evidence during protective transitions. TASK-1021 completes durable deduplication across product/infrastructure/regate domains and proves that recorded retries confer no launch authority. |\n| AC7: Existing health shows dependencies/candidate/reason/owner/action; recovery/shared callers preserve invariants | TASK-1020 covers actual lib, lease, reconcile, wrapper, driver, integrate, recover and ops cleanup paths, including GC retention. TASK-1021 completes health output and safe operational recovery verbs. |\n| AC8: Focused gates, complete canonical host exact merged-tree suite, fresh independent exact-candidate audit, honest unrun checks, source/scope/secret/campaign controls | Mandatory in all four contracts. TASK-1019 repairs the required fixture without reducing exact-tree or publication-lock assertions. Current Astra Light/low independent audits at normal speed supersede the original Sol role requirement. |\n| AC9: Preserve TASK-1009 implementation/tests/214-of-214 history, producer/consumer recovery and historical records; no live edits, broad rewrite, frozen-executor mutation or B1 claim | Mandatory across all contracts. TASK-1020 stays within ten files; TASK-1021 within nine. TASK-1018 and TASK-1019 remain test-only and disjoint from TASK-1017's schema pair and regression. No producer/consumer dependency is introduced; TASK-1019 is only a fixture prerequisite. |\n\nTASK-1018 separately satisfies DF-010 and the native producer split-task decision, including the second path-qualified no-conflict assertion. It does not integrate the producer. TASK-1019 satisfies DF-013 with hostile configuration reproduction and explicit early-failure termination evidence, while retaining TASK-1009 installer and bounded-dispatch repairs.\n\nRUN-20260907T202230Z-53859 remains terminal escalate-infra after two 2400-second timeouts, product retryCount 0, no accepted candidate and no active process. Its checkpoint patch, untracked directory, worktree and all old candidates remain untouched untrusted reference. Do not redispatch/reset TASK-1013 or copy acceptance labels. Old producer TASK-1011 and consumer TASK-1010 remain historical R2 candidates; successors require fresh R3/current-policy authority and fullgate, never audit rebinding.\n\nAfter contract publication, the host must replace TASK-1014's dependency with [\"TASK-1021\"] and retain its verification-responsibility scope/intended deliverable. TASK-1020 alone closes neither S1 nor B1. Fully audited/integrated material repairs may be adopted promptly through preserved checkpoints, drained/fenced ownership, a new immutable runtime snapshot and campaign identity/epoch, native canary/real-provider assurance, verified launcher selection and rollback. Host records failures and adoption evidence; adopted does not mean proven effective until applicable follow-up runs confirm it. Test-only repairs alone do not require executor replacement."
+  },
+  "evidenceAccessRecovery": {
+    "taskId": "TASK-1022",
+    "status": "native-planning",
+    "plannerRunId": "PLAN-READONLY-EVIDENCE-20260908",
+    "plannerPid": 39458,
+    "evidenceDirectory": ".singular-state/campaign-evidence/readonly-evidence-repair",
+    "priority": "independent-before-other-new-runtime-workers",
+    "requires": "Validate native planner contract before publication; fresh independent review and exact merged-tree gates, then controlled runtime adoption",
+    "preservedSchemaCandidate": "3114c5cc3b31a441d2c5d84b471834193bd9d99e"
   }
 }

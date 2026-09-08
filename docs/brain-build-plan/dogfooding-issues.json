@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T03:13:08.498979+00:00",
+  "updatedAt": "2026-09-08T03:19:22.788023+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -165,13 +165,13 @@
       "id": "DF-009",
       "title": "Brain consumer schema mirror omitted",
       "category": "product-integration-omission",
-      "status": "native-queued",
+      "status": "schema-candidate-preserved-audit-infrastructure-blocked",
       "relatedTasks": [
         "TASK-1010",
         "TASK-1017"
       ],
       "observed": "The exact merged-tree consumer gate reported 209 passed and 6 failed. The canonical brain schema had no schemas/orchestration mirror.",
-      "nextAction": "Integrate standalone schema-pair repair; retain consumer candidate and require applicable current-campaign audit and full gate.",
+      "nextAction": "Resolve DF-015 access, require fresh independent audit and full integration; do not redispatch or reset TASK-1017.",
       "evidence": [
         {
           "path": ".singular-state/runs/OPERATOR-20260907T2024Z-integrate-TASK-1010-integrate-TASK-1010/gate-check.log",
@@ -281,7 +281,7 @@
         "TASK-1013",
         "TASK-1014"
       ],
-      "status": "native-queued",
+      "status": "implementation-running",
       "observed": "Retained second worker log shows test-integration-exact-tree.sh integrator failing target branch not found: codex/brain-integration, followed by unbounded watcher wait for MERGE_HEAD. Inherited custom config is the suspected setup cause; infinite wait is visible in code/log.",
       "nextAction": "Native planner queues bounded fixture isolation/watchdog repair, retaining lock/exact-tree assertions and existing TASK-1009 fixes.",
       "evidence": [
@@ -291,7 +291,8 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T03:04:44.725172+00:00",
-      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+      "runId": "RUN-20260908T031330Z-23710"
     },
     {
       "id": "DF-014",
@@ -314,6 +315,36 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T03:04:44.725172+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-015",
+      "title": "Read-only auditor cannot use mandatory evidence retrieval helper",
+      "category": "product-capability-boundary-defect",
+      "status": "native-planning",
+      "relatedTasks": [
+        "TASK-1022",
+        "TASK-1017",
+        "TASK-1014",
+        "TASK-1016"
+      ],
+      "observed": "First R3 schema task gate passed, but the fresh Astra Light auditor returned blocked: evidence-show.sh attempts a mutable /tmp/singular-evidence-retrieval-v0 ledger lock denied by the read-only sandbox. Driver parked with no product retry spent. This is evidence-access failure, not a failing schema implementation or acceptance.",
+      "nextAction": "Native Astra High plans independent TASK-1022 and safe retained-candidate recovery. Preserve sandbox, declared-reference/hash/path/per-excerpt/cumulative-budget checks; keep mutable accounting host-owned. Do not substitute deterministic acceptance for a fresh independent audit.",
+      "evidence": [
+        {
+          "path": ".singular-state/runs/RUN-20260908T030505Z-83392/audit.json",
+          "sha256": "91e8d139d8cef665ba27d9e36836b5c14d74442237bd99ab8208073256db0fe3"
+        },
+        {
+          "path": ".singular-state/runs/RUN-20260908T030505Z-83392/auditor-attempt-1-try-0-runner-result.json",
+          "sha256": "4c25e23883c5146ac6a5e29293b44d4d7f2dc9aa63fdd34b535f2243dc564adf"
+        },
+        {
+          "path": ".singular-state/runs/RUN-20260908T030505Z-83392/run-status.json",
+          "sha256": "7b4ba2a470afcdc09c901147ac82c71509d51a45e1eae096e0e31a8ea64c1814"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T03:19:22.788023+00:00",
       "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
     }
   ],
