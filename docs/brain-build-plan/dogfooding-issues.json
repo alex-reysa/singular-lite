@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T09:47:28.736661+00:00",
+  "updatedAt": "2026-09-08T12:41:11.037590+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -444,13 +444,13 @@
       "id": "DF-019",
       "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
       "category": "operator-evidence-planning-inefficiency",
-      "status": "large-controller-host26-green-lean-replacement-running",
+      "status": "lean-live-transport-finalization-running",
       "relatedTasks": [
         "TASK-1016",
         "TASK-1022"
       ],
       "observed": "First source review consumed80710 retrieval bytes. Proposed retry includes full growing operator sources plus70720 native helper bytes; mandatory source/task lower bound237184 exceeds181434 remaining. No retry delivered and no ledger reset. Cumulative composed condition was added by operator artifact whereas native manifest enforces per-assembly size; proposed correction needs independent review and cannot solve retrieval excess alone.",
-      "nextAction": "Inspect lean-controller native result, audit its complete executable closure and semantic test mapping, run absolute bound host fixtures, then exact source/task/runner-input preflight. Do not treat old large-controller tests as tests of the new controller or reuse needs-fix acceptance.",
+      "nextAction": "Inspect lean-finalization actual result, validate final executable closure and all fresh boundabsolute host tests, measure actual authored source+boundedtask input before review3. No permanentprototype refusal as a substitute for release guards; no increasing cap, refund, fakeproof or stale source acceptance.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-1/completion.json",
@@ -475,10 +475,22 @@
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/host-final/receipt.json",
           "sha256": "b0a6a40476c9ae5bc65ff4d0a955059149ec84388b6d93a530fa8d9f4213ac89"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/lean-controller/host-prototype/receipt.json",
+          "sha256": "460dcfe076a4077070a63c02c9587e28e1becf74f81e4dcd7beb0a95fd157a69"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/lean-controller/root-native-input-proof.json",
+          "sha256": "7510de9eb21a15ad28ad3482d255c87970b21ef4827b889af2b9936d586a2390"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/lean-finalization/invocation.json",
+          "sha256": "b030443eacebf427031466c4a01523b6375676aef69b0dda91d8bf3af4210243"
         }
       ],
-      "lastReviewedAt": "2026-09-08T09:47:28.736661+00:00",
-      "latestObservation": "Native bounded-proof implementation completed09:30:13, then root host26/26 passed after fixture marker duplication repair. All three source-review defects have implemented support, but source input319994 exceeds262144 and combinedknown407017 exceeds251549remaining. No third review or liveledger charge. Preserve host-verified-bounded-proof-r4. Native IMPLEMENT-LEAN-RECOVERY-CONTROLLER-20260908 now builds a separate single-use controller using trusted native primitives, with equivalent semantic safeguards and fresh independent source/candidate approval required.",
+      "lastReviewedAt": "2026-09-08T12:41:11.037590+00:00",
+      "latestObservation": "Lean author finished09:56:52 as incomplete prototype: source163647/taskknown68405, finalfit unproved, live transport/custody missing. Root host25pass1error: proof calls new reservation with zerocharge/nonzerocomposed, violating its newdelivery condition. No charge occurred. Frozen runner static inspection proves prompt-file stdin unchanged in bothpaths, locally prependedbytes0; providerinternalcontext remainsunknown and outside authored-evidence cap. Native FINALIZE-LEAN-RECOVERY-CONTROLLER-20260908 now completes guarded transport/canonical custody, separates existing-proof validation from newcharges and completes exactbounds.",
       "exactEstimate": {
         "source": 192029,
         "sourceComposed": 258091,
@@ -524,9 +536,9 @@
       "id": "DF-021",
       "title": "Recovery proof markers require evidence absent from reviewer input",
       "category": "operator-review-evidence-defect",
-      "status": "large-controller-host26-green-lean-replacement-running",
+      "status": "lean-live-transport-finalization-running",
       "observed": "Independent procedure2 reviewed all four sources and all19 host fixture transcript, but required actual config/campaign contents, effective module/ctx implementation evidence and absolute Python executable receipt binding before approval.",
-      "nextAction": "Inspect lean-controller native result, audit its complete executable closure and semantic test mapping, run absolute bound host fixtures, then exact source/task/runner-input preflight. Do not treat old large-controller tests as tests of the new controller or reuse needs-fix acceptance.",
+      "nextAction": "Inspect lean-finalization actual result, validate final executable closure and all fresh boundabsolute host tests, measure actual authored source+boundedtask input before review3. No permanentprototype refusal as a substitute for release guards; no increasing cap, refund, fakeproof or stale source acceptance.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-2/audit.json",
@@ -543,10 +555,22 @@
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/host-final/receipt.json",
           "sha256": "b0a6a40476c9ae5bc65ff4d0a955059149ec84388b6d93a530fa8d9f4213ac89"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/lean-controller/host-prototype/receipt.json",
+          "sha256": "460dcfe076a4077070a63c02c9587e28e1becf74f81e4dcd7beb0a95fd157a69"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/lean-controller/root-native-input-proof.json",
+          "sha256": "7510de9eb21a15ad28ad3482d255c87970b21ef4827b889af2b9936d586a2390"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/lean-finalization/invocation.json",
+          "sha256": "b030443eacebf427031466c4a01523b6375676aef69b0dda91d8bf3af4210243"
         }
       ],
-      "lastReviewedAt": "2026-09-08T09:47:28.736661+00:00",
-      "latestObservation": "Native bounded-proof implementation completed09:30:13, then root host26/26 passed after fixture marker duplication repair. All three source-review defects have implemented support, but source input319994 exceeds262144 and combinedknown407017 exceeds251549remaining. No third review or liveledger charge. Preserve host-verified-bounded-proof-r4. Native IMPLEMENT-LEAN-RECOVERY-CONTROLLER-20260908 now builds a separate single-use controller using trusted native primitives, with equivalent semantic safeguards and fresh independent source/candidate approval required.",
+      "lastReviewedAt": "2026-09-08T12:41:11.037590+00:00",
+      "latestObservation": "Lean author finished09:56:52 as incomplete prototype: source163647/taskknown68405, finalfit unproved, live transport/custody missing. Root host25pass1error: proof calls new reservation with zerocharge/nonzerocomposed, violating its newdelivery condition. No charge occurred. Frozen runner static inspection proves prompt-file stdin unchanged in bothpaths, locally prependedbytes0; providerinternalcontext remainsunknown and outside authored-evidence cap. Native FINALIZE-LEAN-RECOVERY-CONTROLLER-20260908 now completes guarded transport/canonical custody, separates existing-proof validation from newcharges and completes exactbounds.",
       "reviewBoundary": "docs/brain-build-plan/recovery-review-boundary.md"
     },
     {
