@@ -1,0 +1,11 @@
+# Recovery review boundary
+
+The unchanged frozen runtime at source `85937f90c7eb26953e15b52eb70d0b5c9ede043f` and its pinned native tools are the execution baseline for this recovery. New operator bridge, evidence transport, projections, accounting, receipts and proof checks require independent review. That review must establish correct use of native locking, campaign comparison, validators, gates and publication; it does not claim to re-audit every unchanged runtime dependency.
+
+This boundary must be disclosed in the actual review input. Keep relevant native interface and control-flow evidence, version/hash bindings, module membership checks and host verification. Excluded runtime code must be described as baseline code, never as newly reviewed or accepted. The independent auditor can withhold acceptance if evidence for the new code or its native interactions is insufficient.
+
+Supply complete current configuration and concrete campaign identity values. A bounded manifest projection must declare its exact selected fields, parent hash, extraction method and its own projection hash. Do not request a full-manifest review marker for omitted content. Reconstructable change evidence must preserve complete candidate context and deleted base bytes, rather than duplicating both full source and a full diff.
+
+Root observed 26 selected effective functions after exact frozen initialization; all resolved to the frozen lib after the context extensions loaded. This establishes those initial definitions under that environment, not all unexecuted branches. A separate observation matched 129 resolved values to the manifest; five cadence settings are initialized only by the campaign entrypoint. Preserve that distinction. Evidence is under `.singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-redesign/`.
+
+The 512 KiB recovery allowance, prior consumption and per-input/page limits remain unchanged. No third review is sent until actual serialized input and the remaining source-plus-task delivery fit. All changed executable artifacts require final-hash host fixtures through an absolute, hash-bound Python interpreter. Fresh independent acceptance and full native candidate/integration gates remain required before publication. No new product runtime has been adopted.
