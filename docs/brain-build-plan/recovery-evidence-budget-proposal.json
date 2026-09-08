@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.recovery-budget-proposal.v1",
-  "status": "authorized-awaiting-supported-adapter",
+  "status": "authorized-accounting-active-independent-source-review-running",
   "createdAt": "2026-09-08T06:32:56.022136+00:00",
   "scope": {
     "taskId": "TASK-1019",
@@ -21,10 +21,10 @@
   "excerptLimitBytes": 2048,
   "composedAccounting": "Apply native per-invocation input limit; keep original10754 and lifetime110252 composed values as telemetry with explicit migration snapshot/hash. No consumed retrieval refund.",
   "conditions": [
-    "Explicit user authorization required before higher allowance takes effect",
+    "Explicit user authorization recorded and applied for this recovery only",
     "Preserve original manifest and every historical delivery, blocked verdict, candidate, lease and runner identity",
     "Use a separately hash-bound recovery-only policy authorization; do not edit historical manifest or shared configuration",
-    "Native High prepares narrowly scoped support; fresh host tests and independent native Low review still required",
+    "Native Astra Medium/Fast prepared support; all19 final-hash host fixtures passed; fresh independent native Astra Medium/Fast source review is running",
     "Actual candidate acceptance only after fresh independent task verdict and all native validators/host gates",
     "Full native integration re-gates actual staged tree; no runtime adoption before reviewed integration",
     "All role/model/service speed settings remain as requested"
@@ -42,5 +42,19 @@
   "authorizedAt": "2026-09-08T08:17:41.223870+00:00",
   "effectiveRetrievalLimitBytes": 524288,
   "authorizationRecord": ".singular-state/campaign-policy/recovery-TASK-1019-authorized-512k.json",
-  "latestModelPolicy": "All roles Astra medium fast; supersedes High/Low conditions"
+  "latestModelPolicy": "All roles Astra medium fast; supersedes High/Low conditions",
+  "updatedAt": "2026-09-08T08:42:28.623916+00:00",
+  "activeAccounting": {
+    "schema": "operator-evidence-ledger.v2",
+    "retrievalLimitBytes": 524288,
+    "preservedPriorConsumptionBytes": 80710,
+    "freshSourceReviewBytes": 192029,
+    "totalConsumedBytes": 272739,
+    "remainingBytes": 251549,
+    "perInvocationInputLimitBytes": 262144,
+    "latestSourceInputBytes": 258091,
+    "sourceReviewRunId": "RECOVERY-TASK-1019-20260908-PROCEDURE-2",
+    "evidence": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-2",
+    "hostFixtureReceipt": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4-fixture-repair/host-fixture-receipt.json"
+  }
 }

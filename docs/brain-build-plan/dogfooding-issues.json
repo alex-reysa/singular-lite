@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T08:17:41.223870+00:00",
+  "updatedAt": "2026-09-08T08:42:28.623916+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -444,13 +444,13 @@
       "id": "DF-019",
       "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
       "category": "operator-evidence-planning-inefficiency",
-      "status": "recovery-only-budget-authorized-support-update-required",
+      "status": "authorized-scoped-accounting-active-independent-review-running",
       "relatedTasks": [
         "TASK-1016",
         "TASK-1022"
       ],
       "observed": "First source review consumed80710 retrieval bytes. Proposed retry includes full growing operator sources plus70720 native helper bytes; mandatory source/task lower bound237184 exceeds181434 remaining. No retry delivered and no ledger reset. Cumulative composed condition was added by operator artifact whereas native manifest enforces per-assembly size; proposed correction needs independent review and cannot solve retrieval excess alone.",
-      "nextAction": "Use explicit scoped512KiB policy, preserve80710 consumption, current R4 fresh audits and full gates; no additional authorization needed.",
+      "nextAction": "Inspect fresh procedure2 verdict and proof; only after acceptance prepare, full native gate, fresh independent candidate audit, guarded native import and full integration. No budget reset or historical authority edits.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-1/completion.json",
@@ -463,17 +463,52 @@
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-2-checkpoint.json",
           "sha256": "448005f89599fad2e6e09640739416e6b92e881d7227c07ae2788f3b3e7c67bf"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4-fixture-repair/exact-estimate.json",
+          "sha256": "5cb17533728c603a9336afc1209e36b22ee7c5f0ddd87dfc80e33983ad698030"
         }
       ],
-      "lastReviewedAt": "2026-09-08T05:34:37.316406+00:00",
-      "latestObservation": "Repair2 final-hash host verification passed17/17 including real native publication/import crash replay. Current fullsource/native/task package still exceeds181434 remaining; readonly native High assesses sufficient review and eligibility without growing code or spending ledger. No permission or budget change inferred.",
+      "lastReviewedAt": "2026-09-08T08:42:28.623916+00:00",
+      "latestObservation": "User authorized512KiB only for retained TASK1019 recovery and all roles Astra Medium/Fast. Adapter host19/19 green. Atomic ledger migration preserved all80710 prior bytes and every historical delivery; fresh procedure2 charged192029 before native readonly delivery, total272739 remaining251549. Source input258091 fits unchanged262144 limit. Independent source verdict pending; no candidate acceptance or product integration.",
       "exactEstimate": {
-        "source": 180169,
-        "taskFixed": 57269,
+        "source": 192029,
+        "sourceComposed": 258091,
+        "taskFixed": 59717,
         "reserve": 16384,
-        "remaining": 181434,
-        "shortfall": 72388
+        "remainingBeforeSource": 443578,
+        "remainingAfterSource": 251549
       }
+    },
+    {
+      "id": "DF-020",
+      "title": "Synthetic recovery fixture omitted strict full-gate observation",
+      "category": "operator-fixture-defect",
+      "status": "repaired-host19-verified-independent-source-review-running",
+      "relatedTasks": [
+        "TASK-1014"
+      ],
+      "observed": "R4 bridge host fixture suite passed18/19; full native publication fixture errored because synthetic tests/run.sh omitted v2 required gate observation. Frozen verifier correctly classified raw exit0 as inconclusive-infrastructure. Worker ps restriction had skipped this fixture, so worker18pass was insufficient. This was an operator fixture defect, not candidate product failure.",
+      "nextAction": "Preserve failing report and corrected host proof. Keep host-only native publication/import/replay coverage as a separate completion gate; independent source review still required.",
+      "evidence": [
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4/host-fixture-receipt.json",
+          "sha256": "70ed5da2e0a093179a00a3296be7965bc2f4bf2cface8eafa223c1a7c8b9c189"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4-fixture-repair/audit-verification.json",
+          "sha256": "18305e719b8da825f011aada4fc18a0a7137e42693f9284ed0713f9a40f43837"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4-fixture-repair/host-fixture-receipt.json",
+          "sha256": "c42ea50b257e706a31814add0fe3416639ad9c9c16449e6acbf33b93f319bf8b"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4-fixture-repair/runner-result.json",
+          "sha256": "3aa5c4d66a8a8d5639935e12a8dfddc4976380fee9f1ba3cc4a831bf660dd957"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T08:42:28.623916+00:00"
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
