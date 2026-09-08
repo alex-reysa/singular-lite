@@ -1,0 +1,42 @@
+{
+  "schema": "singular.operator.recovery-budget-proposal.v1",
+  "status": "pending-user-authorization-not-applied",
+  "createdAt": "2026-09-08T06:32:56.022136+00:00",
+  "scope": {
+    "taskId": "TASK-1019",
+    "predecessorRunId": "RUN-20260908T031330Z-23710",
+    "recoveryRunId": "RECOVERY-TASK-1019-20260908",
+    "purpose": "Independent operator artifact review and fresh retained candidate review; no ordinary worker/model budget change"
+  },
+  "currentRetrievalLimitBytes": 262144,
+  "proposedRetrievalLimitBytes": 524288,
+  "consumedBytesPreserved": 80710,
+  "currentRemainingBytes": 181434,
+  "proposedRemainingBytes": 443578,
+  "estimatedNextSourceBytes": 180169,
+  "taskFixedBytes": 57269,
+  "taskDynamicAndMarginReserveBytes": 16384,
+  "estimatedRequiredRemainingBytes": 253822,
+  "perInvocationInputLimitBytes": 262144,
+  "excerptLimitBytes": 2048,
+  "composedAccounting": "Apply native per-invocation input limit; keep original10754 and lifetime110252 composed values as telemetry with explicit migration snapshot/hash. No consumed retrieval refund.",
+  "conditions": [
+    "Explicit user authorization required before higher allowance takes effect",
+    "Preserve original manifest and every historical delivery, blocked verdict, candidate, lease and runner identity",
+    "Use a separately hash-bound recovery-only policy authorization; do not edit historical manifest or shared configuration",
+    "Native High prepares narrowly scoped support; fresh host tests and independent native Low review still required",
+    "Actual candidate acceptance only after fresh independent task verdict and all native validators/host gates",
+    "Full native integration re-gates actual staged tree; no runtime adoption before reviewed integration",
+    "All role/model/service speed settings remain as requested"
+  ],
+  "baselineManifest": {
+    "path": ".singular-state/runs/RUN-20260908T031330Z-23710/evidence-manifest.json",
+    "sha256": "707a087ad7021a457c5f13892d6d6b2b83841d5413cd8d9d10675789cceb52a8"
+  },
+  "baselineLedger": {
+    "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/ledger.json",
+    "sha256": "c933faaef2099eacab5d835f7cdd0e241610234f000b1e28c1ea3113fa79613b"
+  },
+  "hostProof": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-2/host-fixture-receipt.json",
+  "reviewPlan": ".singular-state/campaign-evidence/bootstrap-audit-bridge/review-plan/decision.json"
+}

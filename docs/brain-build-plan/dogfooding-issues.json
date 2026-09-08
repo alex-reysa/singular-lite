@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T06:05:47.410049+00:00",
+  "updatedAt": "2026-09-08T06:33:38.288641+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -444,13 +444,13 @@
       "id": "DF-019",
       "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
       "category": "operator-evidence-planning-inefficiency",
-      "status": "bounded-review-sufficiency-plan-running",
+      "status": "awaiting-user-recovery-only-budget-decision",
       "relatedTasks": [
         "TASK-1016",
         "TASK-1022"
       ],
       "observed": "First source review consumed80710 retrieval bytes. Proposed retry includes full growing operator sources plus70720 native helper bytes; mandatory source/task lower bound237184 exceeds181434 remaining. No retry delivered and no ledger reset. Cumulative composed condition was added by operator artifact whereas native manifest enforces per-assembly size; proposed correction needs independent review and cannot solve retrieval excess alone.",
-      "nextAction": "Use sufficient bounded source selection and normal artifact refactoring; estimate full required source/task deliveries before consuming budget. Preserve old counters and verdicts; no replenishment or code omission hiding relevant behavior. Feed context-efficiency observations into TASK1016 after actual B2/B3 dependencies.",
+      "nextAction": "Ask once for explicit recovery-only256->512KiB allowance while preserving consumed80710 and all checks. No provider/review retry or raised allowance pending reply. Native smaller partial review is insufficient for readiness; avoid spending remaining budget on it.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-1/completion.json",
@@ -466,7 +466,14 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T05:34:37.316406+00:00",
-      "latestObservation": "Repair2 final-hash host verification passed17/17 including real native publication/import crash replay. Current fullsource/native/task package still exceeds181434 remaining; readonly native High assesses sufficient review and eligibility without growing code or spending ledger. No permission or budget change inferred."
+      "latestObservation": "Repair2 final-hash host verification passed17/17 including real native publication/import crash replay. Current fullsource/native/task package still exceeds181434 remaining; readonly native High assesses sufficient review and eligibility without growing code or spending ledger. No permission or budget change inferred.",
+      "exactEstimate": {
+        "source": 180169,
+        "taskFixed": 57269,
+        "reserve": 16384,
+        "remaining": 181434,
+        "shortfall": 72388
+      }
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."

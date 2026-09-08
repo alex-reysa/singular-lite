@@ -4,7 +4,7 @@
   "baseRelease": "0.21.0",
   "baseCommit": "0f92cba1fb1f2b51d6762b493b0ac7aaded8fdd9",
   "campaignAtAdoption": "BRAIN-20260907-ASTRA-SOL-R2",
-  "phase": "host-verified-operator-bridge-review-budget-blocked",
+  "phase": "awaiting-user-recovery-evidence-budget-decision",
   "generationMode": "operator-directed-native-until-runtime-replacement",
   "models": {
     "model": "gpt-6-astra",
@@ -112,7 +112,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-08T06:05:47.410049+00:00",
+  "lastObservedAt": "2026-09-08T06:33:38.288641+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "blocked-audit-infrastructure",
@@ -257,7 +257,7 @@
   "bootstrapRecovery": {
     "nativeDecisionRun": "PLAN-BOOTSTRAP-AUDIT-20260908",
     "decisionEvidence": ".singular-state/campaign-evidence/bootstrap-audit-decision/decision.json",
-    "status": "host-fixtures-passed-awaiting-sufficient-bounded-independent-review",
+    "status": "awaiting-budget-authorization-no-live-change",
     "authorRunId": "AUTHOR-BOOTSTRAP-AUDIT-BRIDGE-20260908",
     "authorPid": 31828,
     "artifactDirectory": ".singular-state/campaign-evidence/bootstrap-audit-bridge",
@@ -320,14 +320,16 @@
     "latestRepairOutcome": "partial-unapproved-host-verification-now-passed",
     "hostVerifiedArtifact": ".singular-state/campaign-evidence/bootstrap-audit-bridge/host-verified-artifact-v3",
     "reviewPlanRunId": "PLAN-BOUNDED-RECOVERY-REVIEW-20260908",
-    "reviewPlanPid": 71853,
+    "reviewPlanPid": null,
     "reviewPlanEvidence": ".singular-state/campaign-evidence/bootstrap-audit-bridge/review-plan",
-    "remainingBlocker": "Sufficient fresh independent artifact review plus task review must fit unchanged181434 remaining retrieval bytes; no further delivery yet",
+    "remainingBlocker": "Prepared full source180169 plus task57269 and reserve16384 exceeds181434 remaining; proposed recovery-only512KiB allowance needs explicit user authorization",
     "ledger": {
       "used": 80710,
       "legacy": 0,
       "composedTelemetry": 110252,
       "unchanged": true
-    }
+    },
+    "reviewPlanOutcome": "completed-no-sufficient-overall-package-established",
+    "budgetProposal": "docs/brain-build-plan/recovery-evidence-budget-proposal.json"
   }
 }
