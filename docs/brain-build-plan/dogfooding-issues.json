@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T03:04:44.725172+00:00",
+  "updatedAt": "2026-09-08T03:13:08.498979+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -82,9 +82,12 @@
       "id": "DF-005",
       "title": "Accepted candidate lifecycle and stale cleanup",
       "category": "product-defect",
-      "status": "blocked-preserved-awaiting-native-recovery-plan",
+      "status": "bounded-native-recovery-queued",
       "relatedTasks": [
-        "TASK-1013"
+        "TASK-1013",
+        "TASK-1020",
+        "TASK-1021",
+        "TASK-1019"
       ],
       "observed": "Same-branch reservation and status-only cleanup can overwrite/delete accepted authority; a stale wrapper can delete a newer reservation.",
       "nextAction": "Split or safely recover unfinished lifecycle work using Astra High planning and fresh Astra Light implementation/audit; retain all original obligations.",
@@ -190,9 +193,10 @@
       "id": "DF-010",
       "title": "Producer diagnostic assertion rejects changed capitalization",
       "category": "diagnostic-test-compatibility",
-      "status": "needs-native-task",
+      "status": "native-queued",
       "relatedTasks": [
-        "TASK-1011"
+        "TASK-1011",
+        "TASK-1018"
       ],
       "observed": "Producer integration reported 214 passed, 1 failed. test-config-conflict.sh requires case-sensitive \u201cRemove the legacy env override\u201d; the updated diagnostic prefixes the selected path and uses lowercase \u201cremove\u201d. The observed failure alone does not prove configuration resolution is wrong.",
       "nextAction": "Follow native split-task decision with a bounded compatibility repair. Preserve conflict values, effective-source reporting, remediation meaning and concurrency approval wording; do not request unrelated live concurrency approval or weaken semantic assertions.",
@@ -217,9 +221,12 @@
       "id": "DF-011",
       "title": "Long lifecycle invocation timed out and restarted fresh",
       "category": "efficiency-observation",
-      "status": "native-recovery-planning",
+      "status": "bounded-native-recovery-queued",
       "relatedTasks": [
-        "TASK-1013"
+        "TASK-1013",
+        "TASK-1020",
+        "TASK-1021",
+        "TASK-1019"
       ],
       "observed": "Both 2400-second invocations timed out with exit 124 and usage=null. Native driver ended escalate-infra at 2026-09-07T21:42:39Z; product retryCount remained 0. All tracked/untracked worker files preserved. Exact-tree test waited after target branch setup failure; no accepted commit/audit produced.",
       "nextAction": "Inspect actual slow tests and retained changes at the next checkpoint. Consider bounded task scope, checkpoint-aware continuation and timeout classification; do not simply raise limits or claim missing usage is zero.",
@@ -270,10 +277,11 @@
       "title": "Exact-tree fixture can wait indefinitely after setup failure",
       "category": "test-harness-defect",
       "relatedTasks": [
+        "TASK-1019",
         "TASK-1013",
         "TASK-1014"
       ],
-      "status": "needs-native-task",
+      "status": "native-queued",
       "observed": "Retained second worker log shows test-integration-exact-tree.sh integrator failing target branch not found: codex/brain-integration, followed by unbounded watcher wait for MERGE_HEAD. Inherited custom config is the suspected setup cause; infinite wait is visible in code/log.",
       "nextAction": "Native planner queues bounded fixture isolation/watchdog repair, retaining lock/exact-tree assertions and existing TASK-1009 fixes.",
       "evidence": [

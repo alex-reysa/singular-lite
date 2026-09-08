@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.runtime-adoptions.v1",
-  "updatedAt": "2026-09-08T03:04:44.725172+00:00",
+  "updatedAt": "2026-09-08T03:13:08.498979+00:00",
   "activeAtObservation": {
     "campaign": "BRAIN-20260908-ASTRA-LIGHT-R3",
     "sourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
@@ -11,9 +11,9 @@
   "pending": [
     {
       "id": "FIRST-LIFECYCLE-ADOPTION",
-      "status": "awaiting-TASK-1013-full-integration",
+      "status": "awaiting-TASK-1020-full-integration",
       "dependsOn": [
-        "TASK-1013"
+        "TASK-1020"
       ],
       "doesNotRequire": [
         "TASK-1014",
@@ -27,7 +27,8 @@
         "DF-005",
         "DF-011",
         "DF-012"
-      ]
+      ],
+      "followupLifecycleTask": "TASK-1021"
     }
   ],
   "completed": [
@@ -62,8 +63,26 @@
       "pendingCandidateAuthority": "Old TASK-1010/1011 audits retained, not rebound; fresh current-campaign audit and full gate required",
       "rollback": "Prior manifest/config/launcher preserved; rolling back requires native replacement and fresh verification, not copying identity files",
       "observations": [
-        "Native canary live provider passed. Light role probe reports gpt-6-astra low. No service-tier override sent; backend served tier unobservable. No code improvement adopted yet."
-      ]
+        "Native canary live provider passed. Light role probe reports gpt-6-astra low. No service-tier override sent; backend served tier unobservable. No code improvement adopted yet.",
+        "Native TASK-1017 implementation argv verified Astra low, concurrent recovery planner Astra high, neither sends service_tier override; see native-invocation-proof.json."
+      ],
+      "firstImplementationObservation": {
+        "runId": "RUN-20260908T030505Z-83392",
+        "taskId": "TASK-1017",
+        "model": "gpt-6-astra",
+        "effort": "low",
+        "startedAt": "2026-09-08T03:05:08Z",
+        "finishedAt": "2026-09-08T03:11:15Z",
+        "providerOutcome": "succeeded",
+        "taskGate": "passed",
+        "auditAndIntegration": "pending-at-observation",
+        "usage": {
+          "inputTokens": 1372880,
+          "cachedInputTokens": 1291136,
+          "outputTokens": 7784
+        },
+        "interpretation": "Cumulative invocation counters; not instantaneous context occupancy or monetary cost. Task and model differ from prior timeout run, so no causal efficiency claim."
+      }
     }
   ]
 }
