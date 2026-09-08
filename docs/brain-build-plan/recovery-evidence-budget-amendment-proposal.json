@@ -1,0 +1,62 @@
+{
+  "schema": "singular.operator.recovery-budget-amendment-proposal.v1",
+  "status": "proposed-awaiting-user-approval",
+  "createdAt": "2026-09-08T15:08:16.128186+00:00",
+  "scope": {
+    "taskId": "TASK-1019",
+    "predecessorRunId": "RUN-20260908T031330Z-23710",
+    "recoveryRunId": "RECOVERY-TASK-1019-20260908"
+  },
+  "currentLimitBytes": 524288,
+  "proposedLimitBytes": 786432,
+  "increaseBytes": 262144,
+  "consumedBytesPreserved": 454109,
+  "currentRemainingBytes": 70179,
+  "proposedRemainingBytes": 332323,
+  "currentCorrectedSourceInputBytes": 190427,
+  "taskInputUpperBoundBytes": 69782,
+  "requiredNextReviewsBytes": 260209,
+  "minimumAdditionalBytesAtCurrentClosure": 190030,
+  "minimumTotalAtCurrentClosure": 714318,
+  "marginAtProposedLimit": 72114,
+  "perInputLimitBytesUnchanged": 262144,
+  "pageLimitBytesUnchanged": 2048,
+  "ordinaryTaskLimitUnchanged": 262144,
+  "allRoles": {
+    "model": "gpt-6-astra",
+    "effort": "medium",
+    "speed": "fast requested"
+  },
+  "hostValidation": {
+    "testsPassed": 34,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "seconds": 76.093,
+    "receipt": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/campaign-evidence/bootstrap-audit-bridge/lean-controller/host-final-5/receipt.json",
+    "receiptSha256": "c7eb593bc28b285c3ee87a853f624e03aeedfe437ccb042f455be963dd21c5e2",
+    "preflight": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/campaign-evidence/bootstrap-audit-bridge/lean-controller/host-final-5/preflight.json",
+    "closure": {
+      "baseline.json": "ab30b251c9a6201562699b930f53782e40651e00b4dc021169d1a535fa0aad51",
+      "controller.py": "d5d3c809b9de929491d3e4ae9b5eba63d2fa9791ab1f322b48a368deaf74d11a",
+      "delivery.py": "c49613a67396af570e8137f3964efdd4b7217115b1ea34053b2feadf9d430e52",
+      "ledger-v2-anchor.json": "311aebc5d739846d8c98a0f3579312d221c9a9d68b0656990ad777917731c403",
+      "native-context.json": "040a54988dfe19b6ba417e1ab753af037089e9628bff53249e470c7df1145570",
+      "native-input-proof.json": "73810960318d30ba26538143a796c55dec36e5ec7763eb4f940c152e89579950",
+      "procedure.md": "763eef427fe15bd52f5c92d7f204d89de0915f733512db78d9824c06579d0dcc",
+      "test_controller.py": "a48c4ef8d403910c461a0cf0e871a60d9b567bee61ec2741d360c40834cfebfd"
+    }
+  },
+  "activeLedgerSha256": "1ee59ed1347738e36cb20772b051e004a4da0c0334572e503e1ed494de7b99df",
+  "plannedChangesAfterApproval": [
+    "Create a separately pinned authorization amendment preserving original512KiB policy and all three audit records/charges; keep same recovery lineage and immutable ledger prefix.",
+    "Update controller authorization binding and allowance checks consistently; raise implementation source/task partitions to210000/90000 within proposed remaining332323. These are ceilings, not claimed future evidence sizes.",
+    "Revalidate exact final artifacts with absolute-interpreter host tests and preflight after authorization-binding edits; no dispatch unless actual full source plus enforced task reservation fit.",
+    "Run genuinely fresh independent corrected source review, then exact native host gate and independent task audit only after source acceptance; guarded integration and runtime adoption requirements remain."
+  ],
+  "limitations": [
+    "Current190427 source measurement binds corrected code before the proposed authorization/partition amendment; remeasure and retest final amended closure before review.",
+    "768KiB leaves72114 bytes beyond current measured next-review requirements; it does not guarantee acceptance or cover unlimited retries.",
+    "No new review charge, cap activation, candidate integration or runtime adoption is authorized by this proposal."
+  ]
+}

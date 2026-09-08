@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T12:41:11.037590+00:00",
+  "updatedAt": "2026-09-08T17:08:58.388189+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -599,6 +599,26 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T09:47:28.736661+00:00"
+    },
+    {
+      "id": "DF-023",
+      "title": "Production locked publication excluded from realistic identity proof coverage",
+      "category": "operator-controller-defect",
+      "status": "host-fixed-authorized-review-binding-in-progress",
+      "relatedTasks": [
+        "TASK-1019"
+      ],
+      "observed": "Independent source3 review found production identity_sources compares baseline environment with capability-bearing locked child environment exactly, so valid publication fails. Full native publication fixtures substitute identity_sources and miss this production check despite 34 passing tests. Separate review-contract issue asks a tool-free model to recompute cryptographic hashes.",
+      "nextAction": "User approved768KiB. Apply pinned amendment through native runner, fresh host-final-6 and exact preflight, then independent source4. Preserve all previous needs-fix verdicts/charges; no permission re-request.",
+      "evidence": [
+        {
+          "path": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-3/audit.json",
+          "sha256": "176aad27b1a683aa77c72c16d48a5f63da33b6abc7abb3bf2c2d7a6fba579a86"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T17:08:58.388189+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+      "hostEvidence": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/campaign-evidence/bootstrap-audit-bridge/lean-controller/host-final-5"
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
