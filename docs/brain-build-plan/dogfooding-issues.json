@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T03:19:22.788023+00:00",
+  "updatedAt": "2026-09-08T03:22:51.221936+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -321,7 +321,7 @@
       "id": "DF-015",
       "title": "Read-only auditor cannot use mandatory evidence retrieval helper",
       "category": "product-capability-boundary-defect",
-      "status": "native-planning",
+      "status": "native-queued",
       "relatedTasks": [
         "TASK-1022",
         "TASK-1017",
@@ -329,7 +329,7 @@
         "TASK-1016"
       ],
       "observed": "First R3 schema task gate passed, but the fresh Astra Light auditor returned blocked: evidence-show.sh attempts a mutable /tmp/singular-evidence-retrieval-v0 ledger lock denied by the read-only sandbox. Driver parked with no product retry spent. This is evidence-access failure, not a failing schema implementation or acceptance.",
-      "nextAction": "Native Astra High plans independent TASK-1022 and safe retained-candidate recovery. Preserve sandbox, declared-reference/hash/path/per-excerpt/cumulative-budget checks; keep mutable accounting host-owned. Do not substitute deterministic acceptance for a fresh independent audit.",
+      "nextAction": "Implement TASK-1022 independently. Native High review confirms existing helper cannot paginate its 2048-byte prefix and current engine has no guarded blocked-candidate re-audit publication. Preserve TASK-1017 for TASK-1021 or narrowly authorized successor; never use deterministic acceptance as independent audit.",
       "evidence": [
         {
           "path": ".singular-state/runs/RUN-20260908T030505Z-83392/audit.json",

@@ -112,7 +112,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-08T03:19:22.788023+00:00",
+  "lastObservedAt": "2026-09-08T03:22:51.221936+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "blocked-audit-infrastructure",
@@ -234,12 +234,15 @@
   },
   "evidenceAccessRecovery": {
     "taskId": "TASK-1022",
-    "status": "native-planning",
+    "status": "ready",
     "plannerRunId": "PLAN-READONLY-EVIDENCE-20260908",
     "plannerPid": 39458,
     "evidenceDirectory": ".singular-state/campaign-evidence/readonly-evidence-repair",
     "priority": "independent-before-other-new-runtime-workers",
     "requires": "Validate native planner contract before publication; fresh independent review and exact merged-tree gates, then controlled runtime adoption",
-    "preservedSchemaCandidate": "3114c5cc3b31a441d2c5d84b471834193bd9d99e"
+    "preservedSchemaCandidate": "3114c5cc3b31a441d2c5d84b471834193bd9d99e",
+    "operatorRecovery": "Retain TASK-1017 at 3114c5cc3b31a441d2c5d84b471834193bd9d99e in RUN-20260908T030505Z-83392, parked with productRetry=0. Preserve original packet/audit/manifest/worktree and record the infrastructure blocker separately through authorized host logging.\n\nThe inspected retrieval and runner files match the frozen runtime. A trusted host can invoke evidence-show.sh with the original manifest and budget, but requesting 8000 still returns only the first 2048 bytes; repeating consumes allowance while returning the same prefix. It cannot currently supply complete review of this 6095-byte packet. Saving that output does not itself create an authorized immutable projection interface.\n\ncodex-run.sh supports a fresh read-only invocation and separate output capture, but provides no guarded retained-candidate re-audit/republication transaction. import-packet.sh requires an already accepted packet; it does not perform that transition. accept-existing-packet.sh manufactures deterministic replacement acceptance, so it cannot substitute for the required fresh independent audit. l1-drive.sh's accepted-evidence resume requires an existing accepted audit; generic blocked redispatch can reclaim the retained worktree.\n\nTherefore do not reset, redispatch, prune, rewrite labels or rebind old evidence. Retain the candidate until guarded TASK-1021/successor recovery supports fresh review and publication with validated lineage. Independently publish/implement TASK-1022 through the untouched pipeline; if its own mandatory audit encounters the same access failure, retain that result and resolve the bootstrapping constraint without acceptance shortcuts. No mutations, tests or provider calls were performed here.",
+    "dependsOn": [],
+    "nextAction": "Dispatch native TASK-1022 in disjoint slot; preserve TASK-1017 until supported guarded recovery. No acceptance shortcut."
   }
 }
