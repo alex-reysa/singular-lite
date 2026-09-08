@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T06:33:38.288641+00:00",
+  "updatedAt": "2026-09-08T08:17:41.223870+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -444,13 +444,13 @@
       "id": "DF-019",
       "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
       "category": "operator-evidence-planning-inefficiency",
-      "status": "awaiting-user-recovery-only-budget-decision",
+      "status": "recovery-only-budget-authorized-support-update-required",
       "relatedTasks": [
         "TASK-1016",
         "TASK-1022"
       ],
       "observed": "First source review consumed80710 retrieval bytes. Proposed retry includes full growing operator sources plus70720 native helper bytes; mandatory source/task lower bound237184 exceeds181434 remaining. No retry delivered and no ledger reset. Cumulative composed condition was added by operator artifact whereas native manifest enforces per-assembly size; proposed correction needs independent review and cannot solve retrieval excess alone.",
-      "nextAction": "Ask once for explicit recovery-only256->512KiB allowance while preserving consumed80710 and all checks. No provider/review retry or raised allowance pending reply. Native smaller partial review is insufficient for readiness; avoid spending remaining budget on it.",
+      "nextAction": "Use explicit scoped512KiB policy, preserve80710 consumption, current R4 fresh audits and full gates; no additional authorization needed.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-1/completion.json",

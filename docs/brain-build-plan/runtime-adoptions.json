@@ -1,12 +1,12 @@
 {
   "schema": "singular.operator.runtime-adoptions.v1",
-  "updatedAt": "2026-09-08T03:19:22.788023+00:00",
+  "updatedAt": "2026-09-08T08:17:41.223870+00:00",
   "activeAtObservation": {
-    "campaign": "BRAIN-20260908-ASTRA-LIGHT-R3",
+    "campaign": "BRAIN-20260908-ASTRA-MEDIUM-FAST-R4",
     "sourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
     "runtimePath": ".singular-state/runtime/0.21.0-brain-bootstrap",
-    "campaignEpoch": "0dba28aceb384fd95743a95b4fad2366a0ec7c7a86714cf4",
-    "modelPolicy": "Astra low implementation/audit; Astra high planning; normal speed"
+    "campaignEpoch": "ad83a10a250699bb9cbb8956f4a9097f78f408816602e42f",
+    "modelPolicy": "All roles Astra medium fast"
   },
   "pending": [
     {
@@ -97,6 +97,29 @@
         },
         "candidatePreserved": true
       }
+    },
+    {
+      "id": "MODEL-POLICY-ASTRA-MEDIUM-FAST-R4",
+      "status": "adopted-canary-verified",
+      "adoptedAt": "2026-09-08T08:17:41.223870+00:00",
+      "previous": {
+        "campaign": "BRAIN-20260908-ASTRA-LIGHT-R3",
+        "sourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+        "runtimePath": ".singular-state/runtime/0.21.0-brain-bootstrap",
+        "campaignEpoch": "0dba28aceb384fd95743a95b4fad2366a0ec7c7a86714cf4",
+        "modelPolicy": "Astra low implementation/audit; Astra high planning; normal speed"
+      },
+      "active": {
+        "campaign": "BRAIN-20260908-ASTRA-MEDIUM-FAST-R4",
+        "sourceCommit": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+        "runtimePath": ".singular-state/runtime/0.21.0-brain-bootstrap",
+        "campaignEpoch": "ad83a10a250699bb9cbb8956f4a9097f78f408816602e42f",
+        "modelPolicy": "All roles Astra medium fast"
+      },
+      "runtimeCodeChanged": false,
+      "configSha256": "9c79dcd3b5f56047027167d8169b6629ee169681db2d2afb95cdcf5c535c5667",
+      "evidenceDirectory": ".singular-state/campaign-evidence/astra-medium-fast-r4",
+      "candidateAuthority": "Historical R3/R2 candidates preserved; new R4 recovery audits required, no rebinding"
     }
   ]
 }

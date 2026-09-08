@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.recovery-budget-proposal.v1",
-  "status": "pending-user-authorization-not-applied",
+  "status": "authorized-awaiting-supported-adapter",
   "createdAt": "2026-09-08T06:32:56.022136+00:00",
   "scope": {
     "taskId": "TASK-1019",
@@ -38,5 +38,9 @@
     "sha256": "c933faaef2099eacab5d835f7cdd0e241610234f000b1e28c1ea3113fa79613b"
   },
   "hostProof": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-2/host-fixture-receipt.json",
-  "reviewPlan": ".singular-state/campaign-evidence/bootstrap-audit-bridge/review-plan/decision.json"
+  "reviewPlan": ".singular-state/campaign-evidence/bootstrap-audit-bridge/review-plan/decision.json",
+  "authorizedAt": "2026-09-08T08:17:41.223870+00:00",
+  "effectiveRetrievalLimitBytes": 524288,
+  "authorizationRecord": ".singular-state/campaign-policy/recovery-TASK-1019-authorized-512k.json",
+  "latestModelPolicy": "All roles Astra medium fast; supersedes High/Low conditions"
 }

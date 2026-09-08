@@ -111,3 +111,7 @@ Root reran repair2 against its exact four final hashes:17/17 tests passed, inclu
 ## Evidence-budget decision pending — 2026-09-08 06:30 UTC
 
 Native bounded-review planning completed. Incremental assessment is legitimate in principle, but no sufficient overall readiness package and compatible eligibility sequence is established within current allowance; a partial finding review would remain ineligible for prepare. Root constructed the complete final-hash evidence request:180169 source bytes plus57269 fixed task bytes and16384 reserve, compared with181434 remaining. Recovery-only256->512KiB proposal is recorded in recovery-evidence-budget-proposal.json, pending explicit user authorization. Preserve consumed80710 bytes, historical records, per-input/page bounds and all independent audits/gates. No extra review delivered, no limit changed, no acceptance or runtime change. Do not repeat expensive planning or ask again on each heartbeat; await reply and preserve scope.
+
+## Latest authorized policy — 2026-09-08
+
+The user explicitly authorized the TASK-1019 recovery512KiB allowance, preserving80710 consumed bytes, and changed EVERY role to Astra medium with fast mode, including planners and difficult recovery. R4 native canary passed and launcher is verified. This supersedes old High/Low/normal preferences and the waiting-for-budget checkpoint. No original manifest or blocked verdict was rewritten; ordinary caps remain256KiB. Native recovery adapter must bind the new explicit policy/current R4 fresh authority before requesting next independent review.

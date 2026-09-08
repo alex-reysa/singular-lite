@@ -3,7 +3,7 @@ set -euo pipefail
 campaign_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export SINGULAR_ROOT="$campaign_root"
 export SINGULAR_ENGINE_HOME="$campaign_root/.singular-state/runtime/0.21.0-brain-bootstrap"
-export SINGULAR_JSON_CONFIG_FILE="$campaign_root/.singular-state/campaign-policy/config-astra-light.json"
+export SINGULAR_JSON_CONFIG_FILE="$campaign_root/.singular-state/campaign-policy/config-astra-medium-fast-r4.json"
 export SINGULAR_CONFIG_FILE=/dev/null
 export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
 export SINGULAR_BASH_BIN="${SINGULAR_BASH_BIN:-/opt/homebrew/bin/bash}"
