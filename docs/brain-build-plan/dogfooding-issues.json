@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T09:16:12.830426+00:00",
+  "updatedAt": "2026-09-08T09:47:28.736661+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -444,13 +444,13 @@
       "id": "DF-019",
       "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
       "category": "operator-evidence-planning-inefficiency",
-      "status": "bounded-proof-implementation-running",
+      "status": "large-controller-host26-green-lean-replacement-running",
       "relatedTasks": [
         "TASK-1016",
         "TASK-1022"
       ],
       "observed": "First source review consumed80710 retrieval bytes. Proposed retry includes full growing operator sources plus70720 native helper bytes; mandatory source/task lower bound237184 exceeds181434 remaining. No retry delivered and no ledger reset. Cumulative composed condition was added by operator artifact whereas native manifest enforces per-assembly size; proposed correction needs independent review and cannot solve retrieval excess alone.",
-      "nextAction": "Finish native IMPLEMENT-BOUNDED-R4-PROOF-20260908 under the disclosed frozen-baseline review boundary, validate actual final artifacts and boundabsolute host tests, then exact budget preflight before fresh independent review.",
+      "nextAction": "Inspect lean-controller native result, audit its complete executable closure and semantic test mapping, run absolute bound host fixtures, then exact source/task/runner-input preflight. Do not treat old large-controller tests as tests of the new controller or reuse needs-fix acceptance.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-1/completion.json",
@@ -471,10 +471,14 @@
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review-2-remediation/review-3-plan.json",
           "sha256": "07a24f13b23123d44a06210d80908d3f9278dcf23fe2d5d79ac0a29fdceb5d0d"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/host-final/receipt.json",
+          "sha256": "b0a6a40476c9ae5bc65ff4d0a955059149ec84388b6d93a530fa8d9f4213ac89"
         }
       ],
-      "lastReviewedAt": "2026-09-08T09:16:12.830426+00:00",
-      "latestObservation": "REPAIR-R4-SOURCE-PROOF completed08:48:54 before spending; no code changes. Full identity duplication estimate340517 exceeds remaining251549 and input307494 exceeds262144. Native DESIGN-BOUNDED-R4-PROOF measures sufficient projections and duplicated task source context without raising caps or weakening acceptance. Root observed26 post-load native functions resolve to frozen lib; effective dependency closure remains to establish.",
+      "lastReviewedAt": "2026-09-08T09:47:28.736661+00:00",
+      "latestObservation": "Native bounded-proof implementation completed09:30:13, then root host26/26 passed after fixture marker duplication repair. All three source-review defects have implemented support, but source input319994 exceeds262144 and combinedknown407017 exceeds251549remaining. No third review or liveledger charge. Preserve host-verified-bounded-proof-r4. Native IMPLEMENT-LEAN-RECOVERY-CONTROLLER-20260908 now builds a separate single-use controller using trusted native primitives, with equivalent semantic safeguards and fresh independent source/candidate approval required.",
       "exactEstimate": {
         "source": 192029,
         "sourceComposed": 258091,
@@ -489,7 +493,7 @@
       "id": "DF-020",
       "title": "Synthetic recovery fixture omitted strict full-gate observation",
       "category": "operator-fixture-defect",
-      "status": "repaired-host19-verified-independent-source-review-running",
+      "status": "fixture-correctness-host26-verified",
       "relatedTasks": [
         "TASK-1014"
       ],
@@ -513,15 +517,16 @@
           "sha256": "3aa5c4d66a8a8d5639935e12a8dfddc4976380fee9f1ba3cc4a831bf660dd957"
         }
       ],
-      "lastReviewedAt": "2026-09-08T08:42:28.623916+00:00"
+      "lastReviewedAt": "2026-09-08T08:42:28.623916+00:00",
+      "latestObservation": "The later26-test suite also exposed duplicate synthetic identity review markers; host verifier correctly required exactly once. Native fixture-only deduplication preserved uniqueness guard and all26 host tests now pass."
     },
     {
       "id": "DF-021",
       "title": "Recovery proof markers require evidence absent from reviewer input",
       "category": "operator-review-evidence-defect",
-      "status": "bounded-proof-implementation-running",
+      "status": "large-controller-host26-green-lean-replacement-running",
       "observed": "Independent procedure2 reviewed all four sources and all19 host fixture transcript, but required actual config/campaign contents, effective module/ctx implementation evidence and absolute Python executable receipt binding before approval.",
-      "nextAction": "Finish native IMPLEMENT-BOUNDED-R4-PROOF-20260908 under the disclosed frozen-baseline review boundary, validate actual final artifacts and boundabsolute host tests, then exact budget preflight before fresh independent review.",
+      "nextAction": "Inspect lean-controller native result, audit its complete executable closure and semantic test mapping, run absolute bound host fixtures, then exact source/task/runner-input preflight. Do not treat old large-controller tests as tests of the new controller or reuse needs-fix acceptance.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-2/audit.json",
@@ -534,11 +539,42 @@
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review-2-remediation/review-3-plan.json",
           "sha256": "07a24f13b23123d44a06210d80908d3f9278dcf23fe2d5d79ac0a29fdceb5d0d"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/host-final/receipt.json",
+          "sha256": "b0a6a40476c9ae5bc65ff4d0a955059149ec84388b6d93a530fa8d9f4213ac89"
         }
       ],
-      "lastReviewedAt": "2026-09-08T09:16:12.830426+00:00",
-      "latestObservation": "REPAIR-R4-SOURCE-PROOF completed08:48:54 before spending; no code changes. Full identity duplication estimate340517 exceeds remaining251549 and input307494 exceeds262144. Native DESIGN-BOUNDED-R4-PROOF measures sufficient projections and duplicated task source context without raising caps or weakening acceptance. Root observed26 post-load native functions resolve to frozen lib; effective dependency closure remains to establish.",
+      "lastReviewedAt": "2026-09-08T09:47:28.736661+00:00",
+      "latestObservation": "Native bounded-proof implementation completed09:30:13, then root host26/26 passed after fixture marker duplication repair. All three source-review defects have implemented support, but source input319994 exceeds262144 and combinedknown407017 exceeds251549remaining. No third review or liveledger charge. Preserve host-verified-bounded-proof-r4. Native IMPLEMENT-LEAN-RECOVERY-CONTROLLER-20260908 now builds a separate single-use controller using trusted native primitives, with equivalent semantic safeguards and fresh independent source/candidate approval required.",
       "reviewBoundary": "docs/brain-build-plan/recovery-review-boundary.md"
+    },
+    {
+      "id": "DF-022",
+      "title": "Post-run scope failure is attributed to provider exit",
+      "category": "runner-diagnostic-defect",
+      "status": "queued-for-native-contract-refresh",
+      "relatedTasks": [
+        "TASK-1014",
+        "TASK-1018"
+      ],
+      "observed": "REPAIR-BOUNDED-PROOF-FIXTURE-20260908 provider completed and changed only test_bridge.py; final native scope check rejected pre-existing artifacts because root chose a file-only prefix in a reused dirty checkout. Operator scope setup was the trigger. Normalized runner result exit2 classified failureClass provider-exit even though trace shows post-run scope-check failure.",
+      "nextAction": "Keep operator setup separate from product diagnostics. Future native runner phase-aware failure classification should report scope failure without calling it a provider failure. Refresh a narrow task contract before implementation; do not silently expand active scopes. Use a clean isolated checkout or a prefix covering retained operator artifacts for subsequent author runs.",
+      "evidence": [
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/runner-result.json",
+          "sha256": "58d1bbb94e4f37b6d55212c9c3a0b9a7ec91b7680e4930d34744351247bf17af"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/planner.log",
+          "sha256": "17b8aa5de4067579025f29d7006ffed1e84400cda6c8daed7549950f9b7fee55"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/completion.json",
+          "sha256": "c9968678250ab3bc74b925451df3420f19fae02d0f01a4b0a25603e42b34c67f"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T09:47:28.736661+00:00"
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."

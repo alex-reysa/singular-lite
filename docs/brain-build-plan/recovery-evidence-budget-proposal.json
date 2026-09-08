@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.recovery-budget-proposal.v1",
-  "status": "authorized-accounting-active-source-review-needs-fix",
+  "status": "authorized-accounting-active-large-controller-reviewed-size-blocker",
   "createdAt": "2026-09-08T06:32:56.022136+00:00",
   "scope": {
     "taskId": "TASK-1019",
@@ -43,7 +43,7 @@
   "effectiveRetrievalLimitBytes": 524288,
   "authorizationRecord": ".singular-state/campaign-policy/recovery-TASK-1019-authorized-512k.json",
   "latestModelPolicy": "All roles Astra medium fast; supersedes High/Low conditions",
-  "updatedAt": "2026-09-08T08:45:29.581760+00:00",
+  "updatedAt": "2026-09-08T09:47:28.736661+00:00",
   "activeAccounting": {
     "schema": "operator-evidence-ledger.v2",
     "retrievalLimitBytes": 524288,
@@ -57,6 +57,22 @@
     "evidence": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-2",
     "hostFixtureReceipt": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4-fixture-repair/host-fixture-receipt.json",
     "sourceReviewVerdict": "needs-fix",
-    "nextRun": "REPAIR-R4-SOURCE-PROOF-20260908"
-  }
+    "nextRun": "IMPLEMENT-LEAN-RECOVERY-CONTROLLER-20260908"
+  },
+  "latestHostVerification": {
+    "passed": 26,
+    "skipped": 0,
+    "receipt": ".singular-state/campaign-evidence/bootstrap-audit-bridge/bounded-proof-fixture-repair/host-final/receipt.json",
+    "sourceAccepted": false
+  },
+  "latestMeasuredLargeController": {
+    "sourcePayloadBytes": 277590,
+    "sourceComposedBytes": 319994,
+    "combinedKnownAndReserve": 407017,
+    "remaining": 251549,
+    "deficit": 155468,
+    "sourceInputExcess": 57850,
+    "newLedgerCharges": 0
+  },
+  "nextApproach": "Separate single-use native controller with complete new source review and equivalent safety coverage, preserving large unapproved reference and all existing accounting."
 }
