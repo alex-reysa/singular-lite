@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T08:42:28.623916+00:00",
+  "updatedAt": "2026-09-08T08:45:29.581760+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -444,7 +444,7 @@
       "id": "DF-019",
       "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
       "category": "operator-evidence-planning-inefficiency",
-      "status": "authorized-scoped-accounting-active-independent-review-running",
+      "status": "scoped-allowance-active-source-review-needs-fix",
       "relatedTasks": [
         "TASK-1016",
         "TASK-1022"
@@ -470,7 +470,7 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T08:42:28.623916+00:00",
-      "latestObservation": "User authorized512KiB only for retained TASK1019 recovery and all roles Astra Medium/Fast. Adapter host19/19 green. Atomic ledger migration preserved all80710 prior bytes and every historical delivery; fresh procedure2 charged192029 before native readonly delivery, total272739 remaining251549. Source input258091 fits unchanged262144 limit. Independent source verdict pending; no candidate acceptance or product integration.",
+      "latestObservation": "User authorized512KiB only for retained TASK1019 recovery and all roles Astra Medium/Fast. Adapter host19/19 green. Atomic ledger migration preserved all80710 prior bytes and every historical delivery; fresh procedure2 charged192029 before native readonly delivery, total272739 remaining251549. Source input258091 fits unchanged262144 limit. Independent source verdict pending; no candidate acceptance or product integration. Procedure2 finished08:41:57Z needs-fix: missing policy/campaign contents, effective runtime evidence and absolute Python receipt binding. Native REPAIR-R4-SOURCE-PROOF-20260908 is addressing findings with remaining251549; no third delivery until complete fresh source/task budget fits.",
       "exactEstimate": {
         "source": 192029,
         "sourceComposed": 258091,
@@ -509,6 +509,25 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T08:42:28.623916+00:00"
+    },
+    {
+      "id": "DF-021",
+      "title": "Recovery proof markers require evidence absent from reviewer input",
+      "category": "operator-review-evidence-defect",
+      "status": "native-remediation-running",
+      "observed": "Independent procedure2 reviewed all four sources and all19 host fixture transcript, but required actual config/campaign contents, effective module/ctx implementation evidence and absolute Python executable receipt binding before approval.",
+      "nextAction": "Native REPAIR-R4-SOURCE-PROOF-20260908 corrects bounded evidence composition and receipt checks, with exact source/task budget preflight before any third accounted delivery. Preserve needs-fix verdict and all charged bytes; no prepare or candidate publication.",
+      "evidence": [
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-2/audit.json",
+          "sha256": "d090b6441e5d33ffff9e85cb6696fcba3ae698f60d00fb4e7035f38d9d4ce047"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review-2-remediation/invocation.json",
+          "sha256": "16dc0020c184dfb59d3d6e3a32bd854ef4246acfe2e8f080b167179bf54e4548"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T08:45:29.581760+00:00"
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
