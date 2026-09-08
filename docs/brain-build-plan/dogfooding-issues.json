@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T03:40:28.915238+00:00",
+  "updatedAt": "2026-09-08T05:02:40.742116+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -329,7 +329,7 @@
       "id": "DF-015",
       "title": "Read-only auditor cannot use mandatory evidence retrieval helper",
       "category": "product-capability-boundary-defect",
-      "status": "bootstrap-recovery-artifact-authoring",
+      "status": "operator-bridge-independent-artifact-review",
       "relatedTasks": [
         "TASK-1017",
         "TASK-1019",
@@ -339,7 +339,7 @@
         "TASK-1016"
       ],
       "observed": "First R3 schema task gate passed, but the fresh Astra Light auditor returned blocked: evidence-show.sh attempts a mutable /tmp/singular-evidence-retrieval-v0 ledger lock denied by the read-only sandbox. Driver parked with no product retry spent. This is evidence-access failure, not a failing schema implementation or acceptance.",
-      "nextAction": "Native High authors bounded operator evidence/publication bridge, then fresh native Low independent review and fixture tests before any mutation. Use it to obtain real fresh candidate acceptance; retain all predecessor verdicts. Finish/adopt actual evidence repair afterward.",
+      "nextAction": "Inspect real fresh native Low artifact verdict; resolve any findings, then host prepare/gate/fresh task audit and guarded publication. Preserve original records and cumulative accounting.",
       "evidence": [
         {
           "path": ".singular-state/runs/RUN-20260908T030505Z-83392/audit.json",
@@ -380,6 +380,65 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T03:40:28.915238+00:00"
+    },
+    {
+      "id": "DF-017",
+      "title": "Logical temporary path aliases fail canonical-path test assertions",
+      "category": "test-portability-defect",
+      "status": "operator-environment-remedy-validated-full-rerun-running",
+      "relatedTasks": [
+        "TASK-1014"
+      ],
+      "observed": "On the identical synthetic source commit436a7b25, native host audit-verify with logical /var/folders TMPDIR fails launchd-env and versioning because product reports canonical /private/var/folders. Physical TMPDIR passes both; reverting to logical TMPDIR reproduces both exact assertions. No source changes or assertion waivers were used.",
+      "nextAction": "Use canonical physical TMPDIR for native host verification and retain full exact staged-tree result. Queue narrowly scoped canonical-path assertions/host fixture normalization under native planning; do not classify correct product canonicalization as a feature regression. Add this record to committed issue register at next safe target-control publication.",
+      "evidence": [
+        {
+          "path": ".singular-state/runs/HOST-PATH-PROBE-20260908/audit-verification.json",
+          "sha256": "67febfa22ad6edf8b00349789342d0bd1c594ad34dfdc8397adaed7db3d74b37"
+        },
+        {
+          "path": ".singular-state/runs/HOST-LOGICAL-PATH-PROBE-20260908/audit-verification.json",
+          "sha256": "f83bd5dafdeec4c85aa9bef0f2d60c2b2d8e12b52604520bbb3ab1590d89b5e6"
+        },
+        {
+          "path": ".singular-state/runs/HOST-LOGICAL-PATH-PROBE-20260908/test-logs/logs/test-launchd-env.sh.log",
+          "sha256": "6d1d6a8bd241bd5d219e06a97e0cee043b939ccbd27fd002a81bcef4c2926ee1"
+        },
+        {
+          "path": ".singular-state/runs/HOST-LOGICAL-PATH-PROBE-20260908/test-logs/logs/test-versioning.sh.log",
+          "sha256": "aad480e0215d0abfc60fbb54e87b3bc5894e72e397df8705878eb1da69245b7e"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T03:51:49.806532+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-018",
+      "title": "JSON-only operator artifact authoring exhausted native timeout before final delivery",
+      "category": "operator-workflow-inefficiency",
+      "status": "file-based-finalization-completed-independent-review-running",
+      "observed": "Native High readonly author timed out at2400s, exit124, no final artifact. Trace retained repeated large code literals and successful syntax checks. Recovered draft39025bytes and tests8239bytes; nine disposable tests passed. This workflow was imposed by root operator, not evidence of an engine product regression. Usage unknown, not zero.",
+      "nextAction": "Finish source/procedure in an isolated native workspace-write High run, then independently audit with native Low and fixture/native composition tests before any publication. Preserve timeout evidence; do not raise resource limits.",
+      "evidence": [
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/runner-result.json",
+          "sha256": "916186be21928251060a16f73b723b38a856b37c9d583c4fa57168177dbc931a"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/recovered-draft/provenance.json",
+          "sha256": "f7651d03a3402d44b27701140d37eafc36cc8c88cfc322bf8f03b1d7db016412"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/recovered-draft/fixture-tests.log",
+          "sha256": "1bb8c2106d0e3b86111ac2ac9d478ba9e566ac918b2c8d3f3bac678ee83ab47d"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/finalization/invocation.json",
+          "sha256": "3cd06e6f5d12a858168f43094e6b75649cdb62c46c1ea14a70c4df30d6d30bf5"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T04:33:12.276072+00:00",
+      "latestObservation": "Native High isolated file authoring succeeded at04:40:56Z; root reran13 disposable tests, all passed. Cumulative usage813564 input750080 cached13506 output, not cost or instantaneous context. Independent native Low review started; no live acceptance changed."
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
