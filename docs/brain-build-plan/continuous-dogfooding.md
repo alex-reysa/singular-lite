@@ -25,3 +25,7 @@ Use runtime-adoptions.json for every prepared/completed replacement and its foll
 ## Latest model and speed correction
 
 The user superseded the pending Medium/Fast profile: use GPT-6 Astra Light (low reasoning effort) for implementation, critics and final/paired audits; retain Astra High for planning/difficult decisions; use normal speed for all roles. MODEL-POLICY-ASTRA-LIGHT and .singular-state/campaign-policy/config-astra-light.json replace the earlier Fast checkpoint. The old Medium/Fast probe is historical, not validation of the new profile. Perform the normal controlled replacement and required canary; do not activate the superseded Fast profile. This does not change the ongoing brain work or continuous adoption requirements.
+
+## Verified adoption on 2026-09-08
+
+BRAIN-20260908-ASTRA-LIGHT-R3 is active: Astra Light/low implementation, critic and independent audit; Astra High planning/recovery; normal speed. Native lifecycle canary and live provider assurance passed, and the real audit-role probe reports low. Launcher verification reports zero drift. Frozen code remains 85937f90; TASK-1013 ended after two infrastructure timeouts with preserved changes and requires bounded native recovery. Old candidate audits are preserved historical evidence, never rebound. The timed pause expired and continuation is authorized. See runtime-adoptions.json and dogfooding-issues.json for DF-013 fixture hang and DF-014 contract discovery.

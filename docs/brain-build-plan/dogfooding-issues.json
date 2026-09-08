@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-07T21:33:08.968282+00:00",
+  "updatedAt": "2026-09-08T03:04:44.725172+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -11,7 +11,7 @@
         "TASK-1005"
       ],
       "observed": "The release runner uses a global model; the original mixed-model campaign required a per-role wrapper.",
-      "nextAction": "Implement generic role selection; retain latest Astra Medium/High Fast campaign preference.",
+      "nextAction": "Implement generic role selection; active campaign uses Astra Light/High at normal speed.",
       "evidence": [
         {
           "path": "docs/orchestration/brain-tasks/TASK-1005.md",
@@ -82,12 +82,12 @@
       "id": "DF-005",
       "title": "Accepted candidate lifecycle and stale cleanup",
       "category": "product-defect",
-      "status": "implementation-running",
+      "status": "blocked-preserved-awaiting-native-recovery-plan",
       "relatedTasks": [
         "TASK-1013"
       ],
       "observed": "Same-branch reservation and status-only cleanup can overwrite/delete accepted authority; a stale wrapper can delete a newer reservation.",
-      "nextAction": "Complete identity/CAS repair, audit and fully gate it, then adopt immediately at a controlled boundary.",
+      "nextAction": "Split or safely recover unfinished lifecycle work using Astra High planning and fresh Astra Light implementation/audit; retain all original obligations.",
       "evidence": [
         {
           "path": "docs/orchestration/brain-tasks/TASK-1013.md",
@@ -217,11 +217,11 @@
       "id": "DF-011",
       "title": "Long lifecycle invocation timed out and restarted fresh",
       "category": "efficiency-observation",
-      "status": "investigate-after-checkpoint",
+      "status": "native-recovery-planning",
       "relatedTasks": [
         "TASK-1013"
       ],
-      "observed": "The first lifecycle invocation exited 124 as timed-out. The runner default is 2400 seconds; one fresh worker infrastructure retry began, while product retryCount stayed 0. The timeout result has usage=null. Working files were preserved; repeated inspection/test work is visible, but duplicated tokens or dollars are unmeasured.",
+      "observed": "Both 2400-second invocations timed out with exit 124 and usage=null. Native driver ended escalate-infra at 2026-09-07T21:42:39Z; product retryCount remained 0. All tracked/untracked worker files preserved. Exact-tree test waited after target branch setup failure; no accepted commit/audit produced.",
       "nextAction": "Inspect actual slow tests and retained changes at the next checkpoint. Consider bounded task scope, checkpoint-aware continuation and timeout classification; do not simply raise limits or claim missing usage is zero.",
       "evidence": [
         {
@@ -240,7 +240,7 @@
       "id": "DF-012",
       "title": "Runtime/model adoption can wait behind long retries",
       "category": "operational-efficiency",
-      "status": "checkpoint-pending",
+      "status": "model-policy-adopted-awaiting-code-adoption",
       "relatedTasks": [
         "TASK-1013",
         "TASK-1014"
@@ -258,6 +258,54 @@
         }
       ],
       "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+      "postAdoption": {
+        "at": "2026-09-08T03:04:44.725172+00:00",
+        "campaign": "BRAIN-20260908-ASTRA-LIGHT-R3",
+        "result": "Drained terminal ownership; canary and real low audit-role probe passed; no code repair adopted."
+      }
+    },
+    {
+      "id": "DF-013",
+      "title": "Exact-tree fixture can wait indefinitely after setup failure",
+      "category": "test-harness-defect",
+      "relatedTasks": [
+        "TASK-1013",
+        "TASK-1014"
+      ],
+      "status": "needs-native-task",
+      "observed": "Retained second worker log shows test-integration-exact-tree.sh integrator failing target branch not found: codex/brain-integration, followed by unbounded watcher wait for MERGE_HEAD. Inherited custom config is the suspected setup cause; infinite wait is visible in code/log.",
+      "nextAction": "Native planner queues bounded fixture isolation/watchdog repair, retaining lock/exact-tree assertions and existing TASK-1009 fixes.",
+      "evidence": [
+        {
+          "path": ".singular-state/runs/RUN-20260907T202230Z-53859/worker-attempt-1-try-1.log",
+          "sha256": "d7ec8d3960aa22cc96c880f397752b5246522d9c565e06faac0cc8b0215c1a2e"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T03:04:44.725172+00:00",
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+    },
+    {
+      "id": "DF-014",
+      "title": "Built-in runner loses v1 contract auto-discovery after parser extraction",
+      "category": "product-discovery-gap",
+      "relatedTasks": [
+        "TASK-1005"
+      ],
+      "status": "supported-config-remedy-adopted-product-fix-queued",
+      "observed": "Direct contract check succeeds, but native codex-run.sh lacks the literal --describe-contract marker required by contract_prepare heuristic. Canary refused before live invocation.",
+      "nextAction": "Keep explicit supported SINGULAR_RUNNER_CONTRACT_VERSION=1; add native built-in discovery regression with TASK-1005 without probing unsafe legacy runners.",
+      "evidence": [
+        {
+          "path": ".singular-state/campaign-evidence/astra-light-transition/contract-discovery-observation.json",
+          "sha256": "f33de4a071b14c63f797d5124a49615027427024dce63a9d7c6b3e54955ff4f1"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/astra-light-transition/campaign-start-first-failure.log",
+          "sha256": "ddb30b16b2d22a98cfb2ab0f65f0832907a5d7456e994f6bbcc19e272110c989"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T03:04:44.725172+00:00",
       "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
     }
   ],

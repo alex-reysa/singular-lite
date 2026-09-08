@@ -59,3 +59,7 @@ The user superseded the pending Medium/Fast profile: use GPT-6 Astra Light (low 
 ## Timed pause requested by the user
 
 New dispatch is paused until 03:00 Europe/Zurich on 8 September 2026 (01:00 UTC). Preserve the existing native run and allow it to finish safely. The recurring follow-up is rescheduled to start at that instant and then continue every 30 minutes. Resumption at that time is explicitly authorized; inspect live state and complete the pending Astra Light/normal-speed model-policy checkpoint before new implementation. Do not activate the superseded Medium/Fast profile or clear a later unrelated stop. Evidence: .singular-state/campaign-evidence/timed-pause/pause.json.
+
+## Verified adoption on 2026-09-08
+
+BRAIN-20260908-ASTRA-LIGHT-R3 is active: Astra Light/low implementation, critic and independent audit; Astra High planning/recovery; normal speed. Native lifecycle canary and live provider assurance passed, and the real audit-role probe reports low. Launcher verification reports zero drift. Frozen code remains 85937f90; TASK-1013 ended after two infrastructure timeouts with preserved changes and requires bounded native recovery. Old candidate audits are preserved historical evidence, never rebound. The timed pause expired and continuation is authorized. See runtime-adoptions.json and dogfooding-issues.json for DF-013 fixture hang and DF-014 contract discovery.

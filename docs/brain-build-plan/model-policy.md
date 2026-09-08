@@ -18,3 +18,7 @@ Unintegrated old acceptance never transfers automatically; require applicable fr
 Evidence: .singular-state/campaign-evidence/astra-light-transition/. Durable state and recurring follow-up use the latest policy. Machine-global Codex defaults and account settings are unchanged.
 
 Latest user correction: normal speed for every role, and only roles previously moved to Medium now use Light/low. Planning and difficult decisions stay High. Preserve historical model records; never reactivate the superseded Fast profile.
+
+## Verified adoption on 2026-09-08
+
+BRAIN-20260908-ASTRA-LIGHT-R3 is active: Astra Light/low implementation, critic and independent audit; Astra High planning/recovery; normal speed. Native lifecycle canary and live provider assurance passed, and the real audit-role probe reports low. Launcher verification reports zero drift. Frozen code remains 85937f90; TASK-1013 ended after two infrastructure timeouts with preserved changes and requires bounded native recovery. Old candidate audits are preserved historical evidence, never rebound. The timed pause expired and continuation is authorized. See runtime-adoptions.json and dogfooding-issues.json for DF-013 fixture hang and DF-014 contract discovery.

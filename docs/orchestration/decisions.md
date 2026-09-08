@@ -2,6 +2,27 @@
 
 ## Decision Log
 
+### 2026-09-07T21:42:39Z — TASK-1013 — escalate-infra
+
+- Run: `RUN-20260907T202230Z-53859`
+- Branch: `codex/brain/TASK-1013-candidate-lifecycle`
+- Authority: policy
+- Rationale: environment failure (worker-infra), not a product defect: the workspace could not run the gate. Repair the environment, then `singular unpark TASK-1013`.
+
+### 2026-09-07T21:42:38Z — TASK-1013 — decide:escalate-infra
+
+- Run: `RUN-20260907T202230Z-53859`
+- Branch: `codex/brain/TASK-1013-candidate-lifecycle`
+- Authority: policy
+- Rationale: fast-path: worker-infra -> escalate-infra
+
+### 2026-09-07T21:24:24Z — TASK-1011 — decide:split-task
+
+- Run: `MODEL-TRANSITION-DRAIN-TASK-1011-20260907`
+- Branch: `codex/brain/TASK-1011-recover-pinned-brain-producer`
+- Authority: decider
+- Rationale: integration-gate-red -> split-task: The retry budget is exhausted, and test-config-conflict.sh remains the sole failing gate. Split configuration-conflict diagnosis and repair into a bounded prerequisite task, preserving the concurrency approval requirement and keeping producer recovery blocked until integration passes.
+
 ### 2026-09-07T21:04:01Z — TASK-1011 — accept
 
 - Run: `RUN-20260907T195540Z-41868`
