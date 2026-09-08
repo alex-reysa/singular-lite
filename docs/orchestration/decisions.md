@@ -2,6 +2,27 @@
 
 ## Decision Log
 
+### 2026-09-08T03:33:51Z — TASK-1022 — escalate-parked
+
+- Run: `RUN-20260908T032252Z-72609`
+- Branch: `codex/brain/TASK-1022-readonly-evidence-access`
+- Authority: policy
+- Rationale: product repair budget exhausted for normal-risk task after 1 of 1 allowed repairs; audit and merged-tree gate authority remain unchanged.
+
+### 2026-09-08T03:27:48Z — TASK-1022 — decide:retry
+
+- Run: `RUN-20260908T032252Z-72609`
+- Branch: `codex/brain/TASK-1022-readonly-evidence-access`
+- Authority: policy
+- Rationale: fast-path: gate-red -> retry
+
+### 2026-09-08T03:25:10Z — TASK-1019 — escalate-parked
+
+- Run: `RUN-20260908T031330Z-23710`
+- Branch: `codex/brain/TASK-1019-exact-tree-fixture-bounds`
+- Authority: decider
+- Rationale: decider terminal action after audit-blocked
+
 ### 2026-09-08T03:13:24Z — TASK-1017 — escalate-parked
 
 - Run: `RUN-20260908T030505Z-83392`

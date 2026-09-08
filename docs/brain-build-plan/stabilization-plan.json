@@ -4,7 +4,7 @@
   "baseRelease": "0.21.0",
   "baseCommit": "0f92cba1fb1f2b51d6762b493b0ac7aaded8fdd9",
   "campaignAtAdoption": "BRAIN-20260907-ASTRA-SOL-R2",
-  "phase": "astra-light-active-fixture-running-evidence-repair-planning",
+  "phase": "operator-bootstrap-bridge-authoring-host-full-verification-running",
   "generationMode": "operator-directed-native-until-runtime-replacement",
   "models": {
     "model": "gpt-6-astra",
@@ -112,7 +112,7 @@
     "intervalMinutes": 30
   },
   "publicationCommit": "ea93d53034c216cd87f8b53af3a92f61dba291ce",
-  "lastObservedAt": "2026-09-08T03:22:51.221936+00:00",
+  "lastObservedAt": "2026-09-08T03:40:28.915238+00:00",
   "supplementalRecovery": {
     "taskId": "TASK-1017",
     "status": "blocked-audit-infrastructure",
@@ -206,8 +206,10 @@
         "id": "TASK-1019",
         "status": "ready",
         "dependsOn": [],
-        "observedStatus": "running",
-        "runId": "RUN-20260908T031330Z-23710"
+        "observedStatus": "blocked-audit-infrastructure",
+        "runId": "RUN-20260908T031330Z-23710",
+        "candidateHead": "e46b43c262e9dfac63af7bc8dbff43d574425328",
+        "nextAction": "Fresh native audit via independently reviewed bounded operator bridge, then full native integration; preserve original verdict and lineage"
       },
       {
         "id": "TASK-1020",
@@ -234,7 +236,7 @@
   },
   "evidenceAccessRecovery": {
     "taskId": "TASK-1022",
-    "status": "ready",
+    "status": "blocked-partial-implementation",
     "plannerRunId": "PLAN-READONLY-EVIDENCE-20260908",
     "plannerPid": 39458,
     "evidenceDirectory": ".singular-state/campaign-evidence/readonly-evidence-repair",
@@ -243,6 +245,42 @@
     "preservedSchemaCandidate": "3114c5cc3b31a441d2c5d84b471834193bd9d99e",
     "operatorRecovery": "Retain TASK-1017 at 3114c5cc3b31a441d2c5d84b471834193bd9d99e in RUN-20260908T030505Z-83392, parked with productRetry=0. Preserve original packet/audit/manifest/worktree and record the infrastructure blocker separately through authorized host logging.\n\nThe inspected retrieval and runner files match the frozen runtime. A trusted host can invoke evidence-show.sh with the original manifest and budget, but requesting 8000 still returns only the first 2048 bytes; repeating consumes allowance while returning the same prefix. It cannot currently supply complete review of this 6095-byte packet. Saving that output does not itself create an authorized immutable projection interface.\n\ncodex-run.sh supports a fresh read-only invocation and separate output capture, but provides no guarded retained-candidate re-audit/republication transaction. import-packet.sh requires an already accepted packet; it does not perform that transition. accept-existing-packet.sh manufactures deterministic replacement acceptance, so it cannot substitute for the required fresh independent audit. l1-drive.sh's accepted-evidence resume requires an existing accepted audit; generic blocked redispatch can reclaim the retained worktree.\n\nTherefore do not reset, redispatch, prune, rewrite labels or rebind old evidence. Retain the candidate until guarded TASK-1021/successor recovery supports fresh review and publication with validated lineage. Independently publish/implement TASK-1022 through the untouched pipeline; if its own mandatory audit encounters the same access failure, retain that result and resolve the bootstrapping constraint without acceptance shortcuts. No mutations, tests or provider calls were performed here.",
     "dependsOn": [],
-    "nextAction": "Dispatch native TASK-1022 in disjoint slot; preserve TASK-1017 until supported guarded recovery. No acceptance shortcut."
+    "nextAction": "Preserve exhausted attempt. Complete repair in authorized successor after validated operator handoff; host supplies sandbox verification. No reset or budget increase.",
+    "runId": "RUN-20260908T032252Z-72609",
+    "outcome": "escalate-parked",
+    "productRetryCount": 1,
+    "retainedChanges": [
+      "engine/evidence-show.sh",
+      "tests/test-readonly-evidence-access.sh"
+    ]
+  },
+  "bootstrapRecovery": {
+    "nativeDecisionRun": "PLAN-BOOTSTRAP-AUDIT-20260908",
+    "decisionEvidence": ".singular-state/campaign-evidence/bootstrap-audit-decision/decision.json",
+    "status": "native-artifact-authoring",
+    "authorRunId": "AUTHOR-BOOTSTRAP-AUDIT-BRIDGE-20260908",
+    "authorPid": 31828,
+    "artifactDirectory": ".singular-state/campaign-evidence/bootstrap-audit-bridge",
+    "operatorStop": "new ordinary dispatch suspended; not a user stop; host verification and native recovery continue",
+    "independentReviewRequired": true,
+    "fixtureValidationRequired": true,
+    "preservedCandidates": [
+      "TASK-1017",
+      "TASK-1019",
+      "TASK-1022"
+    ],
+    "firstRecoveryTask": "TASK-1019",
+    "publicationRule": "New acceptance only after fresh independent audit and required host checks, new recovery run with predecessor lineage and captured-state CAS under native locks; no historical acceptance edits or deterministic-audit substitute",
+    "hostFullVerification": {
+      "createdAt": "2026-09-08T03:34:09.564855+00:00",
+      "taskId": "TASK-1019",
+      "targetSha": "344a2d6ab99c282264c423844a4fbd180ba487b0",
+      "candidateSha": "e46b43c262e9dfac63af7bc8dbff43d574425328",
+      "mergedTree": "28d764483ffad3660add3ed7cc4583cef7e81915",
+      "syntheticCommit": "436a7b251c52bc1264ccf39f16757ad3e0b0eff9",
+      "sourceWorktree": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/planning/preintegration-TASK-1019",
+      "verificationRunDirectory": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs/PREINTEGRATION-TASK-1019-20260908",
+      "purpose": "Additional host full-suite evidence for fresh audit; no acceptance or target integration. Native final integration must still exact-tree re-gate."
+    }
   }
 }

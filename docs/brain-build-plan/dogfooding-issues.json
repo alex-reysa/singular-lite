@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T03:22:51.221936+00:00",
+  "updatedAt": "2026-09-08T03:40:28.915238+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -121,7 +121,14 @@
         }
       ],
       "lastReviewedAt": "2026-09-07T21:33:08.968282+00:00",
-      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+      "additionalObservation": {
+        "runId": "RUN-20260908T032252Z-72609",
+        "workerCapability": "Nested sandbox-exec profile installation unavailable inside workspace-write worker",
+        "hostCapability": "Trusted host gate executes nested read-only test and reproduces actual reader ledger-write failure",
+        "classification": "Worker verification-routing limitation is separate from genuine remaining product failure; the failing gate also contains product evidence, so do not call its entire product classification spurious.",
+        "nextAction": "Native operator handoff supplies host red evidence; successor implementer continues supported checks and labels host-required proof unrun; host verifies final committed candidate."
+      }
     },
     {
       "id": "DF-007",
@@ -281,9 +288,9 @@
         "TASK-1013",
         "TASK-1014"
       ],
-      "status": "implementation-running",
+      "status": "candidate-focused-gate-passed-audit-access-blocked",
       "observed": "Retained second worker log shows test-integration-exact-tree.sh integrator failing target branch not found: codex/brain-integration, followed by unbounded watcher wait for MERGE_HEAD. Inherited custom config is the suspected setup cause; infinite wait is visible in code/log.",
-      "nextAction": "Native planner queues bounded fixture isolation/watchdog repair, retaining lock/exact-tree assertions and existing TASK-1009 fixes.",
+      "nextAction": "Complete safe fresh audit and host full verification via reviewed operator bridge; actual native integration still re-gates.",
       "evidence": [
         {
           "path": ".singular-state/runs/RUN-20260907T202230Z-53859/worker-attempt-1-try-1.log",
@@ -292,7 +299,8 @@
       ],
       "lastReviewedAt": "2026-09-08T03:04:44.725172+00:00",
       "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
-      "runId": "RUN-20260908T031330Z-23710"
+      "runId": "RUN-20260908T031330Z-23710",
+      "candidateHead": "e46b43c262e9dfac63af7bc8dbff43d574425328"
     },
     {
       "id": "DF-014",
@@ -321,15 +329,17 @@
       "id": "DF-015",
       "title": "Read-only auditor cannot use mandatory evidence retrieval helper",
       "category": "product-capability-boundary-defect",
-      "status": "native-queued",
+      "status": "bootstrap-recovery-artifact-authoring",
       "relatedTasks": [
-        "TASK-1022",
         "TASK-1017",
+        "TASK-1019",
+        "TASK-1022",
+        "TASK-1021",
         "TASK-1014",
         "TASK-1016"
       ],
       "observed": "First R3 schema task gate passed, but the fresh Astra Light auditor returned blocked: evidence-show.sh attempts a mutable /tmp/singular-evidence-retrieval-v0 ledger lock denied by the read-only sandbox. Driver parked with no product retry spent. This is evidence-access failure, not a failing schema implementation or acceptance.",
-      "nextAction": "Implement TASK-1022 independently. Native High review confirms existing helper cannot paginate its 2048-byte prefix and current engine has no guarded blocked-candidate re-audit publication. Preserve TASK-1017 for TASK-1021 or narrowly authorized successor; never use deterministic acceptance as independent audit.",
+      "nextAction": "Native High authors bounded operator evidence/publication bridge, then fresh native Low independent review and fixture tests before any mutation. Use it to obtain real fresh candidate acceptance; retain all predecessor verdicts. Finish/adopt actual evidence repair afterward.",
       "evidence": [
         {
           "path": ".singular-state/runs/RUN-20260908T030505Z-83392/audit.json",
@@ -345,7 +355,31 @@
         }
       ],
       "lastReviewedAt": "2026-09-08T03:19:22.788023+00:00",
-      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f"
+      "observedRuntimeSource": "85937f90c7eb26953e15b52eb70d0b5c9ede043f",
+      "latestObservation": "TASK-1019 also blocked on required reader; TASK-1022 exhausted one product repair with only pagination changes and still fails host read-only retrieval. Ordinary dispatch stopped to avoid creating more stranded candidates."
+    },
+    {
+      "id": "DF-016",
+      "title": "Audit and integration stage requirements create circular verification timing",
+      "category": "task-contract-stage-ambiguity",
+      "status": "native-recovery-protocol-prepared",
+      "relatedTasks": [
+        "TASK-1019",
+        "TASK-1014"
+      ],
+      "observed": "TASK-1019 auditor correctly noted no full exact merged-tree evidence, while native integration normally produces that after candidate acceptance. Contract failed to clearly separate audit acceptance from final integration proof.",
+      "nextAction": "Native host pre-integration full verification supplies review evidence with explicit target/candidate/tree/staging identity; final native integration still re-gates actual staged tree. Clarify future contracts without weakening existing obligations.",
+      "evidence": [
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-decision/decision.json",
+          "sha256": "25532fce8baf7973fd3b0a5ca676ed093bc2ab75fd6fe674d0248fcb177acf97"
+        },
+        {
+          "path": ".singular-state/runs/RUN-20260908T031330Z-23710/audit.json",
+          "sha256": "54fe678209d9033007bea8697d0bd1fb1b8f378df31a1fc02b8d3e5ae9d9d2d5"
+        }
+      ],
+      "lastReviewedAt": "2026-09-08T03:40:28.915238+00:00"
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
