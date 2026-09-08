@@ -1,6 +1,6 @@
 {
   "schema": "singular.operator.dogfooding-issues.v1",
-  "updatedAt": "2026-09-08T08:45:29.581760+00:00",
+  "updatedAt": "2026-09-08T09:07:43.124117+00:00",
   "issues": [
     {
       "id": "DF-001",
@@ -444,13 +444,13 @@
       "id": "DF-019",
       "title": "Recovery artifact evidence projection exceeds retained lineage allowance",
       "category": "operator-evidence-planning-inefficiency",
-      "status": "scoped-allowance-active-source-review-needs-fix",
+      "status": "bounded-proof-redesign-running-no-new-review-charge",
       "relatedTasks": [
         "TASK-1016",
         "TASK-1022"
       ],
       "observed": "First source review consumed80710 retrieval bytes. Proposed retry includes full growing operator sources plus70720 native helper bytes; mandatory source/task lower bound237184 exceeds181434 remaining. No retry delivered and no ledger reset. Cumulative composed condition was added by operator artifact whereas native manifest enforces per-assembly size; proposed correction needs independent review and cannot solve retrieval excess alone.",
-      "nextAction": "Inspect fresh procedure2 verdict and proof; only after acceptance prepare, full native gate, fresh independent candidate audit, guarded native import and full integration. No budget reset or historical authority edits.",
+      "nextAction": "Inspect native bounded-proof-design and exact budget; use root effective-function evidence, then implement only a sufficient fitting design, rerun compliant final-hash host fixtures and fresh independent review. No unplanned third charge.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/repair-1/completion.json",
@@ -467,10 +467,14 @@
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/authorized-r4-fixture-repair/exact-estimate.json",
           "sha256": "5cb17533728c603a9336afc1209e36b22ee7c5f0ddd87dfc80e33983ad698030"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review-2-remediation/review-3-plan.json",
+          "sha256": "07a24f13b23123d44a06210d80908d3f9278dcf23fe2d5d79ac0a29fdceb5d0d"
         }
       ],
-      "lastReviewedAt": "2026-09-08T08:42:28.623916+00:00",
-      "latestObservation": "User authorized512KiB only for retained TASK1019 recovery and all roles Astra Medium/Fast. Adapter host19/19 green. Atomic ledger migration preserved all80710 prior bytes and every historical delivery; fresh procedure2 charged192029 before native readonly delivery, total272739 remaining251549. Source input258091 fits unchanged262144 limit. Independent source verdict pending; no candidate acceptance or product integration. Procedure2 finished08:41:57Z needs-fix: missing policy/campaign contents, effective runtime evidence and absolute Python receipt binding. Native REPAIR-R4-SOURCE-PROOF-20260908 is addressing findings with remaining251549; no third delivery until complete fresh source/task budget fits.",
+      "lastReviewedAt": "2026-09-08T09:07:43.124117+00:00",
+      "latestObservation": "REPAIR-R4-SOURCE-PROOF completed08:48:54 before spending; no code changes. Full identity duplication estimate340517 exceeds remaining251549 and input307494 exceeds262144. Native DESIGN-BOUNDED-R4-PROOF measures sufficient projections and duplicated task source context without raising caps or weakening acceptance. Root observed26 post-load native functions resolve to frozen lib; effective dependency closure remains to establish.",
       "exactEstimate": {
         "source": 192029,
         "sourceComposed": 258091,
@@ -514,9 +518,9 @@
       "id": "DF-021",
       "title": "Recovery proof markers require evidence absent from reviewer input",
       "category": "operator-review-evidence-defect",
-      "status": "native-remediation-running",
+      "status": "bounded-proof-redesign-running-no-new-review-charge",
       "observed": "Independent procedure2 reviewed all four sources and all19 host fixture transcript, but required actual config/campaign contents, effective module/ctx implementation evidence and absolute Python executable receipt binding before approval.",
-      "nextAction": "Native REPAIR-R4-SOURCE-PROOF-20260908 corrects bounded evidence composition and receipt checks, with exact source/task budget preflight before any third accounted delivery. Preserve needs-fix verdict and all charged bytes; no prepare or candidate publication.",
+      "nextAction": "Inspect native bounded-proof-design and exact budget; use root effective-function evidence, then implement only a sufficient fitting design, rerun compliant final-hash host fixtures and fresh independent review. No unplanned third charge.",
       "evidence": [
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review/attempt-2/audit.json",
@@ -525,9 +529,14 @@
         {
           "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review-2-remediation/invocation.json",
           "sha256": "16dc0020c184dfb59d3d6e3a32bd854ef4246acfe2e8f080b167179bf54e4548"
+        },
+        {
+          "path": ".singular-state/campaign-evidence/bootstrap-audit-bridge/source-review-2-remediation/review-3-plan.json",
+          "sha256": "07a24f13b23123d44a06210d80908d3f9278dcf23fe2d5d79ac0a29fdceb5d0d"
         }
       ],
-      "lastReviewedAt": "2026-09-08T08:45:29.581760+00:00"
+      "lastReviewedAt": "2026-09-08T09:07:43.124117+00:00",
+      "latestObservation": "REPAIR-R4-SOURCE-PROOF completed08:48:54 before spending; no code changes. Full identity duplication estimate340517 exceeds remaining251549 and input307494 exceeds262144. Native DESIGN-BOUNDED-R4-PROOF measures sufficient projections and duplicated task source context without raising caps or weakening acceptance. Root observed26 post-load native functions resolve to frozen lib; effective dependency closure remains to establish."
     }
   ],
   "classificationRules": "Separate product behavior, test compatibility, provider/infrastructure limits, operational inefficiency and operator setup mistakes. Preserve hypotheses as hypotheses; status resolved requires observed post-adoption evidence."
