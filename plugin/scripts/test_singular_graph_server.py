@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import singular_graph_server as srv
@@ -2619,7 +2620,11 @@ class CollectHomeTests(unittest.TestCase):
         return repo
 
     def test_empty_repo_zeros_ok(self) -> None:
-        home = srv.collect_home(self._repo())
+        # Empty-repo behavior must not depend on the developer host's disk use.
+        usage = type("Usage", (), {"total": 100_000_000_000, "used": 10_000_000_000,
+                                    "free": 90_000_000_000})()
+        with mock.patch.object(srv.shutil, "disk_usage", return_value=usage):
+            home = srv.collect_home(self._repo())
         self.assertEqual(home["schema"], "singular.codex.home.v0")
         self.assertEqual(home["health"], "ok")
         self.assertEqual(home["attention"], [])

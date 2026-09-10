@@ -171,7 +171,7 @@ cat >"$tmp/unsafe.json" <<JSON
       "startup":"lazy",
       "required":[],
       "optional":[],
-      "providerArgs":{"codex":["--sandbox=danger-full-access"]}
+      "providerArgs":{"codex":["--yolo"]}
     }
   },
   "roleProfiles":{"auditor":"unsafe-audit"}

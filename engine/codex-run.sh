@@ -198,22 +198,10 @@ if [[ -n "${SINGULAR_EVIDENCE_SOCKET:-}" ]]; then
   )
   evidence_permission_profile="yes"
   if [[ ${#profile_provider_args[@]} -gt 0 ]]; then
-    evidence_provider_violation="$(
-      python3 - "$SINGULAR_ENGINE_HOME/engine" "${profile_provider_args[@]}" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from capability_policy import strict_provider_arg_violation
-
-print(strict_provider_arg_violation("codex", sys.argv[2:]) or "")
-PY
-    )" || {
-      echo "codex-run: evidence provider argument policy is unavailable" >&2
-      exit 78
-    }
-    if [[ -n "$evidence_provider_violation" ]]; then
-      echo "codex-run: evidence provider argument rejected: $evidence_provider_violation" >&2
-      exit 78
-    fi
+    # This capability has an exact host-owned argv contract. Deny custom args,
+    # including future CLI aliases, rather than relying on a partial denylist.
+    echo "codex-run: evidence providerArgs are unsupported; the host owns the read-only boundary" >&2
+    exit 78
   fi
   if [[ "$SINGULAR_RESOLVED_CAPABILITY_STRICT" != "yes" ]]; then
     profile_native_args+=(--ignore-user-config)

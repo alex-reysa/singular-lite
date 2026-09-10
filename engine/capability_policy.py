@@ -23,6 +23,7 @@ STRICT_PROVIDER_DENIED_OPTIONS: dict[str, frozenset[str]] = {
             "--cd",
             "--config",
             "--dangerously-bypass-approvals-and-sandbox",
+            "--yolo",
             "--disable",
             "--enable",
             "--full-auto",
