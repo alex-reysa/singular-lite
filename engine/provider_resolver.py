@@ -22,9 +22,11 @@ Stdlib only, no engine imports — mirrors engine/capability_policy.py.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
+from pathlib import Path
 import shutil
-from typing import Mapping
+from typing import Any, Mapping
 
 # Resolution outcomes. The console needs "explicitly configured but broken" to
 # be distinguishable from "nothing on PATH": the first is an operator
@@ -39,6 +41,155 @@ PATH_NOT_EXECUTABLE = "path-not-executable"  # PATH hit, but not +x
 # Only codex has a strict override today. Providers absent from this map resolve
 # by PATH alone, and a codex override must never leak into their resolution.
 OVERRIDE_ENV_KEYS = {"codex": "SINGULAR_CODEX_BIN"}
+
+# Codex role routing is shared by the native runner, doctor and console.  The
+# values are configuration keys, never campaign model names: generic engine
+# defaults continue to come from providers.json.
+CODEX_ROLE_ALIASES = {
+    "worker": "implementer",
+    "developer": "implementer",
+    "reviewer": "auditor",
+    "final": "auditor",
+    "final-audit": "auditor",
+    "final-auditor": "auditor",
+    "paired-audit": "auditor",
+    "paired-auditor": "auditor",
+    "plan-critic": "critic",
+    "skeptic": "critic",
+    "advocate": "critic",
+    "assistant": "supervisor",
+}
+CODEX_ROLE_MODEL_ENV = {
+    "planner": "SINGULAR_CODEX_PLANNER_MODEL",
+    "implementer": "SINGULAR_CODEX_IMPLEMENTER_MODEL",
+    "auditor": "SINGULAR_CODEX_AUDITOR_MODEL",
+    "critic": "SINGULAR_CODEX_CRITIC_MODEL",
+    "decider": "SINGULAR_CODEX_DECIDER_MODEL",
+    "supervisor": "SINGULAR_CODEX_SUPERVISOR_MODEL",
+    "integrator": "SINGULAR_CODEX_INTEGRATOR_MODEL",
+}
+CODEX_ROLE_EFFORT_ENV = {
+    "planner": "SINGULAR_CODEX_PLANNER_REASONING_EFFORT",
+    "implementer": "SINGULAR_CODEX_L2_REASONING_EFFORT",
+    "auditor": "SINGULAR_CODEX_AUDITOR_REASONING_EFFORT",
+    "critic": "SINGULAR_CODEX_CRITIC_REASONING_EFFORT",
+    "decider": "SINGULAR_CODEX_DECIDER_REASONING_EFFORT",
+    "supervisor": "SINGULAR_CODEX_SUPERVISOR_REASONING_EFFORT",
+    "integrator": "SINGULAR_CODEX_INTEGRATOR_REASONING_EFFORT",
+}
+CODEX_ROLE_EFFORT_DEFAULT = {
+    "planner": "high",
+    "implementer": "medium",
+    "auditor": "high",
+    "critic": "high",
+    "decider": "high",
+    "supervisor": "high",
+    "integrator": "high",
+}
+
+
+class ConfigResolutionError(ValueError):
+    """The explicitly selected JSON configuration cannot be used."""
+
+
+@dataclass(frozen=True)
+class JsonConfigResolution:
+    path: Path
+    source: str  # "selector" | "default"
+
+
+def resolve_json_config(repo: Path | str, env: Mapping[str, str]) -> JsonConfigResolution:
+    """Resolve the JSON config once, before any caller changes cwd.
+
+    Relative explicit selectors are rooted at the consumer repository.  This
+    gives CLI, doctor and a detached console one stable meaning for the same
+    selector even when each process starts in a different directory.
+    """
+    root = Path(repo).resolve()
+    selected = str(env.get("SINGULAR_JSON_CONFIG_FILE", "") or "").strip()
+    if selected:
+        path = Path(selected).expanduser()
+        if not path.is_absolute():
+            path = root / path
+        return JsonConfigResolution(path=path.resolve(), source="selector")
+    return JsonConfigResolution(path=root / "singular.config.json", source="default")
+
+
+def load_json_config(
+    repo: Path | str, env: Mapping[str, str]
+) -> tuple[dict[str, Any], JsonConfigResolution]:
+    """Read the selected config and fail with its exact path in the message."""
+    resolution = resolve_json_config(repo, env)
+    try:
+        loaded = json.loads(resolution.path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ConfigResolutionError(
+            f"selected JSON configuration is missing: {resolution.path}"
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigResolutionError(
+            f"selected JSON configuration is invalid: {resolution.path}: {exc}"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise ConfigResolutionError(
+            f"selected JSON configuration is invalid: {resolution.path}: "
+            "top level must be an object"
+        )
+    return loaded, resolution
+
+
+def normalize_codex_role(role: str) -> str:
+    value = str(role or "").strip().lower().replace("_", "-")
+    return CODEX_ROLE_ALIASES.get(value, value)
+
+
+def codex_role_settings(
+    env: Mapping[str, str], role: str, default_model: str
+) -> dict[str, str | None]:
+    """Resolve observable Codex model/effort/tier settings for one role."""
+    effective_role = normalize_codex_role(role)
+    model_key = CODEX_ROLE_MODEL_ENV.get(effective_role)
+    role_model = str(env.get(model_key, "") or "").strip() if model_key else ""
+    global_model = str(env.get("SINGULAR_CODEX_MODEL", "") or "").strip()
+    if role_model:
+        model, model_source = role_model, model_key
+    elif global_model:
+        model, model_source = global_model, "SINGULAR_CODEX_MODEL"
+    else:
+        model, model_source = default_model, "provider-default"
+
+    effort_key = CODEX_ROLE_EFFORT_ENV.get(effective_role)
+    effort = str(env.get(effort_key, "") or "").strip() if effort_key else ""
+    if effort:
+        effort_source: str | None = effort_key
+    elif effective_role in {"supervisor", "integrator"} and str(
+        env.get("SINGULAR_CODEX_READONLY_REASONING_EFFORT", "") or ""
+    ).strip():
+        effort = str(env["SINGULAR_CODEX_READONLY_REASONING_EFFORT"]).strip()
+        effort_source = "SINGULAR_CODEX_READONLY_REASONING_EFFORT"
+    else:
+        effort = CODEX_ROLE_EFFORT_DEFAULT.get(effective_role, "")
+        effort_source = "runner-default" if effort else None
+
+    tier_present = "SINGULAR_CODEX_SERVICE_TIER" in env
+    raw_tier = str(env.get("SINGULAR_CODEX_SERVICE_TIER", "") or "").strip()
+    if tier_present and raw_tier in {"", "normal", "standard", "default"}:
+        tier, tier_source = "default", "explicit-clear" if not raw_tier else "explicit"
+    elif raw_tier:
+        tier, tier_source = raw_tier, "explicit"
+    else:
+        tier, tier_source = None, None
+    return {
+        "role": effective_role,
+        "model": model,
+        "modelSource": model_source,
+        "reasoningEffort": effort or None,
+        "reasoningEffortSource": effort_source,
+        "requestedServiceTier": tier,
+        "serviceTierSource": tier_source,
+        # Codex JSONL does not currently attest the queue actually used.
+        "providerObservedServiceTier": None,
+    }
 
 
 @dataclass(frozen=True)

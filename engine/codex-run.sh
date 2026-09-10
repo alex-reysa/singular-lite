@@ -14,6 +14,15 @@ source "$SCRIPT_DIR/lib.sh"
 #
 # Session affinity (T-E5): both flags are ADDITIVE. With NEITHER passed, the
 # invocation path below stays byte-identical to the pre-affinity runner.
+runner_role_flag_seen="no"
+_singular_role_scan=("$@")
+for ((_singular_i=0; _singular_i<${#_singular_role_scan[@]}; _singular_i++)); do
+  if [[ "${_singular_role_scan[$_singular_i]}" == "--role" ]]; then
+    runner_role_flag_seen="yes"
+    break
+  fi
+done
+unset _singular_role_scan _singular_i
 singular_runner_parse_args "$@" || exit $?
 
 if [[ "$describe_contract" == "yes" ]]; then
@@ -41,8 +50,58 @@ singular_validate_codex_sandbox() {
   esac
 }
 
-singular_codex_reasoning_effort() {
+singular_codex_normalize_role() {
+  local role
+  role="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  role="${role//_/-}"
+  case "$role" in
+    worker|developer) printf '%s\n' implementer ;;
+    reviewer|final|final-audit|final-auditor|paired-audit|paired-auditor)
+      printf '%s\n' auditor ;;
+    plan-critic|skeptic|advocate) printf '%s\n' critic ;;
+    assistant) printf '%s\n' supervisor ;;
+    *) printf '%s\n' "$role" ;;
+  esac
+}
+
+singular_codex_infer_role() {
   local level="$1" prompt_file="$2" prompt_name
+  prompt_name="$(basename "$prompt_file")"
+  case "$prompt_name" in
+    planner-prompt.md) printf '%s\n' planner ;;
+    auditor.md|auditor-*.md|reviewer.md|reviewer-*.md) printf '%s\n' auditor ;;
+    decider.md|decider-prompt-*.md) printf '%s\n' decider ;;
+    *supervisor*|*ask*) printf '%s\n' supervisor ;;
+    *critic*) printf '%s\n' critic ;;
+    *) [[ "$level" == "l2" ]] && printf '%s\n' implementer || printf '%s\n' unknown ;;
+  esac
+}
+
+singular_codex_model_env_for_role() {
+  case "$1" in
+    planner) printf '%s\n' SINGULAR_CODEX_PLANNER_MODEL ;;
+    implementer) printf '%s\n' SINGULAR_CODEX_IMPLEMENTER_MODEL ;;
+    auditor) printf '%s\n' SINGULAR_CODEX_AUDITOR_MODEL ;;
+    critic) printf '%s\n' SINGULAR_CODEX_CRITIC_MODEL ;;
+    decider) printf '%s\n' SINGULAR_CODEX_DECIDER_MODEL ;;
+    supervisor) printf '%s\n' SINGULAR_CODEX_SUPERVISOR_MODEL ;;
+    integrator) printf '%s\n' SINGULAR_CODEX_INTEGRATOR_MODEL ;;
+    *) printf '\n' ;;
+  esac
+}
+
+singular_codex_reasoning_effort() {
+  local role="$1" level="$2" prompt_file="$3" prompt_name
+  case "$role" in
+    planner) printf '%s\n' "${SINGULAR_CODEX_PLANNER_REASONING_EFFORT:-high}" ;;
+    implementer) printf '%s\n' "${SINGULAR_CODEX_L2_REASONING_EFFORT:-medium}" ;;
+    auditor) printf '%s\n' "${SINGULAR_CODEX_AUDITOR_REASONING_EFFORT:-high}" ;;
+    critic) printf '%s\n' "${SINGULAR_CODEX_CRITIC_REASONING_EFFORT:-high}" ;;
+    decider) printf '%s\n' "${SINGULAR_CODEX_DECIDER_REASONING_EFFORT:-high}" ;;
+    supervisor) printf '%s\n' "${SINGULAR_CODEX_SUPERVISOR_REASONING_EFFORT:-${SINGULAR_CODEX_READONLY_REASONING_EFFORT:-high}}" ;;
+    integrator) printf '%s\n' "${SINGULAR_CODEX_INTEGRATOR_REASONING_EFFORT:-${SINGULAR_CODEX_READONLY_REASONING_EFFORT:-high}}" ;;
+    *)
+      # Legacy callers that predate runner roles keep level/prompt inference.
   case "$level" in
     l0|l1)
       printf '%s\n' "${SINGULAR_CODEX_L1_REASONING_EFFORT:-high}"
@@ -61,6 +120,8 @@ singular_codex_reasoning_effort() {
         *critic*.md) printf '%s\n' "${SINGULAR_CODEX_CRITIC_REASONING_EFFORT:-high}" ;;
         *) printf '%s\n' "${SINGULAR_CODEX_READONLY_REASONING_EFFORT:-high}" ;;
       esac
+      ;;
+  esac
       ;;
   esac
 }
@@ -109,6 +170,57 @@ if [[ "$SINGULAR_RESOLVED_CAPABILITY_STRICT" == "yes" ]]; then
   profile_native_args+=(--ignore-user-config)
 fi
 
+# A host evidence broker is a read-only reviewer capability carried over one
+# exact Unix socket.  Codex's legacy `--sandbox read-only` flag overrides custom
+# permission profiles, so this opt-in path expresses the same filesystem policy
+# as a named profile and grants only that socket.  User config is ignored here
+# so it cannot widen the profile, replace it with an inherited sandbox mode, or
+# start unrelated user-configured MCP servers.
+evidence_permission_args=()
+evidence_permission_profile="no"
+if [[ -n "${SINGULAR_EVIDENCE_SOCKET:-}" ]]; then
+  if [[ "$level" != "readonly" && "$level" != "read-only" ]]; then
+    echo "codex-run: SINGULAR_EVIDENCE_SOCKET is allowed only for read-only roles" >&2
+    exit 78
+  fi
+  if [[ "$SINGULAR_EVIDENCE_SOCKET" != /* || ! -S "$SINGULAR_EVIDENCE_SOCKET" ]]; then
+    echo "codex-run: SINGULAR_EVIDENCE_SOCKET must name an existing absolute Unix socket: $SINGULAR_EVIDENCE_SOCKET" >&2
+    exit 78
+  fi
+  evidence_socket_key="${SINGULAR_EVIDENCE_SOCKET//\\/\\\\}"
+  evidence_socket_key="${evidence_socket_key//\"/\\\"}"
+  evidence_permission_args=(
+    -P singular-evidence
+    -c 'permissions.singular-evidence.extends=":read-only"'
+    -c "permissions.singular-evidence.network.unix_sockets={\"$evidence_socket_key\"=\"allow\"}"
+    -c 'default_permissions="singular-evidence"'
+    -c 'features.network_proxy=true'
+    -c 'permissions.singular-evidence.network.enabled=true'
+  )
+  evidence_permission_profile="yes"
+  if [[ ${#profile_provider_args[@]} -gt 0 ]]; then
+    evidence_provider_violation="$(
+      python3 - "$SINGULAR_ENGINE_HOME/engine" "${profile_provider_args[@]}" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from capability_policy import strict_provider_arg_violation
+
+print(strict_provider_arg_violation("codex", sys.argv[2:]) or "")
+PY
+    )" || {
+      echo "codex-run: evidence provider argument policy is unavailable" >&2
+      exit 78
+    }
+    if [[ -n "$evidence_provider_violation" ]]; then
+      echo "codex-run: evidence provider argument rejected: $evidence_provider_violation" >&2
+      exit 78
+    fi
+  fi
+  if [[ "$SINGULAR_RESOLVED_CAPABILITY_STRICT" != "yes" ]]; then
+    profile_native_args+=(--ignore-user-config)
+  fi
+fi
+
 if [[ "$capture_packet" == "auto" && "$level" == "l2" ]]; then
   capture_packet="yes"
 elif [[ "$capture_packet" == "auto" ]]; then
@@ -123,9 +235,73 @@ if [[ "$capture_packet" == "yes" ]]; then
   fi
 fi
 
-codex_model="${SINGULAR_CODEX_MODEL:-$SINGULAR_SPEC_MODEL_DEFAULT}"
-codex_service_tier="${SINGULAR_CODEX_SERVICE_TIER:-}"
-codex_reasoning_effort="$(singular_codex_reasoning_effort "$level" "$prompt_file")"
+declared_role="$runner_role"
+role_source="environment"
+if [[ "$runner_role_flag_seen" == "yes" ]]; then
+  role_source="explicit"
+elif [[ -z "${SINGULAR_RUNNER_ROLE:-}" || "$runner_role" == "unknown" ]]; then
+  declared_role="$(singular_codex_infer_role "$level" "$prompt_file")"
+  role_source="inferred"
+fi
+effective_role="$(singular_codex_normalize_role "$declared_role")"
+
+global_model="${SINGULAR_CODEX_MODEL:-}"
+role_model_env="$(singular_codex_model_env_for_role "$effective_role")"
+role_model=""
+if [[ -n "$role_model_env" ]]; then
+  role_model="${!role_model_env:-}"
+fi
+if [[ -n "$role_model" ]]; then
+  codex_model="$role_model"
+  codex_model_source="$role_model_env"
+elif [[ -n "$global_model" ]]; then
+  codex_model="$global_model"
+  codex_model_source="SINGULAR_CODEX_MODEL"
+else
+  codex_model="$SINGULAR_SPEC_MODEL_DEFAULT"
+  codex_model_source="provider-default"
+fi
+codex_reasoning_effort="$(singular_codex_reasoning_effort "$effective_role" "$level" "$prompt_file")"
+case "$effective_role" in
+  planner) codex_effort_env=SINGULAR_CODEX_PLANNER_REASONING_EFFORT ;;
+  implementer) codex_effort_env=SINGULAR_CODEX_L2_REASONING_EFFORT ;;
+  auditor) codex_effort_env=SINGULAR_CODEX_AUDITOR_REASONING_EFFORT ;;
+  critic) codex_effort_env=SINGULAR_CODEX_CRITIC_REASONING_EFFORT ;;
+  decider) codex_effort_env=SINGULAR_CODEX_DECIDER_REASONING_EFFORT ;;
+  supervisor) codex_effort_env=SINGULAR_CODEX_SUPERVISOR_REASONING_EFFORT ;;
+  integrator) codex_effort_env=SINGULAR_CODEX_INTEGRATOR_REASONING_EFFORT ;;
+  *) codex_effort_env="" ;;
+esac
+if [[ -n "$codex_effort_env" && -n "${!codex_effort_env:-}" ]]; then
+  codex_effort_source="$codex_effort_env"
+elif [[ "$effective_role" == "supervisor" || "$effective_role" == "integrator" ]] \
+  && [[ -n "${SINGULAR_CODEX_READONLY_REASONING_EFFORT:-}" ]]; then
+  codex_effort_source=SINGULAR_CODEX_READONLY_REASONING_EFFORT
+else
+  case "$effective_role" in
+    planner|implementer|auditor|critic|decider|supervisor|integrator)
+      codex_effort_source=runner-default
+      ;;
+  *) codex_effort_source=legacy-level-inference ;;
+  esac
+fi
+
+codex_service_tier=""
+codex_service_tier_source=""
+if [[ "${SINGULAR_CODEX_SERVICE_TIER+x}" == "x" ]]; then
+  case "${SINGULAR_CODEX_SERVICE_TIER:-}" in
+    ""|normal|standard|default)
+      codex_service_tier="default"
+      [[ -n "${SINGULAR_CODEX_SERVICE_TIER:-}" ]] \
+        && codex_service_tier_source="explicit" \
+        || codex_service_tier_source="explicit-clear"
+      ;;
+    *)
+      codex_service_tier="$SINGULAR_CODEX_SERVICE_TIER"
+      codex_service_tier_source="explicit"
+      ;;
+  esac
+fi
 
 # ---- Session affinity: resume-refusal gate (exit 86) ------------------------
 # Model selection lives in the runner. If the host asks us to resume a session
@@ -165,7 +341,14 @@ if [[ -n "$resume_session_id" ]]; then
   # subcommand flags; those live at the GLOBAL codex level (before `exec`), while
   # --json/-o belong to the resume subcommand. Verified form (codex exec resume
   # --help): codex -a never -m M --sandbox S -C WT [-c ...] exec resume <id> --json [-o out] -
-  cmd=("$codex_bin" -a never -m "$codex_model" --sandbox "$sandbox" -C "$worktree")
+  cmd=("$codex_bin" -a never -m "$codex_model")
+  if [[ "$evidence_permission_profile" != "yes" ]]; then
+    cmd+=(--sandbox "$sandbox")
+  fi
+  cmd+=(-C "$worktree")
+  if [[ ${#evidence_permission_args[@]} -gt 0 ]]; then
+    cmd+=("${evidence_permission_args[@]}")
+  fi
   if [[ -n "$codex_reasoning_effort" ]]; then
     cmd+=(-c "model_reasoning_effort=\"$codex_reasoning_effort\"")
   fi
@@ -195,7 +378,14 @@ else
   if [[ "$SINGULAR_RESOLVED_PROVIDER_ARGS_COUNT" -gt 0 ]]; then
     cmd+=("${profile_provider_args[@]}")
   fi
-  cmd+=(-m "$codex_model" --sandbox "$sandbox" -C "$worktree" --json)
+  cmd+=(-m "$codex_model")
+  if [[ "$evidence_permission_profile" != "yes" ]]; then
+    cmd+=(--sandbox "$sandbox")
+  fi
+  cmd+=(-C "$worktree" --json)
+  if [[ ${#evidence_permission_args[@]} -gt 0 ]]; then
+    cmd+=("${evidence_permission_args[@]}")
+  fi
   if [[ -n "$codex_reasoning_effort" ]]; then
     cmd+=(-c "model_reasoning_effort=\"$codex_reasoning_effort\"")
   fi
@@ -257,6 +447,7 @@ singular_codex_completion_scan() {
   # so a later append cannot hide a previously incomplete record.
   python3 - "$jsonl_tmp" "$1" <<'PY'
 import json
+import re
 import sys
 
 path, raw_offset = sys.argv[1], sys.argv[2]
@@ -278,6 +469,20 @@ terminal_failure_types = {
     "session.failed",
     "thread.failed",
 }
+
+def is_bounded_reconnect(event):
+    if event.get("type") != "error" or not isinstance(event.get("message"), str):
+        return False
+    match = re.fullmatch(
+        r"Reconnecting\.\.\. (?P<attempt>[1-9]|10)/(?P<limit>[1-9]|10) \([^\r\n]+\)",
+        event["message"],
+    )
+    if match is None:
+        return False
+    attempt = int(match.group("attempt"))
+    limit = int(match.group("limit"))
+    return attempt <= limit
+
 consumed = offset
 outcome = "none"
 try:
@@ -293,7 +498,10 @@ try:
                 event = None
             if isinstance(event, dict) and isinstance(event.get("type"), str):
                 event_type = event["type"]
-                if event_type == "error" or (
+                if event_type == "error" and is_bounded_reconnect(event):
+                    if outcome != "failed":
+                        outcome = "reconnecting"
+                elif event_type == "error" or (
                     event_type in terminal_failure_types
                     and event.get("error") is not None
                 ):
@@ -368,6 +576,10 @@ run_codex_guarded() {
         SINGULAR_RUNNER_CHILD_PID=""
         return 1
       fi
+      if [[ "$completion_outcome" == "reconnecting" ]]; then
+        completion_deadline=0
+        echo "codex-run: bounded provider reconnect observed; awaiting terminal outcome" >&2
+      fi
       if [[ "$completion_outcome" == "completed" && "$completion_deadline" -eq 0 ]]; then
         completion_deadline=$(( now + codex_completion_grace ))
         echo "codex-run: semantic completion observed; allowing ${codex_completion_grace}s for provider shutdown" >&2
@@ -428,6 +640,19 @@ else
   fi
 fi
 
+# A provider can exit between guard polls, so classify the complete retained
+# stream once more. A bounded reconnect is provisional only when a later Codex
+# success event resolves it; otherwise it remains failure evidence.
+final_scan_outcome="none"
+read -r _ final_scan_outcome < <(singular_codex_completion_scan 0)
+if [[ "$exit_code" -eq 0 && "$final_scan_outcome" == "failed" ]]; then
+  echo "codex-run: terminal provider failure observed at shutdown" >&2
+  exit_code=1
+elif [[ "$exit_code" -eq 0 && "$final_scan_outcome" == "reconnecting" ]]; then
+  echo "codex-run: provider exited without success after reconnect" >&2
+  exit_code=1
+fi
+
 # ---- Session-meta: scan the JSONL for a session id, write the meta file ------
 if [[ -n "$session_meta_path" ]]; then
   session_id=""
@@ -477,6 +702,36 @@ PY
   fi
   singular_codex_session_meta_write "$session_meta_path" "$session_id" "$codex_model" \
     "$codex_reasoning_effort" "$worktree" "$exit_code" || true
+  python3 - "$session_meta_path" "$declared_role" "$effective_role" "$role_source" \
+    "$codex_model" "$codex_model_source" "$codex_reasoning_effort" \
+    "$codex_effort_source" "$codex_service_tier" "$codex_service_tier_source" <<'PY' \
+    2>/dev/null || true
+import json
+import os
+import sys
+
+(path, requested_role, role, role_source, model, model_source, effort,
+ effort_source, service_tier, service_tier_source) = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as handle:
+    meta = json.load(handle)
+meta["effective"] = {
+    "requestedRole": requested_role,
+    "role": role,
+    "roleSource": role_source,
+    "model": model,
+    "modelSource": model_source,
+    "reasoningEffort": effort or None,
+    "reasoningEffortSource": effort_source or None,
+    "requestedServiceTier": service_tier or None,
+    "serviceTierSource": service_tier_source or None,
+    "providerObservedServiceTier": None,
+}
+tmp = f"{path}.tmp-{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(meta, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(tmp, path)
+PY
 fi
 # ---- Resume-failure signalling (exit 86) ------------------------------------
 # A resumed run that exits nonzero with empty output is indistinguishable, to the

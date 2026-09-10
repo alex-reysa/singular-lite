@@ -254,15 +254,11 @@ def redact_lines(records: list) -> list:
 
 
 def load_repo_target_branch(repo) -> str:
-    """Read targetBranch from the target repo's singular.config.json so the console is
-    not bound to any one project's integration branch. Falls back to the default."""
-    try:
-        with open(os.path.join(str(repo), "singular.config.json"), encoding="utf-8") as f:
-            tb = json.load(f).get("targetBranch")
-        if isinstance(tb, str) and tb:
-            return tb
-    except Exception:
-        pass
+    """Read targetBranch from the same selected JSON config as the engine."""
+    cfg, _resolution, _error = _selected_json_config(Path(repo))
+    tb = cfg.get("targetBranch") if isinstance(cfg, dict) else None
+    if isinstance(tb, str) and tb:
+        return tb
     return TARGET_BRANCH
 ASSETS_DIR = (Path(__file__).resolve().parent.parent / "assets")
 WATCH_DISK_CAPACITY = 99
@@ -467,9 +463,78 @@ def read_json(path: Path, fallback: Any = None) -> Any:
         return fallback
 
 
+def _selected_json_config(
+    repo: Path, env: dict[str, str] | None = None
+) -> tuple[dict[str, Any], dict[str, str], str]:
+    """Selected config, stable resolution metadata, and an actionable error."""
+    repo = repo.resolve()
+    selected_env = env if env is not None else os.environ
+    resolver = _load_provider_resolver()
+    if resolver is not None and hasattr(resolver, "load_json_config"):
+        resolution = resolver.resolve_json_config(repo, selected_env)
+        if resolution.source == "default" and not resolution.path.exists():
+            return {}, {
+                "path": str(resolution.path),
+                "source": str(resolution.source),
+                "status": "absent",
+            }, ""
+        try:
+            cfg, resolved = resolver.load_json_config(repo, selected_env)
+            return cfg, {
+                "path": str(resolved.path),
+                "source": str(resolved.source),
+                "status": "ok",
+            }, ""
+        except Exception as exc:
+            return {}, {
+                "path": str(resolution.path),
+                "source": str(resolution.source),
+                "status": "error",
+            }, str(exc)
+    raw = str(selected_env.get("SINGULAR_JSON_CONFIG_FILE", "") or "").strip()
+    path = Path(raw).expanduser() if raw else repo / "singular.config.json"
+    if not path.is_absolute():
+        path = repo / path
+    path = path.resolve()
+    if not raw and not path.exists():
+        return {}, {
+            "path": str(path),
+            "source": "default",
+            "status": "absent",
+        }, ""
+    cfg = read_json(path, None)
+    if isinstance(cfg, dict):
+        return cfg, {
+            "path": str(path),
+            "source": "selector" if raw else "default",
+            "status": "ok",
+        }, ""
+    return {}, {
+        "path": str(path),
+        "source": "selector" if raw else "default",
+        "status": "error",
+    }, f"selected JSON configuration is missing or invalid: {path}"
+
+
+def _configured_path(repo: Path, env_key: str, fallback: str) -> Path:
+    cfg, _resolution, _error = _selected_json_config(repo)
+    cfg_env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+    raw = str(cfg_env.get(env_key) or "").strip()
+    if not raw:
+        return repo / fallback
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = repo / path
+    return path
+
+
 def state_path(repo: Path, *parts: str) -> Path:
-    """Join a path inside the repo's durable state dir (adapter-overridable)."""
-    return repo.joinpath(STATE_DIR_REL, *parts)
+    """Join a path inside the effective durable state dir."""
+    return _configured_path(repo, "SINGULAR_STATE_DIR", STATE_DIR_REL).joinpath(*parts)
+
+
+def tasks_path(repo: Path) -> Path:
+    return _configured_path(repo, "SINGULAR_TASKS_DIR", TASKS_DIR_REL)
 
 
 def tail_lines(path: Path, limit: int, max_bytes: int = 262144) -> list[str]:
@@ -646,7 +711,7 @@ def parse_task_detail(path: Path) -> dict[str, Any]:
 
 
 def collect_tasks(repo: Path) -> list[dict[str, Any]]:
-    task_dir = repo / TASKS_DIR_REL
+    task_dir = tasks_path(repo)
     tasks = []
     for path in sorted(task_dir.glob("TASK-*.md")):
         if path.name == "TEMPLATE.md":
@@ -1313,7 +1378,7 @@ def derive_tools_used(packets: list[dict[str, Any]], run_dir: Path | None, gate_
 
 def collect_task_detail(repo: Path, task_id: str) -> dict[str, Any] | None:
     repo = repo.resolve()
-    path = repo / "docs/orchestration/tasks" / f"{task_id}.md"
+    path = tasks_path(repo) / f"{task_id}.md"
     if not path.exists():
         return None
     detail = parse_task_detail(path)
@@ -4367,10 +4432,10 @@ def _engine_env_value(repo: Path, key: str) -> str | None:
     override = parse_env_overrides(repo, {key}).get(key)
     if override not in (None, ""):
         return override
-    cfg = read_json(repo / "singular.config.json", None)
+    cfg, _resolution, _error = _selected_json_config(repo)
     cfg = cfg if isinstance(cfg, dict) else {}
-    env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
-    value = env.get(key)
+    config_env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+    value = config_env.get(key)
     if isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value) != "":
         return str(value)
     derive = _CONFIG_DERIVED_ENV.get(key)
@@ -5195,10 +5260,13 @@ _CONFIG_ROLE_KEYS = {
         "decider":     ("SINGULAR_CLAUDE_DECIDER_MODEL", "SINGULAR_CLAUDE_DECIDER_EFFORT", None),
     },
     "codex": {
-        "planner":     ("SINGULAR_CODEX_MODEL", "SINGULAR_CODEX_PLANNER_REASONING_EFFORT", "high"),
-        "implementer": ("SINGULAR_CODEX_MODEL", "SINGULAR_CODEX_L2_REASONING_EFFORT", "medium"),
-        "auditor":     ("SINGULAR_CODEX_MODEL", "SINGULAR_CODEX_AUDITOR_REASONING_EFFORT", "high"),
-        "decider":     ("SINGULAR_CODEX_MODEL", "SINGULAR_CODEX_DECIDER_REASONING_EFFORT", "high"),
+        "planner":     ("SINGULAR_CODEX_PLANNER_MODEL", "SINGULAR_CODEX_PLANNER_REASONING_EFFORT", "high"),
+        "implementer": ("SINGULAR_CODEX_IMPLEMENTER_MODEL", "SINGULAR_CODEX_L2_REASONING_EFFORT", "medium"),
+        "auditor":     ("SINGULAR_CODEX_AUDITOR_MODEL", "SINGULAR_CODEX_AUDITOR_REASONING_EFFORT", "high"),
+        "critic":      ("SINGULAR_CODEX_CRITIC_MODEL", "SINGULAR_CODEX_CRITIC_REASONING_EFFORT", "high"),
+        "decider":     ("SINGULAR_CODEX_DECIDER_MODEL", "SINGULAR_CODEX_DECIDER_REASONING_EFFORT", "high"),
+        "supervisor":  ("SINGULAR_CODEX_SUPERVISOR_MODEL", "SINGULAR_CODEX_SUPERVISOR_REASONING_EFFORT", "high"),
+        "integrator":  ("SINGULAR_CODEX_INTEGRATOR_MODEL", "SINGULAR_CODEX_INTEGRATOR_REASONING_EFFORT", "high"),
     },
     # 0.9.0 providers: gemini/opencode/cursor/grok expose a single flat model key
     # (no per-role model, no reasoning-effort mapping v1). An empty fallback means
@@ -5241,8 +5309,20 @@ def collect_config(repo: Path) -> dict[str, Any]:
     keys only — secrets are never read) > singular.config.json env{} > the
     runner script's fallback default. Read-only."""
     repo = repo.resolve()
-    cfg = read_json(repo / "singular.config.json", None)
-    cfg = cfg if isinstance(cfg, dict) else {}
+    cfg, config_resolution, config_error = _selected_json_config(repo)
+    if config_error:
+        return {
+            "schema": "singular.codex.config.v0",
+            "generatedAt": utc_now(),
+            "ok": False,
+            "configuration": {**config_resolution, "message": config_error},
+            "runner": None,
+            "provider": None,
+            "roles": {},
+            "limits": {},
+            "flags": {},
+            "paths": {},
+        }
     cfg_env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
     # env{} SINGULAR_RUNNER wins over the top-level "runner" key (engine/lib.sh
     # emits env{} last, so it overrides on every source) — the runner switch is
@@ -5268,6 +5348,11 @@ def collect_config(repo: Path) -> dict[str, Any]:
         wanted.update(k for k in (model_key, effort_key) if k)
     wanted.update(key for _name, key in _CONFIG_LIMIT_KEYS)
     wanted.update(key for _name, key in _CONFIG_FLAG_KEYS)
+    if provider == "codex":
+        wanted.update({
+            "SINGULAR_CODEX_SERVICE_TIER",
+            "SINGULAR_CODEX_READONLY_REASONING_EFFORT",
+        })
     overrides = parse_env_overrides(repo, wanted)
 
     def resolve(key: str | None) -> tuple[str | None, str | None]:
@@ -5301,6 +5386,32 @@ def collect_config(repo: Path) -> dict[str, Any]:
                        "source": {"model": src_key, "modelTier": model_src,
                                   "effort": effort_src_key, "effortTier": effort_src}}
 
+    if provider == "codex":
+        resolver = _load_provider_resolver()
+        if resolver is not None and hasattr(resolver, "codex_role_settings"):
+            effective_env = dict(os.environ)
+            for key, value in cfg_env.items():
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    effective_env[str(key)] = str(value)
+            # Preserve the console's supported local override layer. Empty
+            # values are significant for model fallback and normal-tier clears.
+            effective_env.update(overrides)
+            for role in tuple(roles):
+                resolved = resolver.codex_role_settings(
+                    effective_env, role, _CONFIG_MODEL_FALLBACK["codex"][1]
+                )
+                roles[role].update({
+                    "model": resolved["model"],
+                    "effort": resolved["reasoningEffort"],
+                    "requestedServiceTier": resolved["requestedServiceTier"],
+                    "providerObservedServiceTier": resolved["providerObservedServiceTier"],
+                    "source": {
+                        "model": resolved["modelSource"],
+                        "effort": resolved["reasoningEffortSource"],
+                        "serviceTier": resolved["serviceTierSource"],
+                    },
+                })
+
     def bag(pairs: tuple) -> dict[str, Any]:
         out: dict[str, Any] = {}
         for name, key in pairs:
@@ -5311,11 +5422,18 @@ def collect_config(repo: Path) -> dict[str, Any]:
     return {
         "schema": "singular.codex.config.v0",
         "generatedAt": utc_now(),
+        "ok": True,
+        "configuration": config_resolution,
         "runner": runner,
         "provider": provider,
         "roles": roles,
         "limits": bag(_CONFIG_LIMIT_KEYS),
         "flags": bag(_CONFIG_FLAG_KEYS),
+        "paths": {
+            "root": str(repo),
+            "tasks": str(_configured_path(repo, "SINGULAR_TASKS_DIR", TASKS_DIR_REL)),
+            "state": str(_configured_path(repo, "SINGULAR_STATE_DIR", STATE_DIR_REL)),
+        },
     }
 
 
@@ -5547,15 +5665,15 @@ def _overlay_config_env(repo: Path, groups: list[dict[str, Any]]) -> list[dict[s
     stale defaults for keys the config actually sets, and saved edits never
     appear to land. A .env row keeps source "env"; otherwise a config-set key
     wins over the shell default and reads source "config"."""
-    cfg = read_json(repo / "singular.config.json", None)
-    env = cfg.get("env") if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict) else {}
-    if not env:
+    cfg, _resolution, _error = _selected_json_config(repo)
+    config_env = cfg.get("env") if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict) else {}
+    if not config_env:
         return groups
     for group in groups:
         for item in group.get("items") or []:
             key = item.get("envKey")
-            if key in env and item.get("source") != "env":
-                item["value"] = str(env[key])
+            if key in config_env and item.get("source") != "env":
+                item["value"] = str(config_env[key])
                 item["source"] = "config"
                 item["overridden"] = True
                 # `value` just changed, so the derived boolValue must follow it.
@@ -6094,8 +6212,7 @@ def _probe_provider(spec: dict[str, Any], env: dict[str, str], home: Path,
 def _active_runner(repo: Path) -> str:
     """Basename of the runner the engine would launch: config env{} SINGULAR_RUNNER
     (wins in engine/lib.sh) > top-level "runner" > engine default codex-run.sh."""
-    cfg = read_json(repo / "singular.config.json", None)
-    cfg = cfg if isinstance(cfg, dict) else {}
+    cfg, _resolution, _error = _selected_json_config(repo)
     env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
     runner = env.get("SINGULAR_RUNNER") or cfg.get("runner") or "codex-run.sh"
     return os.path.basename(str(runner))

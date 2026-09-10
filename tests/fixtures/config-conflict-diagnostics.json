@@ -1,0 +1,51 @@
+{
+  "schema": "singular.test.config-conflict-diagnostics.v0",
+  "provenance": {
+    "baseline": "bd0aeb9a3230df0619b6cfbc3461b1e8277adf35",
+    "producer": "2e5bd4f67c8a2084cff221cac2052e661a9b1fd1"
+  },
+  "selectedConfig": "/fixture/repo/config/custom.json",
+  "specimens": [
+    {
+      "name": "baseline-conflict",
+      "diagnostic": {
+        "status": "warn",
+        "message": "configuration sources disagree: SINGULAR_MAX_CONCURRENT structured 3 vs env 2; effective 2",
+        "remediation": "Remove the legacy env override or align it with the structured field; bind concurrency changes to explicit operator approval.",
+        "details": {
+          "conflicts": [{"key":"SINGULAR_MAX_CONCURRENT","structuredValue":"3","envValue":"2","effective":"2"}]
+        }
+      }
+    },
+    {
+      "name": "producer-conflict",
+      "diagnostic": {
+        "status": "warn",
+        "message": "configuration sources disagree in /fixture/repo/config/custom.json: SINGULAR_MAX_CONCURRENT structured 3 vs env 2; effective 2",
+        "remediation": "Update /fixture/repo/config/custom.json: remove the legacy env override or align it with the structured field; bind concurrency changes to explicit operator approval.",
+        "details": {
+          "config": "/fixture/repo/config/custom.json",
+          "conflicts": [{"key":"SINGULAR_MAX_CONCURRENT","structuredValue":"3","envValue":"2","effective":"2"}]
+        }
+      }
+    },
+    {
+      "name": "baseline-agreement",
+      "diagnostic": {
+        "status": "pass",
+        "message": "no conflicting configuration sources",
+        "remediation": "",
+        "details": {"conflicts": []}
+      }
+    },
+    {
+      "name": "producer-agreement",
+      "diagnostic": {
+        "status": "pass",
+        "message": "no conflicting configuration sources in /fixture/repo/config/custom.json",
+        "remediation": "",
+        "details": {"config":"/fixture/repo/config/custom.json","conflicts":[]}
+      }
+    }
+  ]
+}

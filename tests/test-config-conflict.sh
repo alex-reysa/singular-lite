@@ -88,7 +88,14 @@ assert "SINGULAR_MAX_CONCURRENT" in item["message"], item["message"]
 for token in ("3", "2"):
     assert token in item["message"], (token, item["message"])
 assert "effective 2" in item["message"], item["message"]
-assert "Remove the legacy env override" in item["remediation"], item["remediation"]
+remediation = item["remediation"]
+assert "remove the legacy env override" in remediation.lower(), remediation
+assert "align it with the structured field" in remediation, remediation
+assert "explicit operator approval" in remediation, remediation
+config = item.get("details", {}).get("config")
+if config is not None:
+    assert config in item["message"], item
+    assert remediation.startswith(f"Update {config}:"), remediation
 conflicts = item["details"]["conflicts"]
 assert len(conflicts) == 1, conflicts
 entry = conflicts[0]
@@ -107,7 +114,11 @@ python3 - "$check" <<'PY' || exit 1
 import json, sys
 item = json.loads(sys.argv[1])
 assert item["status"] == "pass", item
-assert item["message"] == "no conflicting configuration sources", item["message"]
+message = item["message"]
+assert message.startswith("no conflicting configuration sources"), message
+config = item.get("details", {}).get("config")
+if config is not None:
+    assert message == f"no conflicting configuration sources in {config}", message
 assert item["details"]["conflicts"] == [], item["details"]
 PY
 
@@ -165,6 +176,82 @@ assert entry["effective"] == "2", entry
 assert entry["runtimeDiffers"] is True, entry
 assert entry["runtimeValue"] == "7", entry
 assert "the loaded runtime uses 7" in item["message"], item["message"]
+PY
+
+# TASK-1018: keep both the baseline and path-qualified producer contracts
+# recognizable without depending on a historical worktree.  The same validator
+# rejects missing meaning and a path that does not match details.config.
+python3 - "$ROOT/tests/fixtures/config-conflict-diagnostics.json" <<'PY' || exit 1
+import copy
+import json
+import sys
+
+fixture = json.load(open(sys.argv[1], encoding="utf-8"))
+selected = fixture["selectedConfig"]
+
+def validate(item):
+    if item.get("status") not in {"pass", "warn"}:
+        return False
+    details = item.get("details")
+    if not isinstance(details, dict) or not isinstance(details.get("conflicts"), list):
+        return False
+    path = details.get("config")
+    if path is not None:
+        if path != selected or path not in str(item.get("message", "")):
+            return False
+    conflicts = details["conflicts"]
+    if not conflicts:
+        return str(item.get("message", "")).startswith(
+            "no conflicting configuration sources"
+        )
+    remediation = str(item.get("remediation", ""))
+    lower = remediation.lower()
+    if not all(token in lower for token in (
+        "remove the legacy env override",
+        "align it with the structured field",
+        "explicit operator approval",
+    )):
+        return False
+    if path is not None and not remediation.startswith(f"Update {path}:"):
+        return False
+    for conflict in conflicts:
+        if not all(key in conflict for key in (
+            "key", "structuredValue", "envValue", "effective"
+        )):
+            return False
+        for value in (
+            conflict["key"], conflict["structuredValue"],
+            conflict["envValue"], conflict["effective"],
+        ):
+            if str(value) not in str(item.get("message", "")):
+                return False
+    return True
+
+for specimen in fixture["specimens"]:
+    assert validate(specimen["diagnostic"]), specimen["name"]
+
+producer = next(
+    row["diagnostic"] for row in fixture["specimens"]
+    if row["name"] == "producer-conflict"
+)
+mutations = []
+for field in ("remediation", "message"):
+    bad = copy.deepcopy(producer)
+    bad[field] = ""
+    mutations.append(bad)
+for field in ("structuredValue", "envValue", "effective"):
+    bad = copy.deepcopy(producer)
+    bad["details"]["conflicts"][0].pop(field)
+    mutations.append(bad)
+bad = copy.deepcopy(producer)
+bad["details"]["config"] = "/wrong/config.json"
+mutations.append(bad)
+bad = copy.deepcopy(producer)
+bad["remediation"] = bad["remediation"].replace(
+    "explicit operator approval", "automatic approval"
+)
+mutations.append(bad)
+assert all(not validate(item) for item in mutations), mutations
 PY
 
 echo "PASS: test-config-conflict"

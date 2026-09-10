@@ -30,7 +30,14 @@ from typing import Any, Iterable
 
 import provider_spec
 from capability_policy import strict_provider_arg_violation
-from provider_resolver import resolve_provider_bin
+from provider_resolver import (
+    ConfigResolutionError,
+    JsonConfigResolution,
+    codex_role_settings,
+    load_json_config,
+    resolve_json_config,
+    resolve_provider_bin,
+)
 
 
 CHECK_SCHEMA = "singular.doctor-report.v1"
@@ -257,6 +264,9 @@ class Doctor:
         self.repair_model_cache = repair_model_cache
         self.checks: list[dict[str, Any]] = []
         self.config: dict[str, Any] = {}
+        self.config_resolution: JsonConfigResolution | None = (
+            resolve_json_config(self.repo, os.environ) if self.repo else None
+        )
         # Primary diagnosis, once one is reached. A repo whose schema does not
         # match the engine cannot have its artifacts interpreted by this engine,
         # so every check that reads one afterwards would report a derivative
@@ -316,8 +326,21 @@ class Doctor:
                 remediation="Run doctor from the repository singular will operate.",
             )
             return
-        config_path = self.repo / "singular.config.json"
+        resolution = self.config_resolution or resolve_json_config(self.repo, os.environ)
+        config_path = resolution.path
         if not config_path.is_file():
+            if resolution.source == "selector":
+                self.add(
+                    "repo.config",
+                    "fail",
+                    f"selected JSON configuration is missing: {config_path}",
+                    required_for=("all-runs",),
+                    remediation=(
+                        "Fix SINGULAR_JSON_CONFIG_FILE or create the selected file."
+                    ),
+                    details={"path": str(config_path), "source": resolution.source},
+                )
+                return
             self.add(
                 "repo.config",
                 "warn",
@@ -327,23 +350,26 @@ class Doctor:
             )
             return
         try:
-            loaded = json.loads(config_path.read_text(encoding="utf-8"))
-            if not isinstance(loaded, dict):
-                raise ValueError("top level must be an object")
+            loaded, resolution = load_json_config(self.repo, os.environ)
+            self.config_resolution = resolution
             self.config = loaded
             self.add(
                 "repo.config",
                 "pass",
-                "repo config present",
+                f"selected repo config: {config_path}",
                 required_for=("configured-runs",),
+                details={"path": str(config_path), "source": resolution.source},
             )
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
+        except ConfigResolutionError as exc:
             self.add(
                 "repo.config",
                 "fail",
-                f"repo config is invalid: {exc}",
+                str(exc),
                 required_for=("all-runs",),
-                remediation="Repair singular.config.json before starting the engine.",
+                remediation=(
+                    "Repair the selected JSON configuration before starting the engine."
+                ),
+                details={"path": str(config_path), "source": resolution.source},
             )
 
     def basic_checks(self) -> None:
@@ -692,6 +718,8 @@ exec "$2" -c 'import json,os; print(json.dumps(dict(os.environ),separators=(",",
         env = dict(os.environ)
         env["SINGULAR_ROOT"] = str(self.repo)
         env["SINGULAR_ENGINE_HOME"] = str(self.engine)
+        if self.config_resolution:
+            env["SINGULAR_JSON_CONFIG_FILE"] = str(self.config_resolution.path)
         result = command(
             [str(self.bash), "-c", script, "_", str(self.engine), sys.executable],
             cwd=self.repo,
@@ -745,7 +773,11 @@ exec "$2" -c 'import json,os; print(json.dumps(dict(os.environ),separators=(",",
             return
         if not self.repo or not (self.engine / "engine/lib.sh").is_file():
             return
-        config_path = self.repo / "singular.config.json"
+        config_path = (
+            self.config_resolution.path
+            if self.config_resolution
+            else self.repo / "singular.config.json"
+        )
         if not config_path.is_file():
             return
         script = r'''
@@ -755,6 +787,7 @@ singular_json_config_to_env "$2"
         env = dict(os.environ)
         env["SINGULAR_ROOT"] = str(self.repo)
         env["SINGULAR_ENGINE_HOME"] = str(self.engine)
+        env["SINGULAR_JSON_CONFIG_FILE"] = str(config_path)
         result = command(
             [str(self.bash), "-c", script, "_", str(self.engine), str(config_path)],
             cwd=self.repo,
@@ -820,9 +853,9 @@ singular_json_config_to_env "$2"
             self.add(
                 "config.source-conflict",
                 "pass",
-                "no conflicting configuration sources",
+                f"no conflicting configuration sources in {config_path}",
                 required_for=("all-runs",),
-                details={"conflicts": []},
+                details={"config": str(config_path), "conflicts": []},
             )
             return
         clauses = [
@@ -840,13 +873,14 @@ singular_json_config_to_env "$2"
         self.add(
             "config.source-conflict",
             "warn",
-            "configuration sources disagree: " + "; ".join(clauses),
+            f"configuration sources disagree in {config_path}: " + "; ".join(clauses),
             required_for=("all-runs",),
             remediation=(
-                "Remove the legacy env override or align it with the structured "
-                "field; bind concurrency changes to explicit operator approval."
+                f"Update {config_path}: remove the legacy env override or align "
+                "it with the structured field; bind concurrency changes to "
+                "explicit operator approval."
             ),
-            details={"conflicts": conflicts},
+            details={"config": str(config_path), "conflicts": conflicts},
         )
 
     def blocked(self, *check_ids: str) -> bool:
@@ -1696,6 +1730,46 @@ singular_json_config_to_env "$2"
                 remediation=(
                     "" if valid else f"Set {env_name} to a model ID accepted by {provider}."
                 ),
+            )
+        if self.provider == "codex":
+            default_model = MODEL_ENV["codex"][1]
+            routing = {
+                role: codex_role_settings(self.runtime_env, role, default_model)
+                for role in (
+                    "planner",
+                    "implementer",
+                    "auditor",
+                    "critic",
+                    "decider",
+                    "supervisor",
+                    "integrator",
+                )
+            }
+            invalid = {
+                role: str(settings["model"])
+                for role, settings in routing.items()
+                if not MODEL_PATTERNS["codex"].search(str(settings["model"] or ""))
+            }
+            self.add(
+                "model.routing.codex",
+                "fail" if invalid else "pass",
+                (
+                    "Codex role routing contains invalid models: "
+                    + ", ".join(f"{role}={model}" for role, model in invalid.items())
+                    if invalid
+                    else "Codex role model, effort and requested service tier resolved"
+                ),
+                required_for=("codex-runs", "selected-provider"),
+                remediation=(
+                    "Set each SINGULAR_CODEX_<ROLE>_MODEL override to a Codex model ID."
+                    if invalid
+                    else ""
+                ),
+                details={
+                    "roles": routing,
+                    "providerObservedServiceTier": None,
+                    "observation": "provider did not attest service tier during preflight",
+                },
             )
         self.model_conformance_check()
 
