@@ -134,6 +134,22 @@ singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   >/dev/null 2>&1 || rc=$?
 [[ "$rc" == 3 ]] || fail "returning to an earlier red-gate input retried forever"
 
+# Missing-branch recovery is deterministic while the ref stays absent, but a
+# restored or moved ref changes the dependency key and permits re-evaluation.
+singular_lifecycle_candidate_failed "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test branch-missing target-1 branch-absent \
+  "restore the exact accepted branch"
+rc=0
+out="$(singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-2 unrelated-target-change \
+  branch-absent 2>&1)" || rc=$?
+[[ "$rc" == 3 && "$out" == *"restore the exact accepted branch"* ]] \
+  || fail "unchanged missing branch was not suppressed with its actionable state"
+singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-2 unrelated-target-change \
+  branch-restored \
+  || fail "restored branch dependency did not permit re-evaluation"
+
 # Reconciliation of the same packet is idempotent and retains failure history.
 state="$(singular_lifecycle_retain_candidate "$task" "$packet" "$audit" \
   "$SINGULAR_TASKS_DIR/$task.md" RUN-ACCEPT agent/test/TASK-0001 \
@@ -152,7 +168,7 @@ c = d["acceptedCandidate"]
 assert d["status"] == "accepted"
 assert c["state"] == "integration-failed"
 assert c["packetSha256"] and c["auditSha256"] and c["taskContractSha256"]
-assert len(c["failures"]) == 2
+assert len(c["failures"]) == 3
 PY
 
 # A wrapper without reservation authority must not run its driver.

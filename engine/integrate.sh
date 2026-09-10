@@ -256,9 +256,10 @@ integration_decide() {
 
 integration_candidate_failed() {
   local task="$1" head="$2" tree="$3" campaign="$4" failure="$5" target_head="$6" next="$7"
+  local failure_invalidation_key="${8:-$integration_invalidation_key}"
   [[ "${candidate_lifecycle_enabled:-no}" == "yes" ]] || return 0
   singular_lifecycle_candidate_failed "$task" "$head" "$tree" "$campaign" \
-    "$failure" "$target_head" "$integration_invalidation_key" "$next" || {
+    "$failure" "$target_head" "$failure_invalidation_key" "$next" || {
       echo "refuse: could not preserve accepted candidate state for $task" >&2
       return 1
     }
@@ -391,8 +392,16 @@ PY
     continue
   fi
   target_head="$(git -C "$SINGULAR_ROOT" rev-parse "$SINGULAR_TARGET_BRANCH" 2>/dev/null || true)"
+  # Candidate failures that depend on branch availability must be invalidated
+  # when that ref appears or moves. The accepted head remains the authority;
+  # this observed ref head only decides whether unchanged recovery work can be
+  # suppressed for the cycle.
+  candidate_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$branch^{commit}" 2>/dev/null || true)"
   integration_invalidation_key="$(singular_sha256_text \
     "$target_head|$integration_campaign_binding|$gate_cmd")"
+  branch_invalidation_key="$(singular_sha256_text \
+    "$branch|$candidate_branch_head")"
   already_merged="no"
   git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$head_sha" "$SINGULAR_TARGET_BRANCH" \
     2>/dev/null && already_merged="yes"
@@ -475,7 +484,7 @@ PY
     candidate_check_rc=0
     candidate_check_out="$(singular_lifecycle_candidate_check "$task_id" "$head_sha" \
       "$candidate_tree" "$candidate_campaign_binding" "$target_head" \
-      "$integration_invalidation_key" 2>&1)" || candidate_check_rc=$?
+      "$integration_invalidation_key" "$branch_invalidation_key" 2>&1)" || candidate_check_rc=$?
     if [[ "$candidate_check_rc" -eq 3 ]]; then
       echo "skip $task_id: unchanged failed integration; action: $candidate_check_out"
       skipped=$((skipped + 1))
@@ -546,7 +555,8 @@ PY
         --run "$run_id" --branch "$branch" --authority origin >/dev/null 2>&1 || true
       integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
         "$packet_campaign_binding" "branch-missing" "$target_head" \
-        "restore the accepted branch or explicitly supersede the candidate" || exit 2
+        "restore the accepted branch or explicitly supersede the candidate" \
+        "$branch_invalidation_key" || exit 2
       singular_append_event "integration.parked" "accepted packet has no integration branch" \
         "$(python3 - "$run_id" "$task_id" "$branch" <<'PY'
 import json, sys

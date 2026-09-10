@@ -158,6 +158,19 @@ JSON
 
 write_missing_branch_fixture() {
   local repo="$1" packet_dir="$1/docs/orchestration/packets/imported/TASK-0001"
+  # Keep the accepted commit object available while deleting its branch. Using
+  # target HEAD here makes the candidate an ancestor and exercises restart
+  # proof handling instead of the missing-ref recovery path.
+  git -C "$repo" checkout -q -b agent/missing/TASK-0001
+  printf 'accepted candidate\n' >"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c user.name=test -c user.email=test@example.local \
+    commit -q -m accepted-candidate
+  local head
+  head="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" checkout -q target
+  git -C "$repo" branch -D agent/missing/TASK-0001 >/dev/null
+
   mkdir -p "$repo/docs/orchestration/tasks" "$packet_dir" "$repo/.singular-state/leases"
   cat >"$repo/docs/orchestration/decisions.md" <<'EOF'
 # Decisions
@@ -194,8 +207,6 @@ Forbidden files:
 
 - Pass.
 EOF
-  local head
-  head="$(git -C "$repo" rev-parse HEAD)"
   python3 - "$packet_dir/RUN-MISSING.json" "$head" <<'PY'
 import json
 import sys
@@ -249,8 +260,8 @@ PY
     bash -c 'source "$0/lib.sh"; singular_lease_write TASK-0001 agent/missing/TASK-0001 core l2 "README.md" accepted RUN-MISSING "" target "" "[\"README.md\"]" "[]"' "$SCRIPT_DIR"
 }
 
-test_integrate_parks_missing_branch_once_then_skips_blocked_history() {
-  local tmp repo out out2 out3
+test_integrate_retains_and_suppresses_missing_branch_until_restored() {
+  local tmp repo out out2 out3 out4 lease decisions events failures head recovery
   tmp="$(mktemp -d)"
   repo="$tmp/repo"
   new_git_repo "$repo"
@@ -261,19 +272,69 @@ test_integrate_parks_missing_branch_once_then_skips_blocked_history() {
     SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true bash "$SCRIPT_DIR/integrate.sh" --run-id RUN-MISSING-INTEG 2>&1)"
   assert_contains "$out" "skip TASK-0001: branch missing" "first integrate reports missing branch"
-  assert_eq "$(json_file_field "$repo/.singular-state/leases/TASK-0001.json" status)" "blocked" "missing branch blocks lease"
-  grep -q '^Status: blocked$' "$repo/docs/orchestration/tasks/TASK-0001.md" || fail "missing branch blocks task"
+  assert_eq "$(json_file_field "$repo/.singular-state/leases/TASK-0001.json" status)" "accepted" \
+    "missing branch preserves accepted lease authority"
+  assert_eq "$(json_file_field "$repo/.singular-state/leases/TASK-0001.json" acceptedCandidate.state)" \
+    "integration-failed" "missing branch retains actionable candidate state"
+  grep -q '^Status: accepted$' "$repo/docs/orchestration/tasks/TASK-0001.md" \
+    || fail "missing branch changed accepted task authority"
   assert_contains "$(cat "$repo/docs/orchestration/decisions.md")" "decide:escalate-parked" "missing branch records parked decision"
+  failures="$(python3 - "$repo/.singular-state/leases/TASK-0001.json" <<'PY'
+import json, sys
+candidate = json.load(open(sys.argv[1], encoding="utf-8"))["acceptedCandidate"]
+assert candidate["failures"][0]["failureClass"] == "branch-missing", candidate
+assert "restore" in candidate["nextAction"], candidate
+print(len(candidate["failures"]))
+PY
+)"
+  assert_eq "$failures" "1" "first missing branch publishes one durable failure"
+  decisions="$(grep -c 'decide:escalate-parked' "$repo/docs/orchestration/decisions.md")"
+  events="$(grep -c '"type":"integration.parked"' "$repo/.singular-state/events.ndjson")"
+  recovery="$(grep -c '"type":"recovery.action"' "$repo/.singular-state/events.ndjson")"
+
+  # Unrelated target progress does not change the missing ref dependency and
+  # therefore must not republish the same recovery decision on the next cycle.
+  printf 'unrelated target progress\n' >"$repo/unrelated.txt"
+  git -C "$repo" add unrelated.txt
+  git -C "$repo" -c user.name=test -c user.email=test@example.local \
+    commit -q -m unrelated-target-progress
 
   out2="$(SINGULAR_ROOT="$repo" SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_STATE_DIR="$repo/.singular-state" \
     SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true bash "$SCRIPT_DIR/integrate.sh" --run-id RUN-MISSING-INTEG2 2>&1)"
-  assert_not_contains "$out2" "branch missing" "blocked missing branch is not rescanned in normal cycle"
+  assert_contains "$out2" "unchanged failed integration" "unchanged missing branch is suppressed"
+  assert_not_contains "$out2" "branch missing (" "unchanged cycle does not republish missing-branch handling"
+  assert_eq "$(grep -c 'decide:escalate-parked' "$repo/docs/orchestration/decisions.md")" "$decisions" \
+    "unchanged cycle publishes no duplicate decision"
+  assert_eq "$(grep -c '"type":"integration.parked"' "$repo/.singular-state/events.ndjson")" "$events" \
+    "unchanged cycle publishes no duplicate parked event"
+  assert_eq "$(grep -c '"type":"recovery.action"' "$repo/.singular-state/events.ndjson")" "$recovery" \
+    "unchanged cycle publishes no duplicate recovery row"
+
+  lease="$(shasum -a 256 "$repo/.singular-state/leases/TASK-0001.json" | awk '{print $1}')"
+  decisions="$(shasum -a 256 "$repo/docs/orchestration/decisions.md" | awk '{print $1}')"
+  events="$(shasum -a 256 "$repo/.singular-state/events.ndjson" | awk '{print $1}')"
 
   out3="$(SINGULAR_ROOT="$repo" SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_STATE_DIR="$repo/.singular-state" \
     SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true bash "$SCRIPT_DIR/integrate.sh" --task TASK-0001 --dry-run 2>&1)"
-  assert_contains "$out3" "skip TASK-0001: branch missing" "explicit task rechecks missing branch"
+  assert_contains "$out3" "skip TASK-0001: branch missing" "dry-run reports current missing dependency"
+  assert_eq "$(shasum -a 256 "$repo/.singular-state/leases/TASK-0001.json" | awk '{print $1}')" "$lease" \
+    "dry-run does not mutate retained candidate"
+  assert_eq "$(shasum -a 256 "$repo/docs/orchestration/decisions.md" | awk '{print $1}')" "$decisions" \
+    "dry-run does not publish a decision"
+  assert_eq "$(shasum -a 256 "$repo/.singular-state/events.ndjson" | awk '{print $1}')" "$events" \
+    "dry-run does not publish an integration event"
+
+  head="$(json_file_field "$repo/.singular-state/leases/TASK-0001.json" acceptedCandidate.headSha)"
+  git -C "$repo" branch agent/missing/TASK-0001 "$head"
+  out4="$(SINGULAR_ROOT="$repo" SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_STATE_DIR="$repo/.singular-state" \
+    SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true SINGULAR_AUTO_PROMOTE_GATES=0 \
+    bash "$SCRIPT_DIR/integrate.sh" --task TASK-0001 --run-id RUN-MISSING-RESTORED 2>&1)"
+  assert_contains "$out4" "INTEGRATED TASK-0001" "restoring exact branch permits integration"
+  assert_eq "$(json_file_field "$repo/.singular-state/leases/TASK-0001.json" status)" "integrated" \
+    "restored branch completes retained candidate"
 }
 
 test_l1_drive_provisions_gitignored_files_and_allowlisted_env() {
@@ -430,7 +491,7 @@ SH
 test_init_scaffolds_fresh_repo_and_reconcile_apply_is_noop_safe
 test_setup_after_init_is_a_clean_noop_ladder
 test_v0_to_v2_migration_backfills_scaffold_rebrands_and_syncs_contracts
-test_integrate_parks_missing_branch_once_then_skips_blocked_history
+test_integrate_retains_and_suppresses_missing_branch_until_restored
 test_l1_drive_provisions_gitignored_files_and_allowlisted_env
 
 echo "fresh consumer tests passed"

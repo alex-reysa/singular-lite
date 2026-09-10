@@ -186,9 +186,11 @@ singular_lifecycle_retain_candidate() {
 
 singular_lifecycle_candidate_check() {
   local task_id="$1" head="$2" tree="$3" campaign="$4" target_head="$5" invalidation_key="$6"
+  local branch_key="${7:-$invalidation_key}"
   python3 "$SINGULAR_TASK_LIFECYCLE" candidate-check \
     --lease "$(singular_lease_path "$task_id")" --head "$head" --tree "$tree" \
-    --campaign "$campaign" --target-head "$target_head" --invalidation-key "$invalidation_key"
+    --campaign "$campaign" --target-head "$target_head" --invalidation-key "$invalidation_key" \
+    --branch-key "$branch_key"
 }
 
 singular_lifecycle_candidate_failed() {

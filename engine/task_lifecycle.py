@@ -376,9 +376,17 @@ def candidate_check(args: argparse.Namespace) -> None:
         raise LifecycleError("candidate is already integrated")
     if candidate.get("state") == "integration-failed":
         for failure in reversed(candidate.get("failures") or []):
+            failure_class = failure.get("failureClass") if isinstance(failure, dict) else ""
+            expected_key = (
+                args.branch_key
+                if failure_class == "branch-missing" and args.branch_key
+                else args.invalidation_key
+            )
             if isinstance(failure, dict) and (
-                failure.get("failureClass") in {"gate-red", "integration-conflict"}
-                and failure.get("invalidationKey") == args.invalidation_key
+                failure_class in {
+                    "gate-red", "integration-conflict", "branch-missing"
+                }
+                and failure.get("invalidationKey") == expected_key
             ):
                 print(
                     failure.get("nextAction")
@@ -592,6 +600,7 @@ def parser() -> argparse.ArgumentParser:
     check = commands.add_parser("candidate-check")
     for flag in ("lease", "head", "tree", "campaign", "target_head", "invalidation_key"):
         check.add_argument("--" + flag.replace("_", "-"), required=True)
+    check.add_argument("--branch-key", default="")
     check.set_defaults(action=candidate_check)
 
     failed = commands.add_parser("candidate-failed")
