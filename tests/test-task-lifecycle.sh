@@ -47,6 +47,10 @@ owner2=reconcile:RUN-2:TASK-0001
 gen2="$(singular_lifecycle_reserve "$task" "$owner2" RUN-2 agent/test/TASK-0001 \
   test '["engine/example.sh"]' base-2 batch-2 "$SINGULAR_WORKTREES_DIR/$task")"
 [[ "$gen2" == 2 ]] || fail "successor reservation generation was $gen2"
+if singular_lifecycle_finish "$task" "$owner1" "$gen1" batch-1 stale stale 2>/dev/null; then
+  fail "predecessor closed successor in reserve-before-bind window"
+fi
+[[ "$(singular_lease_status "$task")" == planned ]] || fail "reserve-before-bind successor was not preserved"
 singular_lifecycle_dispatch_record_write "$task" RUN-2 999998 gone fixture-2.log \
   base-2 batch-2 "$owner2" "$gen2"
 if singular_lifecycle_finish "$task" "$owner1" "$gen1" batch-1 stale stale 2>/dev/null; then
@@ -57,6 +61,33 @@ fi
 # Complete the synthetic reservation and publish a real accepted authority.
 singular_lifecycle_finish "$task" "$owner2" "$gen2" batch-2 dispatch-tree-vanished retry
 singular_lifecycle_dispatch_finalize "$task" -1 crashed "$owner2" "$gen2"
+
+# Native l1-drive still rewrites compatibility lease fields. The dispatch token
+# authorizes its wrapper close, and lastReservationGeneration keeps the next
+# reservation monotonic instead of restarting at one.
+raw_task=TASK-0003
+raw_owner=reconcile:RAW-1:TASK-0003
+raw_gen="$(singular_lifecycle_reserve "$raw_task" "$raw_owner" RAW-1 agent/test/TASK-0003 \
+  test '["engine/raw.sh"]' raw-base raw-batch "$SINGULAR_WORKTREES_DIR/$raw_task")"
+singular_lifecycle_dispatch_record_write "$raw_task" RAW-1 999997 gone raw.log \
+  raw-base raw-batch "$raw_owner" "$raw_gen"
+python3 - "$(singular_lease_path "$raw_task")" <<'PY'
+import json, sys
+path = sys.argv[1]
+lease = json.load(open(path, encoding="utf-8"))
+lease = {
+    "taskId": lease["taskId"], "branch": lease["branch"], "batchId": lease["batchId"],
+    "baseSha": lease["baseSha"], "status": "running", "productPassStarted": True,
+}
+json.dump(lease, open(path, "w", encoding="utf-8"))
+PY
+singular_lifecycle_finish "$raw_task" "$raw_owner" "$raw_gen" raw-batch driver-exit-9 classify
+singular_lifecycle_dispatch_finalize "$raw_task" 9 failed "$raw_owner" "$raw_gen"
+raw_gen2="$(singular_lifecycle_reserve "$raw_task" reconcile:RAW-2:TASK-0003 RAW-2 \
+  agent/test/TASK-0003 test '["engine/raw.sh"]' raw-base-2 raw-batch-2 \
+  "$SINGULAR_WORKTREES_DIR/$raw_task")"
+[[ "$raw_gen2" == 2 ]] || fail "generation restarted after native compatibility rewrite: $raw_gen2"
+
 cat >"$SINGULAR_TASKS_DIR/$task.md" <<'EOF'
 # TASK-0001: lifecycle fixture
 
@@ -74,14 +105,17 @@ singular_lifecycle_retain_candidate "$task" "$packet" "$audit" "$SINGULAR_TASKS_
   RUN-ACCEPT agent/test/TASK-0001 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test accepted >/dev/null
 singular_lifecycle_candidate_failed "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test gate-red target-1 \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test gate-red target-1 inputs-1 \
   "correct candidate before retry"
 
 rc=0
 out="$(singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-1 2>&1)" || rc=$?
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-1 inputs-1 2>&1)" || rc=$?
 [[ "$rc" == 3 && "$out" == *"correct candidate before retry"* ]] \
   || fail "unchanged failed gate was not suppressed"
+singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-1 inputs-2 \
+  || fail "changed gate/campaign/target invalidation input did not permit retry"
 
 # Reconciliation of the same packet is idempotent and retains failure history.
 state="$(singular_lifecycle_retain_candidate "$task" "$packet" "$audit" \

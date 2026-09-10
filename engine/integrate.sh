@@ -258,7 +258,7 @@ integration_candidate_failed() {
   local task="$1" head="$2" tree="$3" campaign="$4" failure="$5" target_head="$6" next="$7"
   [[ "${candidate_lifecycle_enabled:-no}" == "yes" ]] || return 0
   singular_lifecycle_candidate_failed "$task" "$head" "$tree" "$campaign" \
-    "$failure" "$target_head" "$next" || {
+    "$failure" "$target_head" "$integration_invalidation_key" "$next" || {
       echo "refuse: could not preserve accepted candidate state for $task" >&2
       return 1
     }
@@ -366,7 +366,39 @@ PY
     continue
   fi
   target_head="$(git -C "$SINGULAR_ROOT" rev-parse "$SINGULAR_TARGET_BRANCH" 2>/dev/null || true)"
-  if [[ -f "$task_file" ]]; then
+  integration_invalidation_key="$(singular_sha256_text \
+    "$target_head|$integration_campaign_binding|$gate_cmd")"
+  already_merged="no"
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$head_sha" "$SINGULAR_TARGET_BRANCH" \
+    2>/dev/null && already_merged="yes"
+  existing_candidate="no"
+  if python3 - "$(singular_lease_path "$task_id")" <<'PY' >/dev/null 2>&1
+import json, sys
+assert isinstance(json.load(open(sys.argv[1], encoding="utf-8")).get("acceptedCandidate"), dict)
+PY
+  then
+    existing_candidate="yes"
+  fi
+  # Crash recovery: the verified merge may have committed before lifecycle
+  # finalization (including while immediate promotion was running). Finalize
+  # only an already-retained exact candidate whose commit is now an ancestor.
+  # This check precedes task-contract hashing because the committed projection
+  # correctly changed Status from accepted to integrated.
+  if [[ "$already_merged" == "yes" && "$existing_candidate" == "yes" ]]; then
+    if [[ "$dry_run" != "yes" ]]; then
+      singular_lifecycle_candidate_integrated "$task_id" "$head_sha" "$candidate_tree" \
+        "$candidate_campaign_binding" "$target_head" || {
+          echo "refuse: merged candidate does not match retained lifecycle authority" >&2
+          exit 2
+        }
+    fi
+    echo "skip $task_id: already merged into $SINGULAR_TARGET_BRANCH"
+    singular_append_event "integration.skipped" "retained candidate already integrated" \
+      "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"already-merged-lifecycle-recovered\",\"targetHead\":\"$target_head\"}"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  if [[ -f "$task_file" && "$dry_run" != "yes" && "$already_merged" != "yes" ]]; then
     candidate_lifecycle_enabled="yes"
     if ! singular_lifecycle_retain_candidate "$task_id" "$packet" "$sidecar" "$task_file" \
         "$run_packet" "$branch" "$head_sha" "$candidate_tree" "$candidate_campaign_binding" \
@@ -377,7 +409,8 @@ PY
     fi
     candidate_check_rc=0
     candidate_check_out="$(singular_lifecycle_candidate_check "$task_id" "$head_sha" \
-      "$candidate_tree" "$candidate_campaign_binding" "$target_head" 2>&1)" || candidate_check_rc=$?
+      "$candidate_tree" "$candidate_campaign_binding" "$target_head" \
+      "$integration_invalidation_key" 2>&1)" || candidate_check_rc=$?
     if [[ "$candidate_check_rc" -eq 3 ]]; then
       echo "skip $task_id: unchanged failed integration; action: $candidate_check_out"
       skipped=$((skipped + 1))
@@ -791,6 +824,19 @@ PY
 
   echo "INTEGRATED $task_id: $branch ($actual_head) -> $SINGULAR_TARGET_BRANCH @ $merge_commit"
 
+  # Finalize durable candidate state immediately after the verified commit.
+  # Promotion can be long-running; restart recovery above closes the remaining
+  # commit/publication crash window using exact retained identity + ancestry.
+  if [[ "$candidate_lifecycle_enabled" == "yes" ]]; then
+    singular_lifecycle_candidate_integrated "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "$merge_commit" || {
+        echo "refuse: merge committed but durable candidate finalization failed for $task_id" >&2
+        exit 2
+      }
+  else
+    singular_lease_set_status "$task_id" "integrated" 2>/dev/null || true
+  fi
+
   # Promote before writing any post-integration decision artifacts.  The task
   # status is already part of the tested merge commit, so readiness is true;
   # running here minimizes queue latency. Promotion still runs its own full
@@ -824,15 +870,6 @@ PY
     --run "$run_id" --branch "$branch" --authority origin || true
   singular_append_event "integration.integrated" "branch integrated" \
     "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"branch\":\"$branch\",\"headSha\":\"$actual_head\",\"mergeCommit\":\"$merge_commit\",\"target\":\"$SINGULAR_TARGET_BRANCH\"}"
-  if [[ "$candidate_lifecycle_enabled" == "yes" ]]; then
-    singular_lifecycle_candidate_integrated "$task_id" "$head_sha" "$candidate_tree" \
-      "$packet_campaign_binding" "$merge_commit" || {
-        echo "refuse: merge committed but durable candidate finalization failed for $task_id" >&2
-        exit 2
-      }
-  else
-    singular_lease_set_status "$task_id" "integrated" 2>/dev/null || true
-  fi
   task_file="$SINGULAR_TASKS_DIR/$task_id.md"
   [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "integrated" || true
   integrated_this_run=$((integrated_this_run + 1))

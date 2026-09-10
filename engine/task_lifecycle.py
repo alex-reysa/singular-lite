@@ -110,7 +110,10 @@ def reserve(args: argparse.Namespace) -> None:
         if status in {"accepted", "integrated"}:
             raise LifecycleError(f"{status} work cannot be reserved for implementation")
         current_owner = str(lease.get("reservationOwner", ""))
-        current_generation = int(lease.get("reservationGeneration", 0) or 0)
+        current_generation = max(
+            int(lease.get("reservationGeneration", 0) or 0),
+            int(lease.get("lastReservationGeneration", 0) or 0),
+        )
         if status in ACTIVE and current_owner:
             if current_owner == args.owner and lease.get("reservationRunId") == args.run:
                 print(current_generation)
@@ -194,43 +197,62 @@ def read_exit(args: argparse.Namespace) -> None:
 
 
 def finish(args: argparse.Namespace) -> None:
-    record = read_object(Path(args.record))
-    if not reservation_matches(record, args.owner, args.generation):
-        raise LifecycleError("stale owner cannot finish this reservation")
     lease_path = Path(args.lease)
-    if not lease_path.exists():
-        return
-    with locked(lease_path) as lease:
-        candidate = lease.get("acceptedCandidate")
-        if isinstance(candidate, dict) and candidate.get("state") != "integrated":
+    record_path = Path(args.record)
+    # Lock dispatch first, then lease. bind-dispatch only locks dispatch and
+    # reserve only locks lease, so this order cannot form a lock cycle. It does
+    # close the reserve-before-bind window: if a successor reservation exists,
+    # its lease token refuses the predecessor even while the old dispatch
+    # record is still visible.
+    with locked(record_path) as record:
+        if not reservation_matches(record, args.owner, args.generation):
+            raise LifecycleError("stale owner cannot finish this dispatch")
+        if not lease_path.exists():
             return
-        # l1-drive currently rewrites compatibility lease fields.  Dispatch
-        # identity is therefore the owner CAS; task, branch, base and batch
-        # still have to match before cleanup may touch that lease.
-        if lease.get("taskId") != args.task:
-            raise LifecycleError("lease task changed before reservation cleanup")
-        if args.batch and lease.get("batchId") not in (None, "", args.batch):
-            raise LifecycleError("lease batch changed before reservation cleanup")
-        status = str(lease.get("status", ""))
-        if (
-            status == "planned"
-            and lease.get("productPassStarted") is False
-            and args.reason.startswith("driver-")
-        ):
-            # A driver that never acquired execution ownership leaves only a
-            # disposable scheduler reservation. It carries no attempt history.
-            lease["_deleteRecord"] = True
-            return
-        if status in ACTIVE:
-            lease["status"] = "failed"
-            lease["failureReason"] = args.reason
-            lease["nextAction"] = args.next_action
-            lease["updatedAt"] = now()
-        lease["lastReservationOwner"] = args.owner
-        lease["lastReservationGeneration"] = args.generation
-        lease.pop("reservationOwner", None)
-        lease.pop("reservationRunId", None)
-        lease.pop("reservationDeadlineAt", None)
+        with locked(lease_path) as lease:
+            candidate = lease.get("acceptedCandidate")
+            if isinstance(candidate, dict) and candidate.get("state") != "integrated":
+                return
+            lease_owner = str(lease.get("reservationOwner", ""))
+            lease_generation = int(lease.get("reservationGeneration", 0) or 0)
+            if (lease_owner or lease_generation) and (
+                lease_owner != args.owner or lease_generation != args.generation
+            ):
+                raise LifecycleError(
+                    "stale owner cannot finish successor lease "
+                    f"{lease_owner}@{lease_generation}"
+                )
+            # Native l1-drive currently rewrites compatibility lease fields and
+            # therefore drops the reservation token. In that case the locked
+            # dispatch token remains the CAS authority; task, branch, base and
+            # batch must still match before cleanup may touch the lease.
+            if lease.get("taskId") != args.task:
+                raise LifecycleError("lease task changed before reservation cleanup")
+            if args.batch and lease.get("batchId") not in (None, "", args.batch):
+                raise LifecycleError("lease batch changed before reservation cleanup")
+            status = str(lease.get("status", ""))
+            if (
+                status == "planned"
+                and lease.get("productPassStarted") is False
+                and args.reason.startswith("driver-")
+            ):
+                # A driver that never acquired execution ownership leaves only
+                # a disposable scheduler reservation and no attempt history.
+                lease["_deleteRecord"] = True
+                return
+            if status in ACTIVE:
+                lease["status"] = "failed"
+                lease["failureReason"] = args.reason
+                lease["nextAction"] = args.next_action
+                lease["updatedAt"] = now()
+            lease["lastReservationOwner"] = args.owner
+            lease["lastReservationGeneration"] = max(
+                int(lease.get("lastReservationGeneration", 0) or 0),
+                args.generation,
+            )
+            lease.pop("reservationOwner", None)
+            lease.pop("reservationRunId", None)
+            lease.pop("reservationDeadlineAt", None)
 
 
 def legacy_finish(args: argparse.Namespace) -> None:
@@ -342,11 +364,8 @@ def candidate_check(args: argparse.Namespace) -> None:
         raise LifecycleError("candidate is already integrated")
     if candidate.get("state") == "integration-failed":
         failure = (candidate.get("failures") or [{}])[-1]
-        if failure.get("failureClass") in {
-            "gate-red", "integration-conflict", "campaign-mismatch",
-            "branch-missing", "branch-head-changed",
-        } and (
-            failure.get("targetHead") == args.target_head
+        if failure.get("failureClass") in {"gate-red", "integration-conflict"} and (
+            failure.get("invalidationKey") == args.invalidation_key
         ):
             print(candidate.get("nextAction") or "repair the candidate or change an invalidating input")
             raise SystemExit(3)
@@ -369,6 +388,7 @@ def candidate_failed(args: argparse.Namespace) -> None:
                 "key": key,
                 "failureClass": args.failure_class,
                 "targetHead": args.target_head,
+                "invalidationKey": args.invalidation_key,
                 "observedAt": now(),
             })
         candidate["state"] = "integration-failed"
@@ -447,12 +467,12 @@ def parser() -> argparse.ArgumentParser:
     retain.set_defaults(action=retain_candidate)
 
     check = commands.add_parser("candidate-check")
-    for flag in ("lease", "head", "tree", "campaign", "target_head"):
+    for flag in ("lease", "head", "tree", "campaign", "target_head", "invalidation_key"):
         check.add_argument("--" + flag.replace("_", "-"), required=True)
     check.set_defaults(action=candidate_check)
 
     failed = commands.add_parser("candidate-failed")
-    for flag in ("lease", "head", "tree", "campaign", "failure_class", "target_head", "next_action"):
+    for flag in ("lease", "head", "tree", "campaign", "failure_class", "target_head", "invalidation_key", "next_action"):
         failed.add_argument("--" + flag.replace("_", "-"), required=True)
     failed.set_defaults(action=candidate_failed)
 

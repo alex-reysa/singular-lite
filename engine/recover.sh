@@ -124,8 +124,10 @@ PY
     reservation_owner="$(singular_json_field "$drec" reservationOwner 2>/dev/null || true)"
     reservation_generation="$(singular_json_field "$drec" reservationGeneration 2>/dev/null || true)"
     reservation_batch="$(singular_json_field "$drec" batchId 2>/dev/null || true)"
+    dispatch_state="$(singular_json_field "$drec" state 2>/dev/null || true)"
     if [[ ! -f "$drec" || -z "$reservation_owner" \
-        || ! "$reservation_generation" =~ ^[1-9][0-9]*$ ]]; then
+        || ! "$reservation_generation" =~ ^[1-9][0-9]*$ \
+        || "$dispatch_state" != "launched" ]]; then
       if [[ "$lease_age_min" -ge "$stale_minutes" ]]; then
         if [[ -z "$(singular_json_field "$lease" reservationGeneration 2>/dev/null || true)" ]]; then
           # Upgrade compatibility: compare-and-set the exact legacy bytes. This

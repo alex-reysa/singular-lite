@@ -185,17 +185,18 @@ singular_lifecycle_retain_candidate() {
 }
 
 singular_lifecycle_candidate_check() {
-  local task_id="$1" head="$2" tree="$3" campaign="$4" target_head="$5"
+  local task_id="$1" head="$2" tree="$3" campaign="$4" target_head="$5" invalidation_key="$6"
   python3 "$SINGULAR_TASK_LIFECYCLE" candidate-check \
     --lease "$(singular_lease_path "$task_id")" --head "$head" --tree "$tree" \
-    --campaign "$campaign" --target-head "$target_head"
+    --campaign "$campaign" --target-head "$target_head" --invalidation-key "$invalidation_key"
 }
 
 singular_lifecycle_candidate_failed() {
-  local task_id="$1" head="$2" tree="$3" campaign="$4" failure="$5" target_head="$6" next="$7"
+  local task_id="$1" head="$2" tree="$3" campaign="$4" failure="$5" target_head="$6" invalidation_key="$7" next="$8"
   python3 "$SINGULAR_TASK_LIFECYCLE" candidate-failed \
     --lease "$(singular_lease_path "$task_id")" --head "$head" --tree "$tree" \
     --campaign "$campaign" --failure-class "$failure" --target-head "$target_head" \
+    --invalidation-key "$invalidation_key" \
     --next-action "$next"
 }
 
