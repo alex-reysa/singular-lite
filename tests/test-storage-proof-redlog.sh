@@ -5,7 +5,8 @@ set -euo pipefail
 #
 # The L2 prompt's red_log is module-overridable via the singular_worker_red_log hook:
 # - generic task (hook prints nothing): the rendered L2 prompt must stay
-#   BYTE-IDENTICAL to the pre-hook rendering (red_log = .singular-evidence/red.log);
+#   BYTE-IDENTICAL to the pre-hook base plus the mandatory complete task document
+#   (red_log = .singular-evidence/red.log);
 # - storage_proof task with the storage-proof module enabled: the prompt
 #   instructs exactly ONE red artifact (.singular-evidence/<task>-skip-guard-red)
 #   and never a second red file.
@@ -210,7 +211,7 @@ latest_l2_prompt() {
   find "$SINGULAR_RUNS_DIR" -name l2-prompt.md -type f 2>/dev/null | sort | tail -1
 }
 
-assert_prompt_byte_identical_to_prechange() {
+assert_prompt_byte_identical_to_generic_reference() {
   local task_id="$1" label="$2"
   local prompt run_id task_json ref
   prompt="$(latest_l2_prompt)"
@@ -220,9 +221,20 @@ assert_prompt_byte_identical_to_prechange() {
   ref="$SINGULAR_STATE_DIR/reference-l2-prompt.md"
   render_prechange_prompt "$SINGULAR_ORCH_DIR/prompts/l2-test-first-developer.md" \
     "$ref" "$task_json" "$run_id" "target"
+  # The delivery rescue intentionally appends the complete task document to
+  # every worker prompt. Keep the old generic base byte-for-byte and require
+  # that exact document, rather than treating the new obligation as drift.
+  python3 - "$ref" "$SINGULAR_TASKS_DIR/$task_id.md" <<'PY'
+from pathlib import Path
+import sys
+reference, task = map(Path, sys.argv[1:])
+with reference.open("ab") as stream:
+    stream.write(b"\n\n## Complete task contract (mandatory)\n\n")
+    stream.write(task.read_bytes())
+PY
   if ! cmp -s "$ref" "$prompt"; then
     diff "$ref" "$prompt" >&2 || true
-    fail "$label: rendered prompt must be byte-identical to the pre-change rendering"
+    fail "$label: generic base and mandatory task document must match the reference"
   fi
   assert_contains "$(cat "$prompt")" ".singular-evidence/red.log" \
     "$label: generic prompt keeps the default red log"
@@ -234,7 +246,7 @@ test_generic_prompt_byte_identical_without_module() {
   with_fixture
   write_generic_task
   SINGULAR_MODULES= "$SCRIPT_DIR/l1-drive.sh" --dry-run TASK-0001 >/dev/null
-  assert_prompt_byte_identical_to_prechange TASK-0001 "generic, no module"
+  assert_prompt_byte_identical_to_generic_reference TASK-0001 "generic, no module"
 }
 
 # CRITICAL INVARIANT: with the module ENABLED but the hook printing nothing
@@ -243,7 +255,7 @@ test_generic_prompt_byte_identical_with_module_enabled() {
   with_fixture
   write_generic_task
   SINGULAR_MODULES=storage-proof "$SCRIPT_DIR/l1-drive.sh" --dry-run TASK-0001 >/dev/null
-  assert_prompt_byte_identical_to_prechange TASK-0001 "generic, module enabled"
+  assert_prompt_byte_identical_to_generic_reference TASK-0001 "generic, module enabled"
 }
 
 # --- (b) storage_proof task: exactly ONE red artifact (the skip-guard path) ----
