@@ -111,6 +111,11 @@ assert_route explicit implementer-model high implementer
 # With no declared role, the documented prompt-name inference remains available.
 invoke inferred "$tmp/planner-prompt.md" ""
 assert_route inferred planner-model medium planner
+for prompt_name in auditor.md auditor-active-prompt.md reviewer-retry.md; do
+  printf 'audit\n' >"$tmp/$prompt_name"
+  invoke "inferred-$prompt_name" "$tmp/$prompt_name" ""
+  assert_route "inferred-$prompt_name" auditor-model medium auditor
+done
 
 # Empty role override falls through to the global model, then the provider default.
 invoke global "$tmp/prompt.md" implementer SINGULAR_CODEX_IMPLEMENTER_MODEL=

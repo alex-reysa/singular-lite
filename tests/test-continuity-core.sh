@@ -826,14 +826,8 @@ test_runner_auditor_prompt_keying() {
   assert_eq "$model" "audmodel" "auditor-active-prompt.md keys to the auditor model"
   assert_eq "$effort" "audeffort" "auditor-active-prompt.md keys to the auditor effort"
 
-  # codex-run.sh effort selector likewise honors the active prompt name.
-  local cfn="$FIXTURE_TMP/codex-effort.sh"
-  awk '/^singular_codex_reasoning_effort\(\) \{/{c=1} c{print} /^\}/{if(c){c=0}}' "$SCRIPT_DIR/codex-run.sh" >"$cfn"
-  local ceffort
-  ceffort="$(SINGULAR_CODEX_AUDITOR_REASONING_EFFORT=codeff bash -c '
-    source "'"$cfn"'"
-    singular_codex_reasoning_effort readonly /x/auditor-active-prompt.md')" || fail "codex effort selector failed"
-  assert_eq "$ceffort" "codeff" "codex auditor-active-prompt.md keys to the auditor effort"
+  # Codex prompt-name routing is tested through actual runner argv/session
+  # output in test-codex-role-models.sh, avoiding private-function extraction.
   echo "ok: runner auditor prompt keying"
 }
 
