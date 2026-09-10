@@ -137,6 +137,9 @@ run_integrator() {
   rc=$(cat "$tmp/integrator-status")
   wait "$integrator_pid" || true
   integrator_pid=""
+  if [[ "$rc" == 2 ]] && grep -q 'merge committed but durable candidate finalization failed' "$output"; then
+    return "$rc"
+  fi
   if [[ "$rc" != 0 ]] && ! grep -q campaign-publication-lock-timeout "$output"; then
     cat "$output" >&2
     exit "$rc"
@@ -165,12 +168,15 @@ JSON
 cat >"$repo/integration-gate.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-deadline=$((SECONDS + 8))
-while [[ ! -f "$MAIN_DIRT_READY" ]]; do
-  (( SECONDS < deadline )) || { echo "dirt-ready timed out" >&2; exit 1; }
-  sleep 0.01
-done
-printf '%s\n' "$PWD" >"$GATE_PWD_FILE"
+[[ "${FORCE_GATE_RED:-0}" != 1 ]] || exit 1
+if [[ -n "${MAIN_DIRT_READY:-}" ]]; then
+  deadline=$((SECONDS + 8))
+  while [[ ! -f "$MAIN_DIRT_READY" ]]; do
+    (( SECONDS < deadline )) || { echo "dirt-ready timed out" >&2; exit 1; }
+    sleep 0.01
+  done
+fi
+[[ -z "${GATE_PWD_FILE:-}" ]] || printf '%s\n' "$PWD" >"$GATE_PWD_FILE"
 [[ "$(cat app.txt)" == "merged-and-tested" ]]
 printf '%s\n' \
   '{"schema":"singular.orchestration.gate-observation.v0","failures":[]}' \
@@ -337,21 +343,33 @@ gate_pwd_file="$tmp/gate-pwd"
 watcher_pid=$!
 
 out="$tmp/integrate.out"
+cat >"$tmp/fail-candidate-finalize.py" <<PY
+import os
+import sys
+if len(sys.argv) > 1 and sys.argv[1] == "candidate-integrated":
+    raise SystemExit(2)
+os.execv(sys.executable, [sys.executable, "$ENGINE_HOME/engine/task_lifecycle.py", *sys.argv[1:]])
+PY
+integration_rc=0
 run_integrator "$out" env \
   SINGULAR_ROOT="$repo" \
   SINGULAR_STATE_DIR="$repo/.singular-state" \
   SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
   SINGULAR_AUTO_PROMOTE_GATES=0 \
   SINGULAR_PUSH=0 \
+  SINGULAR_TASK_LIFECYCLE="$tmp/fail-candidate-finalize.py" \
   MAIN_DIRT_READY="$main_dirt_ready" \
   GATE_PWD_FILE="$gate_pwd_file" \
   bash "$ENGINE_HOME/engine/integrate.sh" \
     --task TASK-0401 --run-id RUN-EXACT \
-  || fail "exact-tree integration failed: $(cat "$out")"
+  || integration_rc=$?
 wait "$watcher_pid"
 watcher_pid=""
 
 grep -q '^INTEGRATED TASK-0401:' "$out" || fail "integration did not complete: $(cat "$out")"
+[[ "$integration_rc" -ne 0 ]] || fail "fixture did not interrupt candidate publication"
+grep -q 'merge committed but durable candidate finalization failed' "$out" \
+  || fail "candidate publication interruption was not exposed: $(cat "$out")"
 [[ "$(cat "$gate_pwd_file")" != "$repo" ]] || fail "integration gate ran in the dirty main checkout"
 [[ "$(git -C "$repo" show HEAD:app.txt)" == "merged-and-tested" ]] \
   || fail "committed tree did not preserve the tested staged bytes"
@@ -363,5 +381,115 @@ merge_commit="$(git -C "$repo" rev-parse HEAD)"
   || fail "committed merge parents differ from the tested synthetic parents"
 [[ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" == 1 ]] \
   || fail "disposable integration gate worktree leaked"
+
+# The durable receipt recovers the exact integration commit after the target
+# advances. It must not record the later target tip as the merge identity.
+git -C "$repo" restore --worktree -- app.txt
+printf 'later target work\n' >"$repo/later.txt"
+git -C "$repo" add later.txt
+git -C "$repo" commit -qm later
+later_target="$(git -C "$repo" rev-parse HEAD)"
+recovery_out="$tmp/integrate-recovery.out"
+env \
+  SINGULAR_ROOT="$repo" \
+  SINGULAR_STATE_DIR="$repo/.singular-state" \
+  SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
+  SINGULAR_AUTO_PROMOTE_GATES=0 \
+  SINGULAR_PUSH=0 \
+  bash "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0401 --run-id RUN-RECOVER >"$recovery_out" 2>&1 \
+  || fail "verified integration recovery failed: $(cat "$recovery_out")"
+grep -q "verified integration $merge_commit already reaches target" "$recovery_out" \
+  || fail "restart did not recover the exact proven merge: $(cat "$recovery_out")"
+python3 - "$repo/.singular-state/leases/TASK-0401.json" "$merge_commit" "$later_target" <<'PY'
+import json, sys
+lease = json.load(open(sys.argv[1], encoding="utf-8"))
+candidate = lease["acceptedCandidate"]
+assert candidate["state"] == "integrated", candidate
+assert candidate["mergeCommit"] == sys.argv[2], candidate
+assert candidate["mergeCommit"] != sys.argv[3], candidate
+assert candidate["integrationProof"]["testedTree"]
+assert candidate["integrationProof"]["targetParent"]
+assert candidate["integrationProof"]["candidateParent"]
+PY
+
+# A failed candidate that is later merged manually is only an ancestor. With
+# no green exact-merge receipt, restart retains it as actionable and must not
+# publish integrated authority.
+mkdir -p "$repo/docs/orchestration/packets/imported/TASK-0402"
+cat >"$repo/docs/orchestration/tasks/TASK-0402.md" <<'EOF'
+# TASK-0402: Unverified ancestor
+
+Status: accepted
+Area: core
+Target branch: `target`
+Worker branch: `agent/core/TASK-0402-unverified`
+Test policy: `strict_test_first`
+Gate command: `bash integration-gate.sh`
+Dispatch mode: canonical
+Depends on: []
+
+## Scope
+
+Owned files:
+
+- `manual.txt`
+EOF
+git -C "$repo" add docs/orchestration/tasks/TASK-0402.md
+git -C "$repo" commit -qm task-0402
+git -C "$repo" checkout -q -b agent/core/TASK-0402-unverified
+printf 'manual candidate\n' >"$repo/manual.txt"
+git -C "$repo" add manual.txt
+git -C "$repo" commit -qm manual-candidate
+manual_head="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" checkout -q target
+packet2="$repo/docs/orchestration/packets/imported/TASK-0402/RUN-UNVERIFIED.json"
+cat >"$packet2" <<JSON
+{"runId":"RUN-UNVERIFIED","taskId":"TASK-0402","status":"accepted","branch":"agent/core/TASK-0402-unverified","headSha":"$manual_head","evidence":[]}
+JSON
+cat >"${packet2%.json}.audit.json" <<'JSON'
+{"taskId":"TASK-0402","runId":"RUN-UNVERIFIED","branch":"agent/core/TASK-0402-unverified","verdict":"accepted","evidenceReviewed":[]}
+JSON
+git -C "$repo" add docs/orchestration/packets/imported/TASK-0402
+git -C "$repo" commit -qm packet-0402
+red_out="$tmp/integrate-red.out"
+red_rc=0
+env \
+  SINGULAR_ROOT="$repo" \
+  SINGULAR_STATE_DIR="$repo/.singular-state" \
+  SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
+  SINGULAR_AUTO_PROMOTE_GATES=0 \
+  SINGULAR_PUSH=0 \
+  FORCE_GATE_RED=1 \
+  bash "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0402 --run-id RUN-RED >"$red_out" 2>&1 \
+  || red_rc=$?
+[[ "$red_rc" -ne 0 ]] || fail "red integration fixture unexpectedly succeeded"
+grep -q 'FAILED TASK-0402: post-merge gate red' "$red_out" \
+  || fail "fixture did not record a red candidate: $(cat "$red_out")"
+git -C "$repo" merge --no-ff -qm 'manual unverified merge' "$manual_head"
+manual_merge="$(git -C "$repo" rev-parse HEAD)"
+blocked_out="$tmp/integrate-unverified.out"
+env \
+  SINGULAR_ROOT="$repo" \
+  SINGULAR_STATE_DIR="$repo/.singular-state" \
+  SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
+  SINGULAR_AUTO_PROMOTE_GATES=0 \
+  SINGULAR_PUSH=0 \
+  bash "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0402 --run-id RUN-UNVERIFIED-RECOVERY >"$blocked_out" 2>&1 \
+  || fail "unverified ancestor recovery did not stay bounded: $(cat "$blocked_out")"
+grep -q 'already reachable but integration is unverified' "$blocked_out" \
+  || fail "unverified ancestor was not exposed as actionable: $(cat "$blocked_out")"
+python3 - "$repo/.singular-state/leases/TASK-0402.json" "$manual_merge" <<'PY'
+import json, sys
+lease = json.load(open(sys.argv[1], encoding="utf-8"))
+candidate = lease["acceptedCandidate"]
+assert lease["status"] == "accepted", lease
+assert candidate["state"] == "integration-blocked", candidate
+assert candidate.get("mergeCommit") != sys.argv[2], candidate
+assert candidate["recoveryBlock"]["reason"] == "unverified-already-merged", candidate
+assert "host-tested exact merge proof" in candidate["nextAction"], candidate
+PY
 
 echo "PASS: test-integration-exact-tree"

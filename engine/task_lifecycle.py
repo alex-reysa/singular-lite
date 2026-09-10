@@ -41,6 +41,10 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def read_object(path: Path, *, missing: bool = False) -> dict[str, Any]:
     if missing and not path.exists():
         return {}
@@ -215,6 +219,14 @@ def finish(args: argparse.Namespace) -> None:
                 return
             lease_owner = str(lease.get("reservationOwner", ""))
             lease_generation = int(lease.get("reservationGeneration", 0) or 0)
+            if (
+                not lease_owner
+                and str(lease.get("lastReservationOwner", "")) == args.owner
+                and int(lease.get("lastReservationGeneration", 0) or 0) == args.generation
+            ):
+                # Wrapper finish may commit before it can publish the exit.
+                # The reaper repeats finish before finalizing that same dispatch.
+                return
             if (lease_owner or lease_generation) and (
                 lease_owner != args.owner or lease_generation != args.generation
             ):
@@ -363,12 +375,17 @@ def candidate_check(args: argparse.Namespace) -> None:
     if candidate.get("state") == "integrated":
         raise LifecycleError("candidate is already integrated")
     if candidate.get("state") == "integration-failed":
-        failure = (candidate.get("failures") or [{}])[-1]
-        if failure.get("failureClass") in {"gate-red", "integration-conflict"} and (
-            failure.get("invalidationKey") == args.invalidation_key
-        ):
-            print(candidate.get("nextAction") or "repair the candidate or change an invalidating input")
-            raise SystemExit(3)
+        for failure in reversed(candidate.get("failures") or []):
+            if isinstance(failure, dict) and (
+                failure.get("failureClass") in {"gate-red", "integration-conflict"}
+                and failure.get("invalidationKey") == args.invalidation_key
+            ):
+                print(
+                    failure.get("nextAction")
+                    or candidate.get("nextAction")
+                    or "repair the candidate or change an invalidating input"
+                )
+                raise SystemExit(3)
 
 
 def candidate_failed(args: argparse.Namespace) -> None:
@@ -382,17 +399,120 @@ def candidate_failed(args: argparse.Namespace) -> None:
         if observed != expected:
             raise LifecycleError("candidate compare-and-set failed")
         failures = candidate.setdefault("failures", [])
-        key = f"{args.failure_class}:{args.target_head}:{args.head}"
+        key = f"{args.failure_class}:{args.target_head}:{args.head}:{args.invalidation_key}"
         if not any(isinstance(item, dict) and item.get("key") == key for item in failures):
             failures.append({
                 "key": key,
                 "failureClass": args.failure_class,
                 "targetHead": args.target_head,
                 "invalidationKey": args.invalidation_key,
+                "nextAction": args.next_action,
                 "observedAt": now(),
             })
         candidate["state"] = "integration-failed"
         candidate["nextAction"] = args.next_action
+        # A failed attempt cannot leave a gate receipt that could later be
+        # mistaken for authority to finalize a manually-created merge.
+        candidate.pop("integrationProof", None)
+        lease["status"] = "accepted"
+        lease["nextAction"] = args.next_action
+        lease["updatedAt"] = now()
+
+
+def candidate_tested(args: argparse.Namespace) -> None:
+    gate_report_path = Path(args.gate_report)
+    gate_report = read_object(gate_report_path)
+    if gate_report.get("outcome") not in {"passed", "passed-with-acknowledged-baseline"}:
+        raise LifecycleError("integration gate report is not green")
+    if str(gate_report.get("headSha", "")) != args.synthetic_commit:
+        raise LifecycleError("integration gate report does not cover the synthetic commit")
+    if args.candidate_parent != args.head:
+        raise LifecycleError("tested merge parent is not the accepted candidate")
+
+    proof = {
+        "testedTree": args.tested_tree,
+        "targetParent": args.target_parent,
+        "candidateParent": args.candidate_parent,
+        "syntheticCommit": args.synthetic_commit,
+        "gateRunId": args.gate_run,
+        "gateReportPath": str(gate_report_path),
+        "gateReportSha256": sha256(gate_report_path),
+        "gateCommandSha256": sha256_text(args.gate_command),
+        "campaignBinding": args.campaign,
+    }
+    proof_id = sha256_text(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+    proof["proofId"] = proof_id
+    proof["recordedAt"] = now()
+
+    lease_path = Path(args.lease)
+    with locked(lease_path) as lease:
+        candidate = lease.get("acceptedCandidate")
+        if not isinstance(candidate, dict):
+            raise LifecycleError("missing durable accepted candidate")
+        observed = tuple(candidate.get(key, "") for key in ("headSha", "treeSha", "campaignBinding"))
+        expected = (args.head, args.tree, args.campaign)
+        if observed != expected:
+            raise LifecycleError("candidate compare-and-set failed")
+        candidate["integrationProof"] = proof
+        candidate["state"] = "integration-tested"
+        candidate["nextAction"] = "commit the exact tested merge and publish its proof"
+        lease["status"] = "accepted"
+        lease["nextAction"] = candidate["nextAction"]
+        lease["updatedAt"] = now()
+    print(proof_id)
+
+
+def candidate_proof(args: argparse.Namespace) -> None:
+    lease = read_object(Path(args.lease))
+    candidate = lease.get("acceptedCandidate")
+    if not isinstance(candidate, dict):
+        raise LifecycleError("missing durable accepted candidate")
+    observed = tuple(candidate.get(key, "") for key in ("headSha", "treeSha", "campaignBinding"))
+    expected = (args.head, args.tree, args.campaign)
+    if observed != expected:
+        raise LifecycleError("candidate compare-and-set failed")
+    proof = candidate.get("integrationProof")
+    if not isinstance(proof, dict):
+        raise LifecycleError("accepted candidate has no verified integration proof")
+    if proof.get("campaignBinding") != args.campaign:
+        raise LifecycleError("integration proof belongs to another campaign")
+    if proof.get("candidateParent") != args.head:
+        raise LifecycleError("integration proof candidate parent changed")
+    if proof.get("gateCommandSha256") != sha256_text(args.gate_command):
+        raise LifecycleError("integration gate command changed after testing")
+    report_path = Path(str(proof.get("gateReportPath", "")))
+    if not report_path.is_file() or sha256(report_path) != proof.get("gateReportSha256"):
+        raise LifecycleError("integration gate report is missing or changed")
+    report = read_object(report_path)
+    if (
+        report.get("outcome") not in {"passed", "passed-with-acknowledged-baseline"}
+        or str(report.get("headSha", "")) != proof.get("syntheticCommit")
+    ):
+        raise LifecycleError("integration gate report no longer proves this merge")
+    for key in ("proofId", "testedTree", "targetParent", "candidateParent", "syntheticCommit"):
+        value = str(proof.get(key, ""))
+        if not value:
+            raise LifecycleError(f"integration proof is missing {key}")
+        print(value)
+
+
+def candidate_blocked(args: argparse.Namespace) -> None:
+    lease_path = Path(args.lease)
+    with locked(lease_path) as lease:
+        candidate = lease.get("acceptedCandidate")
+        if not isinstance(candidate, dict):
+            raise LifecycleError("missing durable accepted candidate")
+        observed = tuple(candidate.get(key, "") for key in ("headSha", "treeSha", "campaignBinding"))
+        expected = (args.head, args.tree, args.campaign)
+        if observed != expected:
+            raise LifecycleError("candidate compare-and-set failed")
+        candidate["state"] = "integration-blocked"
+        candidate["nextAction"] = args.next_action
+        candidate["recoveryBlock"] = {
+            "reason": args.reason,
+            "targetHead": args.target_head,
+            "observedAt": now(),
+        }
         lease["status"] = "accepted"
         lease["nextAction"] = args.next_action
         lease["updatedAt"] = now()
@@ -408,6 +528,9 @@ def candidate_integrated(args: argparse.Namespace) -> None:
         expected = (args.head, args.tree, args.campaign)
         if observed != expected:
             raise LifecycleError("candidate compare-and-set failed")
+        proof = candidate.get("integrationProof")
+        if not isinstance(proof, dict) or proof.get("proofId") != args.proof_id:
+            raise LifecycleError("candidate integration proof changed before publication")
         candidate.update({"state": "integrated", "mergeCommit": args.merge, "integratedAt": now()})
         lease["status"] = "integrated"
         lease["nextAction"] = "none"
@@ -476,8 +599,26 @@ def parser() -> argparse.ArgumentParser:
         failed.add_argument("--" + flag.replace("_", "-"), required=True)
     failed.set_defaults(action=candidate_failed)
 
+    tested = commands.add_parser("candidate-tested")
+    for flag in (
+        "lease", "head", "tree", "campaign", "tested_tree", "target_parent",
+        "candidate_parent", "synthetic_commit", "gate_run", "gate_report", "gate_command",
+    ):
+        tested.add_argument("--" + flag.replace("_", "-"), required=True)
+    tested.set_defaults(action=candidate_tested)
+
+    proof = commands.add_parser("candidate-proof")
+    for flag in ("lease", "head", "tree", "campaign", "gate_command"):
+        proof.add_argument("--" + flag.replace("_", "-"), required=True)
+    proof.set_defaults(action=candidate_proof)
+
+    blocked = commands.add_parser("candidate-blocked")
+    for flag in ("lease", "head", "tree", "campaign", "reason", "target_head", "next_action"):
+        blocked.add_argument("--" + flag.replace("_", "-"), required=True)
+    blocked.set_defaults(action=candidate_blocked)
+
     integrated = commands.add_parser("candidate-integrated")
-    for flag in ("lease", "head", "tree", "campaign", "merge"):
+    for flag in ("lease", "head", "tree", "campaign", "merge", "proof_id"):
         integrated.add_argument("--" + flag.replace("_", "-"), required=True)
     integrated.set_defaults(action=candidate_integrated)
     return result

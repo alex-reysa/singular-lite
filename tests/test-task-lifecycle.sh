@@ -41,6 +41,8 @@ fi
 
 singular_lifecycle_finish "$task" "$owner1" "$gen1" batch-1 dispatch-tree-vanished retry
 [[ "$(singular_lease_status "$task")" == failed ]] || fail "current owner did not close vanished dispatch"
+singular_lifecycle_finish "$task" "$owner1" "$gen1" batch-1 dispatch-tree-vanished retry \
+  || fail "same-token repeated finish was not idempotent"
 singular_lifecycle_dispatch_finalize "$task" -1 crashed "$owner1" "$gen1"
 
 owner2=reconcile:RUN-2:TASK-0001
@@ -116,6 +118,21 @@ out="$(singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-1 inputs-2 \
   || fail "changed gate/campaign/target invalidation input did not permit retry"
+singular_lifecycle_candidate_failed "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test gate-red target-1 inputs-2 \
+  "correct the candidate after changed inputs"
+rc=0
+singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-1 inputs-2 \
+  >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 3 ]] || fail "second red gate under changed inputs was not suppressed"
+# Returning to a previously failed gate/campaign/target tuple must remain
+# suppressed even though another failure is now latest in the history.
+rc=0
+singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-1 inputs-1 \
+  >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 3 ]] || fail "returning to an earlier red-gate input retried forever"
 
 # Reconciliation of the same packet is idempotent and retains failure history.
 state="$(singular_lifecycle_retain_candidate "$task" "$packet" "$audit" \
@@ -135,7 +152,7 @@ c = d["acceptedCandidate"]
 assert d["status"] == "accepted"
 assert c["state"] == "integration-failed"
 assert c["packetSha256"] and c["auditSha256"] and c["taskContractSha256"]
-assert len(c["failures"]) == 1
+assert len(c["failures"]) == 2
 PY
 
 # A wrapper without reservation authority must not run its driver.

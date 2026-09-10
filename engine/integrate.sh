@@ -264,6 +264,31 @@ integration_candidate_failed() {
     }
 }
 
+# Resolve the one target-history commit that carries a durable integration
+# proof and exactly matches the tree and ordered parents that passed the gate.
+# The proof marker narrows the history lookup; the object checks remain the
+# authority and prevent an ordinary/manual ancestor from being finalized.
+integration_proven_commit() {
+  local proof_id="$1" tested_tree="$2" target_parent="$3" candidate_parent="$4"
+  local commit message tree parents found=""
+  while IFS= read -r commit; do
+    [[ -n "$commit" ]] || continue
+    message="$(git -C "$SINGULAR_ROOT" show -s --format=%B "$commit" 2>/dev/null || true)"
+    printf '%s\n' "$message" | grep -Fxq "Integration-Proof: $proof_id" || continue
+    tree="$(git -C "$SINGULAR_ROOT" rev-parse "$commit^{tree}" 2>/dev/null || true)"
+    parents="$(git -C "$SINGULAR_ROOT" rev-list --parents -n 1 "$commit" 2>/dev/null || true)"
+    [[ "$tree" == "$tested_tree" ]] || continue
+    [[ "$parents" == "$commit $target_parent $candidate_parent" ]] || continue
+    if [[ -n "$found" ]]; then
+      return 2
+    fi
+    found="$commit"
+  done < <(git -C "$SINGULAR_ROOT" log "$SINGULAR_TARGET_BRANCH" --format=%H \
+    --fixed-strings --grep="Integration-Proof: $proof_id" 2>/dev/null || true)
+  [[ -n "$found" ]] || return 1
+  printf '%s\n' "$found"
+}
+
 # Push a branch to origin (no force). Secret-scans the outgoing range first; on a
 # non-fast-forward, fetches and retries once, else records and skips (no block).
 push_branch() {
@@ -379,22 +404,62 @@ PY
   then
     existing_candidate="yes"
   fi
-  # Crash recovery: the verified merge may have committed before lifecycle
-  # finalization (including while immediate promotion was running). Finalize
-  # only an already-retained exact candidate whose commit is now an ancestor.
-  # This check precedes task-contract hashing because the committed projection
-  # correctly changed Status from accepted to integrated.
+  # Crash recovery: a verified merge may commit before candidate publication.
+  # Ancestry alone is insufficient because an accepted candidate can be merged
+  # manually or after a red gate. Require the durable green-gate receipt plus
+  # the exact committed tree and ordered parents. This precedes task-contract
+  # hashing because the verified merge changed Status to integrated.
   if [[ "$already_merged" == "yes" && "$existing_candidate" == "yes" ]]; then
-    if [[ "$dry_run" != "yes" ]]; then
-      singular_lifecycle_candidate_integrated "$task_id" "$head_sha" "$candidate_tree" \
-        "$candidate_campaign_binding" "$target_head" || {
-          echo "refuse: merged candidate does not match retained lifecycle authority" >&2
-          exit 2
-        }
+    proof_rc=0
+    proof_data=()
+    recovery_reason="verified integration proof is unavailable"
+    if [[ "$candidate_campaign_binding" == "$integration_campaign_binding" ]]; then
+      proof_out="$(singular_lifecycle_candidate_proof "$task_id" "$head_sha" \
+        "$candidate_tree" "$candidate_campaign_binding" "$gate_cmd" 2>&1)" || proof_rc=$?
+      if [[ "$proof_rc" -eq 0 ]]; then
+        mapfile -t proof_data <<<"$proof_out"
+      else
+        recovery_reason="$proof_out"
+      fi
+    else
+      proof_rc=2
+      recovery_reason="retained candidate belongs to another campaign"
     fi
-    echo "skip $task_id: already merged into $SINGULAR_TARGET_BRANCH"
-    singular_append_event "integration.skipped" "retained candidate already integrated" \
-      "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"already-merged-lifecycle-recovered\",\"targetHead\":\"$target_head\"}"
+    proven_merge=""
+    if [[ "$proof_rc" -eq 0 && ${#proof_data[@]} -eq 5 ]]; then
+      proven_merge="$(integration_proven_commit "${proof_data[0]}" "${proof_data[1]}" \
+        "${proof_data[2]}" "${proof_data[3]}" 2>/dev/null || true)"
+      [[ -n "$proven_merge" ]] \
+        || recovery_reason="no target commit matches the tested tree, ordered parents, and proof marker"
+    fi
+    if [[ -n "$proven_merge" ]]; then
+      if [[ "$dry_run" != "yes" ]]; then
+        singular_lifecycle_candidate_integrated "$task_id" "$head_sha" "$candidate_tree" \
+          "$candidate_campaign_binding" "$proven_merge" "${proof_data[0]}" || {
+            echo "refuse: proven merge does not match retained lifecycle authority" >&2
+            exit 2
+          }
+      fi
+      echo "skip $task_id: verified integration $proven_merge already reaches $SINGULAR_TARGET_BRANCH"
+      if [[ "$dry_run" != "yes" ]]; then
+        singular_append_event "integration.skipped" "verified retained candidate integration recovered" \
+          "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"verified-integration-recovered\",\"mergeCommit\":\"$proven_merge\",\"targetHead\":\"$target_head\"}"
+      fi
+    else
+      recovery_action="inspect the retained candidate; only a host-tested exact merge proof can publish integration"
+      if [[ "$dry_run" != "yes" ]]; then
+        singular_lifecycle_candidate_blocked "$task_id" "$head_sha" "$candidate_tree" \
+          "$candidate_campaign_binding" "unverified-already-merged" "$target_head" \
+          "$recovery_action" || {
+            echo "refuse: could not retain actionable recovery state for merged candidate" >&2
+            exit 2
+          }
+        singular_append_event "integration.recovery_blocked" \
+          "ancestor lacks a verified exact-merge receipt" \
+          "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"targetHead\":\"$target_head\"}"
+      fi
+      echo "skip $task_id: already reachable but integration is unverified ($recovery_reason); action: $recovery_action"
+    fi
     skipped=$((skipped + 1))
     continue
   fi
@@ -742,6 +807,7 @@ PY
   # agent-authored pre-commit hook must not rewrite the tested index.
   finalize_reason=""
   merge_commit=""
+  integration_proof_id=""
   if singular_git_lock_acquire; then
     # The pre-lock check above avoids waiting on known drift; this in-lock
     # check closes the wait/commit TOCTOU. It also compares the operation's
@@ -761,6 +827,13 @@ PY
       current_merge_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify MERGE_HEAD 2>/dev/null || true)"
     fi
     if [[ -z "$finalize_reason" ]]; then
+      commit_args=(
+        --no-edit -q
+        -m "integrate($task_id): merge $branch into $SINGULAR_TARGET_BRANCH"
+        -m "Worker head: $actual_head"
+        -m "Packet: docs/orchestration/packets/imported/$task_id/$run_packet.json"
+        -m "Acceptance: $acceptance_mode. Regression gate: green (run $run_id)."
+      )
       if [[ "$current_tree" != "$tested_tree" \
           || "$current_parent" != "$tested_parent" \
           || "$current_merge_head" != "$tested_merge_head" ]]; then
@@ -768,23 +841,30 @@ PY
       elif ! "$SCRIPT_DIR/secret-scan.sh" --worktree "$SINGULAR_ROOT" --staged \
           >"$run_dir/secret-scan-merge-$task_id.log" 2>&1; then
         finalize_reason="secret-detected"
-      elif ! git -C "$SINGULAR_ROOT" \
-          -c user.name="$SINGULAR_GIT_L0_NAME" \
-          -c user.email="$SINGULAR_GIT_L0_EMAIL" \
-          -c core.hooksPath=/dev/null \
-          commit --no-edit -q \
-          -m "integrate($task_id): merge $branch into $SINGULAR_TARGET_BRANCH" \
-          -m "Worker head: $actual_head" \
-          -m "Packet: docs/orchestration/packets/imported/$task_id/$run_packet.json" \
-          -m "Acceptance: $acceptance_mode. Regression gate: green (run $run_id)."; then
-        finalize_reason="merge-commit-failed"
-      else
-        merge_commit="$(git -C "$SINGULAR_ROOT" rev-parse HEAD 2>/dev/null || true)"
-        committed_tree="$(git -C "$SINGULAR_ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
-        committed_parents="$(git -C "$SINGULAR_ROOT" rev-list --parents -n 1 HEAD 2>/dev/null || true)"
-        if [[ "$committed_tree" != "$tested_tree" \
-            || "$committed_parents" != "$merge_commit $tested_parent $tested_merge_head" ]]; then
-          finalize_reason="committed-tree-or-parent-mismatch"
+      elif [[ "$candidate_lifecycle_enabled" == "yes" ]] \
+          && ! integration_proof_id="$(singular_lifecycle_candidate_tested \
+            "$task_id" "$head_sha" "$candidate_tree" "$packet_campaign_binding" \
+            "$tested_tree" "$tested_parent" "$tested_merge_head" "$synthetic_commit" \
+            "$gate_run_id" "$gate_run_dir/gate-report.json" "$gate_cmd")"; then
+        finalize_reason="integration-proof-publication-failed"
+      fi
+      if [[ -z "$finalize_reason" ]]; then
+        [[ -z "$integration_proof_id" ]] \
+          || commit_args+=(-m "Integration-Proof: $integration_proof_id")
+        if ! git -C "$SINGULAR_ROOT" \
+            -c user.name="$SINGULAR_GIT_L0_NAME" \
+            -c user.email="$SINGULAR_GIT_L0_EMAIL" \
+            -c core.hooksPath=/dev/null \
+            commit "${commit_args[@]}"; then
+          finalize_reason="merge-commit-failed"
+        else
+          merge_commit="$(git -C "$SINGULAR_ROOT" rev-parse HEAD 2>/dev/null || true)"
+          committed_tree="$(git -C "$SINGULAR_ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+          committed_parents="$(git -C "$SINGULAR_ROOT" rev-list --parents -n 1 HEAD 2>/dev/null || true)"
+          if [[ "$committed_tree" != "$tested_tree" \
+              || "$committed_parents" != "$merge_commit $tested_parent $tested_merge_head" ]]; then
+            finalize_reason="committed-tree-or-parent-mismatch"
+          fi
         fi
       fi
     fi
@@ -826,10 +906,10 @@ PY
 
   # Finalize durable candidate state immediately after the verified commit.
   # Promotion can be long-running; restart recovery above closes the remaining
-  # commit/publication crash window using exact retained identity + ancestry.
+  # commit/publication crash window using the durable exact-merge proof.
   if [[ "$candidate_lifecycle_enabled" == "yes" ]]; then
     singular_lifecycle_candidate_integrated "$task_id" "$head_sha" "$candidate_tree" \
-      "$packet_campaign_binding" "$merge_commit" || {
+      "$packet_campaign_binding" "$merge_commit" "$integration_proof_id" || {
         echo "refuse: merge committed but durable candidate finalization failed for $task_id" >&2
         exit 2
       }

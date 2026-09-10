@@ -200,9 +200,35 @@ singular_lifecycle_candidate_failed() {
     --next-action "$next"
 }
 
+singular_lifecycle_candidate_tested() {
+  local task_id="$1" head="$2" tree="$3" campaign="$4" tested_tree="$5"
+  local target_parent="$6" candidate_parent="$7" synthetic_commit="$8" gate_run="$9"
+  local gate_report="${10}" gate_command="${11}"
+  python3 "$SINGULAR_TASK_LIFECYCLE" candidate-tested \
+    --lease "$(singular_lease_path "$task_id")" --head "$head" --tree "$tree" \
+    --campaign "$campaign" --tested-tree "$tested_tree" --target-parent "$target_parent" \
+    --candidate-parent "$candidate_parent" --synthetic-commit "$synthetic_commit" \
+    --gate-run "$gate_run" --gate-report "$gate_report" --gate-command "$gate_command"
+}
+
+singular_lifecycle_candidate_proof() {
+  local task_id="$1" head="$2" tree="$3" campaign="$4" gate_command="$5"
+  python3 "$SINGULAR_TASK_LIFECYCLE" candidate-proof \
+    --lease "$(singular_lease_path "$task_id")" --head "$head" --tree "$tree" \
+    --campaign "$campaign" --gate-command "$gate_command"
+}
+
+singular_lifecycle_candidate_blocked() {
+  local task_id="$1" head="$2" tree="$3" campaign="$4" reason="$5" target_head="$6" next="$7"
+  python3 "$SINGULAR_TASK_LIFECYCLE" candidate-blocked \
+    --lease "$(singular_lease_path "$task_id")" --head "$head" --tree "$tree" \
+    --campaign "$campaign" --reason "$reason" --target-head "$target_head" \
+    --next-action "$next"
+}
+
 singular_lifecycle_candidate_integrated() {
-  local task_id="$1" head="$2" tree="$3" campaign="$4" merge="$5"
+  local task_id="$1" head="$2" tree="$3" campaign="$4" merge="$5" proof_id="$6"
   python3 "$SINGULAR_TASK_LIFECYCLE" candidate-integrated \
     --lease "$(singular_lease_path "$task_id")" --head "$head" --tree "$tree" \
-    --campaign "$campaign" --merge "$merge"
+    --campaign "$campaign" --merge "$merge" --proof-id "$proof_id"
 }
