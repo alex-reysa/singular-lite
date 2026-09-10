@@ -124,7 +124,15 @@ print("\n".join(out))
 PY
 }
 
+# Consumer-relative paths have the same meaning from any invocation cwd.
+singular_normalize_consumer_path_var() {
+  local key="$1" value
+  value="${!key:-}"
+  [[ -z "$value" || "$value" == /* ]] || printf -v "$key" '%s/%s' "$SINGULAR_ROOT" "$value"
+}
+
 SINGULAR_JSON_CONFIG_FILE="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
+singular_normalize_consumer_path_var SINGULAR_JSON_CONFIG_FILE
 if [[ -f "$SINGULAR_JSON_CONFIG_FILE" ]]; then
   _singular_cfg_env="$(singular_json_config_to_env "$SINGULAR_JSON_CONFIG_FILE")" \
     || { echo "singular: failed to parse $SINGULAR_JSON_CONFIG_FILE" >&2; exit 2; }
@@ -132,15 +140,22 @@ if [[ -f "$SINGULAR_JSON_CONFIG_FILE" ]]; then
   unset _singular_cfg_env
 fi
 SINGULAR_CONFIG_FILE="${SINGULAR_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.sh}"
+singular_normalize_consumer_path_var SINGULAR_CONFIG_FILE
 if [[ -f "$SINGULAR_CONFIG_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$SINGULAR_CONFIG_FILE"
 fi
+singular_normalize_consumer_path_var SINGULAR_STATE_DIR
 SINGULAR_LOCAL_CONFIG_FILE="${SINGULAR_LOCAL_CONFIG_FILE:-$SINGULAR_STATE_DIR/config.local.sh}"
+singular_normalize_consumer_path_var SINGULAR_LOCAL_CONFIG_FILE
 if [[ -f "$SINGULAR_LOCAL_CONFIG_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$SINGULAR_LOCAL_CONFIG_FILE"
 fi
+for _singular_path_var in SINGULAR_STATE_DIR SINGULAR_TASKS_DIR SINGULAR_ORCH_DIR; do
+  singular_normalize_consumer_path_var "$_singular_path_var"
+done
+unset _singular_path_var
 if [[ -n "$_singular_bootstrap_bash_bin" ]]; then
   SINGULAR_BASH_BIN="$_singular_bootstrap_bash_bin"
   export SINGULAR_BASH_BIN
