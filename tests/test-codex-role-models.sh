@@ -195,7 +195,7 @@ env = json.load(open(sys.argv[2], encoding="utf-8"))
 socket_path = sys.argv[3].replace("\\", "\\\\").replace('"', '\\"')
 assert "--ignore-user-config" in args, args
 assert "--sandbox" not in args, args
-assert args[args.index("-P") + 1] == "singular-evidence", args
+assert "-P" not in args, args
 assert 'permissions.singular-evidence.extends=":read-only"' in args, args
 assert f'permissions.singular-evidence.network.unix_sockets={{"{socket_path}"="allow"}}' in args, args
 assert 'default_permissions="singular-evidence"' in args, args

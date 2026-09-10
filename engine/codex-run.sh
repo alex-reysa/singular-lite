@@ -190,7 +190,6 @@ if [[ -n "${SINGULAR_EVIDENCE_SOCKET:-}" ]]; then
   evidence_socket_key="${SINGULAR_EVIDENCE_SOCKET//\\/\\\\}"
   evidence_socket_key="${evidence_socket_key//\"/\\\"}"
   evidence_permission_args=(
-    -P singular-evidence
     -c 'permissions.singular-evidence.extends=":read-only"'
     -c "permissions.singular-evidence.network.unix_sockets={\"$evidence_socket_key\"=\"allow\"}"
     -c 'default_permissions="singular-evidence"'
