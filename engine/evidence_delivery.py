@@ -201,9 +201,20 @@ def run(args):
                    {'kind': 'required-prompt', 'manifestSha256': sha(e.raw),
                     'promptSha256': sha(prompt), 'refs': args.required})
             prompt_path = e.path.parent / ('delivery-prompt-' + sha(prompt) + '.md')
-            if prompt_path.exists() and prompt_path.read_bytes() != prompt:
-                raise ValueError('prompt identity collision')
-            prompt_path.write_bytes(prompt)
+            # Publish complete bytes without truncating an existing immutable view.
+            fd, temporary_prompt = tempfile.mkstemp(prefix='.delivery-', dir=e.path.parent)
+            try:
+                with os.fdopen(fd, 'wb') as output:
+                    output.write(prompt)
+                    output.flush()
+                    os.fsync(output.fileno())
+                try:
+                    os.link(temporary_prompt, prompt_path)
+                except FileExistsError:
+                    if prompt_path.read_bytes() != prompt:
+                        raise ValueError('prompt identity collision')
+            finally:
+                os.unlink(temporary_prompt)
             command[index] = str(prompt_path)
         else:
             charge(ledger, e, 0, {'kind': 'broker-open', 'manifestSha256': sha(e.raw)})
