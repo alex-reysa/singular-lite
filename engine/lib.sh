@@ -2307,12 +2307,14 @@ import sys
 
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as f:
-    lines = f.read().splitlines()
+    task_document = f.read()
+    lines = task_document.splitlines()
 
 def strip_ticks(s):
     return s.strip().strip("`").strip()
 
 data = {
+    "taskDocument": task_document,
     "taskId": "",
     "title": "",
     "status": "",
@@ -3742,8 +3744,9 @@ def read_objects(path):
             values.append(json.loads(line))
         except Exception:
             continue
-    # Gemini has emitted a warning followed by one JSON object on stderr.
-    if not values:
+    # Gemini has emitted a warning followed by one JSON object on stderr. Codex
+    # classification accepts only complete JSON/JSONL provider records.
+    if not values and provider != "codex":
         start = raw.find("{")
         if start >= 0:
             try:
@@ -3756,6 +3759,30 @@ def read_objects(path):
 objects = read_objects(envelope_path)
 if provider == "gemini" and not objects:
     objects = read_objects(stderr_path)
+
+CODEX_SUCCESS_TYPES = {
+    "turn.completed", "response.completed", "session.completed",
+    "thread.completed",
+}
+CODEX_RECONNECT_RE = re.compile(
+    r"Reconnecting\.\.\. (?P<attempt>[1-9]|10)/(?P<limit>[1-9]|10) "
+    r"\((?P<reason>[^\r\n]+)\)"
+)
+
+def codex_reconnect_parts(obj):
+    if not isinstance(obj, dict) or obj.get("type") != "error":
+        return None
+    message = obj.get("message")
+    if not isinstance(message, str):
+        return None
+    match = CODEX_RECONNECT_RE.fullmatch(message)
+    if match is None:
+        return None
+    attempt = int(match.group("attempt"))
+    limit = int(match.group("limit"))
+    if attempt > limit:
+        return None
+    return attempt, limit, match.group("reason")
 
 def is_terminal_error(obj):
     if not isinstance(obj, dict):
@@ -3784,8 +3811,22 @@ def is_terminal_error(obj):
     return False
 
 terminal = None
+codex_success_seen = False
 for candidate in reversed(objects):
+    if (
+        provider == "codex"
+        and isinstance(candidate, dict)
+        and str(candidate.get("type", "") or "").lower() in CODEX_SUCCESS_TYPES
+    ):
+        codex_success_seen = True
+        continue
     if is_terminal_error(candidate):
+        if (
+            provider == "codex"
+            and codex_success_seen
+            and codex_reconnect_parts(candidate) is not None
+        ):
+            continue
         terminal = candidate
         break
 
@@ -3845,6 +3886,16 @@ if terminal is not None:
     status = int_status(scope)
     if status is None and provider == "claude":
         status = int_status({"api_error_status": terminal.get("api_error_status")})
+    if status is None and provider == "codex":
+        reconnect = codex_reconnect_parts(terminal)
+        if reconnect is not None:
+            match = re.search(
+                r"\bunexpected status ([1-5][0-9]{2})(?:\b|:)",
+                reconnect[2],
+                re.IGNORECASE,
+            )
+            if match is not None:
+                status = int(match.group(1))
     raw_code = string_field(scope, CODE_KEYS).lower().replace("-", "_").replace(" ", "_")
     message = string_field(scope, MESSAGE_KEYS)
     if not message and provider in {"claude", "cursor"}:

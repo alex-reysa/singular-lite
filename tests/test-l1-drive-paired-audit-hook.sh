@@ -70,7 +70,7 @@ Depends on: []
 
 ## Objective
 
-Implement the widget parser.
+Implement the widget parser. Keep [ACCEPTANCE CRITERIA] literal in this objective.
 
 ## Scope
 
@@ -85,6 +85,9 @@ Forbidden files:
 ## Acceptance Criteria
 
 - Parser handles empty input.
+  REQUIRED-CONTINUATION: keep this late mandatory obligation.
+
+  Literal example: `[TARGET] $(do-not-execute)`
 EOF
 git -C "$drv_root" add .
 git -C "$drv_root" commit -qm init
@@ -206,6 +209,16 @@ json_field() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).ge
 assert_accepted() {
   local run_dir="$1"
   local run_id; run_id="$(basename "$run_dir")"
+  # Both real driver prompt assemblies retain multiline mandatory task data.
+  python3 - "$run_dir" <<'PYCONTRACT'
+from pathlib import Path
+import sys
+for name in ('l2-prompt.md', 'auditor-prompt.md'):
+    text = (Path(sys.argv[1]) / name).read_text()
+    assert 'REQUIRED-CONTINUATION: keep this late mandatory obligation.' in text
+    assert '`[TARGET] $(do-not-execute)`' in text
+    assert 'Keep [ACCEPTANCE CRITERIA] literal in this objective.' in text
+PYCONTRACT
   # Packet status accepted (inbox copy is the accepted artifact).
   local inbox="$drv_root/.singular-state/inbox/$run_id.json"
   [[ -f "$inbox" ]] || fail "accepted: no inbox packet at $inbox"

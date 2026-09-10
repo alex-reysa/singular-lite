@@ -20,6 +20,7 @@
     "createdAt"
   ],
   "properties": {
+    "campaignBinding": { "type": "string", "minLength": 1 },
     "schema": { "const": "singular.orchestration.evidence-manifest.v0" },
     "taskId": { "type": "string", "pattern": "^TASK-[0-9]{4,}$" },
     "runId": { "type": "string", "minLength": 1 },

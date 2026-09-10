@@ -352,8 +352,9 @@ subs = {
     "[OBJECTIVE]": t["objective"],
     "[ACCEPTANCE CRITERIA]": "\n".join(f"- {c}" for c in accept) if accept else "(none)",
 }
-for k, v in subs.items():
-    tmpl = tmpl.replace(k, v)
+# One substitution pass: inserted task text is data, never another template.
+import re
+tmpl = re.sub("|".join(re.escape(k) for k in subs), lambda m: subs[m.group()], tmpl)
 contract = f"""
 
 ---
@@ -398,7 +399,10 @@ if advisory:
         + "\n".join(f"- {item}" for item in advisory) + "\n"
     )
 with open(out_path, "w", encoding="utf-8") as f:
-    f.write(tmpl + contract)
+    complete = tmpl + contract + "\n\n## Complete task contract (mandatory)\n\n" + t.get("taskDocument", "")
+    if len(complete.encode("utf-8")) > 262144:
+        raise SystemExit("mandatory task prompt exceeds 262144-byte limit")
+    f.write(complete)
 PY
 
 # ---- Auditor prompt assembly ----
@@ -449,7 +453,7 @@ contract = f"""
 - Compact evidence manifest: {run_dir}/evidence-manifest.json
 - Host verification report: {run_dir}/audit-verification.json
 - To inspect one raw artifact declared by the manifest, use only:
-  `{script_dir}/evidence-show.sh {run_dir}/evidence-manifest.json <artifact-ref> [max-bytes]`
+  `{script_dir}/evidence-show.sh {run_dir}/evidence-manifest.json <artifact-ref> [max-bytes] [byte-offset]`
 
 Read-only. The host has already verified the committed gate: either by
 rerunning it in a disposable writable worktree at the exact committed head with
@@ -473,7 +477,10 @@ if advisory:
         + "\n".join(f"- {item}" for item in advisory) + "\n"
     )
 with open(out_path, "w", encoding="utf-8") as f:
-    f.write(tmpl + contract)
+    complete = tmpl + contract + "\n\n## Complete task contract (mandatory)\n\n" + t.get("taskDocument", "")
+    if len(complete.encode("utf-8")) > 262144:
+        raise SystemExit("mandatory task prompt exceeds 262144-byte limit")
+    f.write(complete)
 PY
 
 if [[ "$dry_run" == "yes" ]]; then
@@ -1219,6 +1226,7 @@ l1_build_evidence_manifest() {
         || true
     fi
     evidence_rc=0
+    SINGULAR_EVIDENCE_CAMPAIGN_BINDING="$l1_campaign_binding" \
     "$SCRIPT_DIR/evidence-manifest.sh" \
       --run-dir "$run_dir" --task-id "$task_id" --worktree "$worktree" \
       --base-ref "$packet_base_ref" --head-sha "$head_sha" \
@@ -2332,7 +2340,11 @@ PY
     SINGULAR_RUNNER_ROLE=auditor \
     SINGULAR_RUNNER_CAPABILITY_PROFILE="$audit_capability_profile" \
     SINGULAR_RUNNER_RESULT_FILE="$audit_result_file" \
-      "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
+      python3 "$SCRIPT_DIR/evidence_delivery.py" run \
+        --manifest "$run_dir/evidence-manifest.json" \
+        --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
+        --required packet.json --required audit-verification.json -- \
+        "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
         "${audit_run_args[@]}" >>"$auditor_log" 2>&1 &
     audit_pid="$!"
     audit_child_pgid="$(ps -o pgid= -p "$audit_pid" 2>/dev/null | tr -d '[:space:]' || true)"
@@ -2364,6 +2376,10 @@ PY
       SINGULAR_RUNNER_ROLE=auditor \
       SINGULAR_RUNNER_CAPABILITY_PROFILE="$audit_capability_profile" \
       SINGULAR_RUNNER_RESULT_FILE="$audit_result_file" \
+        python3 "$SCRIPT_DIR/evidence_delivery.py" run \
+          --manifest "$run_dir/evidence-manifest.json" \
+          --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
+          --required packet.json --required audit-verification.json -- \
         "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
           --level readonly -C "$worktree" --run-id "$run_id" \
           --prompt-file "$active_audit_prompt" --output-last-message "$audit_record" \

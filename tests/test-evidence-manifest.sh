@@ -93,6 +93,7 @@ cat >"$run/auditor-attempt-1-try-0-runner-result.json" <<'JSON'
 }
 JSON
 
+export SINGULAR_EVIDENCE_CAMPAIGN_BINDING="campaign:fixture-stable"
 evidence_config='{"maxComposedBytes":65536,"maxExcerptBytes":128,"retrievalBudgetBytes":200,"auditInputTokenCanary":10000}'
 SINGULAR_EVIDENCE_CONFIG_JSON="$evidence_config" "$ROOT/engine/evidence-manifest.sh" \
   --run-dir "$run" --task-id TASK-0001 --worktree "$repo" \
@@ -150,10 +151,28 @@ manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 assert manifest["budget"]["auditInputTokenCanary"] == 8000
 assert manifest["budget"]["actualAuditInputTokens"] == 8000
 PY
+# Host regeneration must preserve the original domain when a caller omits it.
+unset SINGULAR_EVIDENCE_CAMPAIGN_BINDING
+SINGULAR_EVIDENCE_CONFIG_JSON="$evidence_config" "$ROOT/engine/evidence-manifest.sh" \
+  --run-dir "$run" --task-id TASK-0001 --worktree "$repo" \
+  --base-ref "$base" --head-sha "$head" >/dev/null
+if SINGULAR_EVIDENCE_CAMPAIGN_BINDING="changed" "$ROOT/engine/evidence-manifest.sh" \
+  --run-dir "$run" --task-id TASK-0001 --worktree "$repo" \
+  --base-ref "$base" --head-sha "$head" >/dev/null 2>&1; then
+  echo "manifest refresh changed accounting campaign" >&2; exit 1
+fi
+python3 - "$run/evidence-manifest.json" <<'BINDING'
+import json, sys
+assert json.load(open(sys.argv[1]))['campaignBinding'] == 'campaign:fixture-stable'
+BINDING
 # The retrieval assertions below intentionally exercise the original 200-byte
 # manifest budget. Restore those exact bytes after this independent canary case.
 cp "$tmp/evidence-manifest-before-canary.json" "$run/evidence-manifest.json"
 
+cat >"$tmp/retrieve.sh" <<'RETRIEVE'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$1"; run="$2"; tmp="$3"
 "$ROOT/engine/evidence-show.sh" "$run/evidence-manifest.json" \
   worker-evidence/huge.log 128 >"$tmp/excerpt"
 [[ "$(wc -c <"$tmp/excerpt" | tr -d ' ')" -lt 256 ]]
@@ -172,5 +191,10 @@ if "$ROOT/engine/evidence-show.sh" "$run/evidence-manifest.json" \
   echo "expected tampered evidence to be rejected" >&2
   exit 1
 fi
+
+RETRIEVE
+python3 "$ROOT/engine/evidence_delivery.py" run \
+  --manifest "$run/evidence-manifest.json" --ledger "$tmp/delivery.sqlite3" -- \
+  "$BASH" "$tmp/retrieve.sh" "$ROOT" "$run" "$tmp"
 
 echo "evidence manifest tests passed"

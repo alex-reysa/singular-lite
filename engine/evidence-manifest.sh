@@ -401,11 +401,24 @@ if gate_record_path is not None:
         elif gate_outcome == "inconclusive-infrastructure":
             gate_check["status"] = "inconclusive"
 
+# Refresh cannot reset the retrieval domain by dropping an existing binding.
+prior_binding = None
+prior_path = run_dir / "evidence-manifest.json"
+if prior_path.is_file():
+    prior = json.loads(prior_path.read_text(encoding="utf-8"))
+    if prior.get("taskId") != task_id or prior.get("runId") != run_dir.name:
+        raise SystemExit("evidence-manifest: existing manifest identity mismatch")
+    prior_binding = prior.get("campaignBinding", "legacy")
+campaign_binding = os.environ.get("SINGULAR_EVIDENCE_CAMPAIGN_BINDING", prior_binding or "legacy")
+if prior_binding is not None and campaign_binding != prior_binding:
+    raise SystemExit("evidence-manifest: refresh cannot change campaign identity")
+
 manifest = {
     "schema": "singular.orchestration.evidence-manifest.v0",
     "taskId": task_id,
     "runId": run_dir.name,
     "headSha": resolved_head,
+    "campaignBinding": campaign_binding,
     "diffSha256": sha_bytes(diff),
     "files": files,
     "commands": commands,
