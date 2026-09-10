@@ -8,19 +8,147 @@ if [[ "${BASH_VERSINFO[0]:-0}" -lt 4 ]]; then
 fi
 
 ENGINE_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tmp="$(mktemp -d)"
+# A private session owns every fixture descendant. Strip inherited engine selection
+# only in the child environment; the caller's campaign remains untouched.
+if [[ "${EXACT_TREE_PRIVATE_CHILD:-}" != 1 ]]; then
+  exec python3 - "$0" "$ENGINE_HOME" <<'PYWRAP'
+import os, pathlib, shutil, signal, subprocess, sys, tempfile, time
+scratch = tempfile.mkdtemp(prefix='exact-tree-')
+env = {k: v for k, v in os.environ.items() if not k.startswith('SINGULAR_')}
+repo = scratch + '/repo'
+state = repo + '/.singular-state'
+env.update(EXACT_TREE_PRIVATE_CHILD='1', EXACT_TREE_TMP=scratch, TMPDIR=scratch,
+    SINGULAR_ROOT=repo, SINGULAR_ORCH_DIR=repo+'/docs/orchestration',
+    SINGULAR_TASKS_DIR=repo+'/docs/orchestration/tasks', SINGULAR_STATE_DIR=state,
+    SINGULAR_WORKTREES_DIR=repo+'/.worktrees', SINGULAR_RUNS_DIR=state+'/runs',
+    SINGULAR_RUNTIME_DIR=state+'/runtime', SINGULAR_ENGINE_HOME=sys.argv[2],
+    SINGULAR_JSON_CONFIG_FILE=repo+'/singular.config.json',
+    SINGULAR_CONFIG_FILE=repo+'/singular.config.sh',
+    SINGULAR_LOCAL_CONFIG_FILE=state+'/config.local.sh')
+def signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except PermissionError:
+        # macOS may report EPERM for a group containing only reparented zombies.
+        # Confirm there are no live members; real permission failures stay fatal.
+        rows = subprocess.check_output(['ps', '-axo', 'pgid=,stat='], text=True)
+        members = [row.split()[1] for row in rows.splitlines()
+                   if len(row.split()) == 2 and row.split()[0] == str(pgid)]
+        if any(not state.startswith('Z') for state in members):
+            raise
+        raise ProcessLookupError(pgid)
+
+proc = None
+rc = 1
+def interrupted(signum, frame):
+    print('fixture interrupted: signal ' + str(signum), file=sys.stderr)
+    raise SystemExit(128 + signum)
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(sig, interrupted)
+try:
+    proc = subprocess.Popen(['bash', sys.argv[1]], env=env, start_new_session=True)
+    if os.environ.get('EXACT_TREE_PROCESS_RECORD'):
+        pathlib.Path(os.environ['EXACT_TREE_PROCESS_RECORD']).write_text(str(proc.pid))
+    try:
+        rc = proc.wait(timeout=45)
+    except subprocess.TimeoutExpired:
+        print('FAIL: fixture lifecycle timed out', file=sys.stderr)
+        rc = 1
+finally:
+    if proc is not None:
+        # Stop the complete private process group, including gate grandchildren.
+        try: signal_group(proc.pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+        try: proc.wait(timeout=2)
+        except subprocess.TimeoutExpired: pass
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try: signal_group(proc.pid, 0)
+            except ProcessLookupError: break
+            time.sleep(0.02)
+        try: signal_group(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        proc.wait()
+    for log in pathlib.Path(scratch).glob('*.out'):
+        if rc: print(log.name + ':\n' + log.read_text(), file=sys.stderr)
+    if rc:
+        for log in pathlib.Path(scratch).rglob('gate-check.log'):
+            print(str(log.relative_to(scratch)) + ':\n' + log.read_text(), file=sys.stderr)
+    shutil.rmtree(scratch)
+sys.exit(rc if rc >= 0 else 128-rc)
+PYWRAP
+fi
+tmp="$EXACT_TREE_TMP"
 watcher_pid=""
+integrator_pid=""
 cleanup() {
-  [[ -z "$watcher_pid" ]] || kill "$watcher_pid" 2>/dev/null || true
-  rm -rf "$tmp"
+  local rc=$?
+  trap - EXIT
+  for pid in "$watcher_pid" "$integrator_pid"; do
+    [[ -z "$pid" ]] || kill "$pid" 2>/dev/null || true
+  done
+  for pid in "$watcher_pid" "$integrator_pid"; do
+    [[ -z "$pid" ]] || wait "$pid" 2>/dev/null || true
+  done
+  exit "$rc"
 }
 trap cleanup EXIT
-
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 fail() { echo "FAIL: $*" >&2; exit 1; }
+await_latch() {
+  local path=$1 label=$2 deadline=$((SECONDS + 20))
+  while [[ ! -e "$path" ]]; do
+    (( SECONDS < deadline )) || fail "$label timed out"
+    sleep 0.01
+  done
+}
+run_integrator() {
+  local output=$1; shift
+  rm -f "$tmp/integrator-status"
+  (
+    trap - EXIT
+    set +e
+    if [[ "${EXACT_TREE_TEST_FAILURE:-}" == integrator ]]; then
+      echo 'injected integrator failure' >&2
+      rc=37
+    else
+      "$@"
+      rc=$?
+    fi
+    printf '%s\n' "$rc" >"$tmp/integrator-status.tmp"
+    mv "$tmp/integrator-status.tmp" "$tmp/integrator-status"
+    exit "$rc"
+  ) >"$output" 2>&1 &
+  integrator_pid=$!
+  local deadline=$((SECONDS + 30)) rc
+  while [[ ! -e "$tmp/integrator-status" ]]; do
+    if [[ -e "$tmp/watcher-status" ]]; then
+      rc=$(cat "$tmp/watcher-status")
+      if [[ "$rc" != 0 ]]; then
+        cat "$tmp/watcher.out" >&2
+        exit "$rc"
+      fi
+    fi
+    (( SECONDS < deadline )) || fail 'integrator timed out'
+    sleep 0.01
+  done
+  rc=$(cat "$tmp/integrator-status")
+  wait "$integrator_pid" || true
+  integrator_pid=""
+  if [[ "$rc" != 0 ]] && ! grep -q campaign-publication-lock-timeout "$output"; then
+    cat "$output" >&2
+    exit "$rc"
+  fi
+  return "$rc"
+}
 repo="$tmp/repo"
 mkdir -p "$repo/docs/orchestration/tasks" \
   "$repo/docs/orchestration/packets/imported/TASK-0401" \
   "$repo/.singular-state"
+: >"$repo/singular.config.sh"
+: >"$repo/.singular-state/config.local.sh"
 git -C "$repo" init -q
 git -C "$repo" checkout -q -b target
 git -C "$repo" config user.name test
@@ -37,7 +165,11 @@ JSON
 cat >"$repo/integration-gate.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-while [[ ! -f "$MAIN_DIRT_READY" ]]; do sleep 0.01; done
+deadline=$((SECONDS + 8))
+while [[ ! -f "$MAIN_DIRT_READY" ]]; do
+  (( SECONDS < deadline )) || { echo "dirt-ready timed out" >&2; exit 1; }
+  sleep 0.01
+done
 printf '%s\n' "$PWD" >"$GATE_PWD_FILE"
 [[ "$(cat app.txt)" == "merged-and-tested" ]]
 printf '%s\n' \
@@ -131,7 +263,13 @@ lock_fail_release="$tmp/lock-fail-release"
 lock_fail_gate_pwd="$tmp/lock-fail-gate-pwd"
 lock_fail_out="$tmp/integrate-lock-fail.out"
 (
-  while [[ ! -f "$repo/.git/MERGE_HEAD" ]]; do sleep 0.01; done
+  trap 'rc=$?; type singular_campaign_lock_release >/dev/null 2>&1 && singular_campaign_lock_release || true; echo "$rc" >"$tmp/watcher-status.tmp"; mv "$tmp/watcher-status.tmp" "$tmp/watcher-status"' EXIT
+  trap 'exit 143' TERM
+  if [[ "${EXACT_TREE_TEST_FAILURE:-}" == watcher ]]; then
+    echo 'injected watcher failure' >&2
+    exit 38
+  fi
+  await_latch "$repo/.git/MERGE_HEAD" MERGE_HEAD
   export SINGULAR_ROOT="$repo"
   export SINGULAR_STATE_DIR="$repo/.singular-state"
   export SINGULAR_ENGINE_HOME="$ENGINE_HOME"
@@ -139,16 +277,16 @@ lock_fail_out="$tmp/integrate-lock-fail.out"
   source "$ENGINE_HOME/engine/lib.sh"
   singular_campaign_lock_acquire
   printf 'poison-lock-fail-main-worktree\n' >"$repo/app.txt"
-  : >"$lock_fail_dirt_ready"
+  [[ "${EXACT_TREE_TEST_FAILURE:-}" == latch ]] || : >"$lock_fail_dirt_ready"
   # The parent releases us only after integrate returns. This makes the race
   # independent of machine speed while the publisher's 0.2s bounded wait
   # still guarantees the test itself terminates.
-  while [[ ! -e "$lock_fail_release" ]]; do sleep 0.01; done
+  await_latch "$lock_fail_release" release
   singular_campaign_lock_release
-) &
+) >"$tmp/watcher.out" 2>&1 &
 watcher_pid=$!
 lock_fail_rc=0
-env \
+run_integrator "$lock_fail_out" env \
   SINGULAR_ROOT="$repo" \
   SINGULAR_STATE_DIR="$repo/.singular-state" \
   SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
@@ -158,7 +296,7 @@ env \
   MAIN_DIRT_READY="$lock_fail_dirt_ready" \
   GATE_PWD_FILE="$lock_fail_gate_pwd" \
   bash "$ENGINE_HOME/engine/integrate.sh" \
-    --task TASK-0401 --run-id RUN-LOCK-FAIL >"$lock_fail_out" 2>&1 \
+    --task TASK-0401 --run-id RUN-LOCK-FAIL \
   || lock_fail_rc=$?
 : >"$lock_fail_release"
 wait "$watcher_pid"
@@ -182,17 +320,24 @@ git -C "$repo" restore --worktree -- app.txt
 # The mutation happens only after integrate's clean-worktree preflight and
 # merge staging. An old in-place gate reads "poison-main-worktree" and fails;
 # the exact-tree disposable gate reads the staged "merged-and-tested" bytes.
+rm -f "$tmp/watcher-status"
 main_dirt_ready="$tmp/main-dirt-ready"
 gate_pwd_file="$tmp/gate-pwd"
 (
-  while [[ ! -f "$repo/.git/MERGE_HEAD" ]]; do sleep 0.01; done
+  trap 'rc=$?; type singular_campaign_lock_release >/dev/null 2>&1 && singular_campaign_lock_release || true; echo "$rc" >"$tmp/watcher-status.tmp"; mv "$tmp/watcher-status.tmp" "$tmp/watcher-status"' EXIT
+  trap 'exit 143' TERM
+  if [[ "${EXACT_TREE_TEST_FAILURE:-}" == watcher ]]; then
+    echo 'injected watcher failure' >&2
+    exit 38
+  fi
+  await_latch "$repo/.git/MERGE_HEAD" MERGE_HEAD
   printf 'poison-main-worktree\n' >"$repo/app.txt"
   : >"$main_dirt_ready"
-) &
+) >"$tmp/watcher.out" 2>&1 &
 watcher_pid=$!
 
 out="$tmp/integrate.out"
-env \
+run_integrator "$out" env \
   SINGULAR_ROOT="$repo" \
   SINGULAR_STATE_DIR="$repo/.singular-state" \
   SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
@@ -201,7 +346,7 @@ env \
   MAIN_DIRT_READY="$main_dirt_ready" \
   GATE_PWD_FILE="$gate_pwd_file" \
   bash "$ENGINE_HOME/engine/integrate.sh" \
-    --task TASK-0401 --run-id RUN-EXACT >"$out" 2>&1 \
+    --task TASK-0401 --run-id RUN-EXACT \
   || fail "exact-tree integration failed: $(cat "$out")"
 wait "$watcher_pid"
 watcher_pid=""
