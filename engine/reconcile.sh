@@ -15,6 +15,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/lifecycle.sh"
 
 mode="dry-run"
 case "${1:-}" in
@@ -101,7 +102,7 @@ if [[ "$mode" == "drain" ]]; then
   while true; do
     drain_run_id="$(singular_run_id)"
     if singular_acquire_lock "$drain_run_id"; then
-      drain_out="$(singular_reap_dispatches "$drain_run_id")" || true
+      drain_out="$(singular_lifecycle_reap_dispatches "$drain_run_id")" || true
       singular_release_lock "$drain_run_id"
       drain_running="$(printf '%s\n' "$drain_out" | sed -n 's/^workers_running=//p' | tail -1)"
       [[ "$drain_running" =~ ^[0-9]+$ ]] || drain_running=0
@@ -212,7 +213,7 @@ singular_append_event "origin.reconcile_started" "origin reconcile started" "{\"
 # the stale-lease scan runs. With detached dispatch off this is shadow
 # accounting only -- the in-cycle wait loop below stays authoritative.
 if [[ "$do_import" == "yes" ]]; then
-  reap_out="$(singular_reap_dispatches "$run_id")" || true
+  reap_out="$(singular_lifecycle_reap_dispatches "$run_id")" || true
   reaped_ok="$(printf '%s\n' "$reap_out" | sed -n 's/^reaped_ok=//p' | tail -1)"
   reaped_failures="$(printf '%s\n' "$reap_out" | sed -n 's/^reaped_failures=//p' | tail -1)"
   reaped_refused="$(printf '%s\n' "$reap_out" | sed -n 's/^reaped_refused=//p' | tail -1)"
@@ -487,24 +488,24 @@ PY
     tid="$(singular_task_field "$task_file" taskId 2>/dev/null || true)"
     [[ -n "$tid" ]] || continue
     dispatch_log="$run_dir/dispatch-$tid.log"
-    echo "actuation: dispatching $tid (batch=$batch_id base=$base_sha detached=${SINGULAR_DETACHED_DISPATCH:-0})"
-    singular_append_event "origin.dispatch" "origin dispatching task" \
-      "{\"runId\":\"$run_id\",\"taskId\":\"$tid\",\"batchId\":\"$batch_id\",\"baseSha\":\"$base_sha\",\"detached\":${SINGULAR_DETACHED_DISPATCH:-0}}"
-    if [[ "${SINGULAR_DETACHED_DISPATCH:-0}" == "1" ]]; then
-      # Pre-lease: hold the slot and publish the scope BEFORE the driver runs.
-      # The driver creates its lease only after preflight, so without this a
-      # later cycle's frontier could double-select the task (or a scope-
-      # overlapping one) in the window before the driver's lease write. The
-      # driver's own singular_lease_write overwrites this record (preserving
-      # createdAt/batchId); dispatch-wrap.sh clears it if the driver exits
-      # without ever taking ownership.
-      pre_branch="$(singular_task_field "$task_file" workerBranch 2>/dev/null || true)"
-      pre_area="$(singular_task_field "$task_file" area 2>/dev/null || true)"
-      pre_owned_json="$(singular_task_field "$task_file" ownedFiles 2>/dev/null || echo '[]')"
-      pre_scope="$(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1])))' "$pre_owned_json" 2>/dev/null || true)"
-      singular_lease_write "$tid" "$pre_branch" "$pre_area" "l2-developer" "$pre_scope" \
-        "planned" "$run_id" "" "$base_sha" "$batch_id" "$pre_owned_json" "" || true
+    dispatch_owner="reconcile:$run_id:$tid"
+    pre_branch="$(singular_task_field "$task_file" workerBranch 2>/dev/null || true)"
+    pre_area="$(singular_task_field "$task_file" area 2>/dev/null || true)"
+    pre_owned_json="$(singular_task_field "$task_file" ownedFiles 2>/dev/null || echo '[]')"
+    dispatch_generation="$(singular_lifecycle_reserve "$tid" "$dispatch_owner" "$run_id" \
+      "$pre_branch" "$pre_area" "$pre_owned_json" "$base_sha" "$batch_id" \
+      "$SINGULAR_WORKTREES_DIR/$tid" 2>"$run_dir/reservation-$tid.log")" || dispatch_generation=""
+    if [[ -z "$dispatch_generation" ]]; then
+      refused_dispatches=$((refused_dispatches + 1))
+      echo "actuation: reservation refused for $tid; launch suppressed"
+      singular_append_event "origin.reservation_refused" \
+        "dispatch suppressed because reservation acquisition failed" \
+        "{\"runId\":\"$run_id\",\"taskId\":\"$tid\",\"owner\":\"$dispatch_owner\",\"log\":\"$run_dir/reservation-$tid.log\"}" || true
+      continue
     fi
+    echo "actuation: dispatching $tid (batch=$batch_id base=$base_sha detached=${SINGULAR_DETACHED_DISPATCH:-0} reservation=$dispatch_owner@$dispatch_generation)"
+    singular_append_event "origin.dispatch" "origin dispatching task" \
+      "{\"runId\":\"$run_id\",\"taskId\":\"$tid\",\"batchId\":\"$batch_id\",\"baseSha\":\"$base_sha\",\"detached\":${SINGULAR_DETACHED_DISPATCH:-0},\"reservationOwner\":\"$dispatch_owner\",\"reservationGeneration\":$dispatch_generation}"
     (
       unset SINGULAR_ORIGIN_LOCK_CAPABILITY
       export SINGULAR_DISPATCH_BATCH_ID="$batch_id"
@@ -517,18 +518,28 @@ try:
     os.setsid()
 except OSError:
     pass
-os.execvp(sys.argv[1], sys.argv[1:])' "$SCRIPT_DIR/dispatch-wrap.sh" "$tid" "$l1_driver"
+os.execvp(sys.argv[1], sys.argv[1:])' "$SCRIPT_DIR/dispatch-wrap.sh" "$tid" "$l1_driver" "$dispatch_owner" "$dispatch_generation" "$batch_id"
       else
-        exec "$SCRIPT_DIR/dispatch-wrap.sh" "$tid" "$l1_driver"
+        exec "$SCRIPT_DIR/dispatch-wrap.sh" "$tid" "$l1_driver" "$dispatch_owner" "$dispatch_generation" "$batch_id"
       fi
     ) >"$dispatch_log" 2>&1 &
     dispatch_pid="$!"
+    if ! singular_lifecycle_dispatch_record_write "$tid" "$run_id" "$dispatch_pid" \
+        "$(singular_dispatch_pid_start "$dispatch_pid")" "$dispatch_log" "$base_sha" "$batch_id" \
+        "$dispatch_owner" "$dispatch_generation"; then
+      # The process has no attributable dispatch record. Stop only that child;
+      # leave the reservation failed and actionable rather than launching blind.
+      kill "$dispatch_pid" 2>/dev/null || true
+      singular_lifecycle_finish "$tid" "$dispatch_owner" "$dispatch_generation" "$batch_id" \
+        "dispatch-record-publication-failed" "retry after dispatch record publication is repaired" 2>/dev/null || true
+      wait "$dispatch_pid" 2>/dev/null || true
+      failed_dispatches=$((failed_dispatches + 1))
+      continue
+    fi
     dispatch_pids+=("$dispatch_pid")
     dispatch_tids+=("$tid")
     dispatch_logs+=("$dispatch_log")
     dispatch_starts+=("$(date +%s)")
-    singular_dispatch_record_write "$tid" "$run_id" "$dispatch_pid" \
-      "$(singular_dispatch_pid_start "$dispatch_pid")" "$dispatch_log" "$base_sha" "$batch_id"
   done
 
   # Ready work always launches before the planner is asked for more work. When

@@ -26,6 +26,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/lifecycle.sh"
 
 task_filter=""
 dry_run="no"
@@ -253,6 +254,16 @@ integration_decide() {
   printf '%s\n' "$out" | sed -n 's/^action=//p' | tail -1
 }
 
+integration_candidate_failed() {
+  local task="$1" head="$2" tree="$3" campaign="$4" failure="$5" target_head="$6" next="$7"
+  [[ "${candidate_lifecycle_enabled:-no}" == "yes" ]] || return 0
+  singular_lifecycle_candidate_failed "$task" "$head" "$tree" "$campaign" \
+    "$failure" "$target_head" "$next" || {
+      echo "refuse: could not preserve accepted candidate state for $task" >&2
+      return 1
+    }
+}
+
 # Push a branch to origin (no force). Secret-scans the outgoing range first; on a
 # non-fast-forward, fetches and retries once, else records and skips (no block).
 push_branch() {
@@ -342,6 +353,41 @@ for item in audit.get("evidenceReviewed", []):
 PY
 )"
   fi
+  candidate_lifecycle_enabled="no"
+  candidate_campaign_binding="$packet_campaign_binding"
+  if [[ "$integration_campaign_binding" == "legacy" && -z "$candidate_campaign_binding" ]]; then
+    candidate_campaign_binding="legacy"
+  fi
+  candidate_tree="$(git -C "$SINGULAR_ROOT" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
+  task_file="$SINGULAR_TASKS_DIR/$task_id.md"
+  if [[ -z "$candidate_tree" ]]; then
+    echo "skip $task_id: accepted candidate tree is unavailable"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  target_head="$(git -C "$SINGULAR_ROOT" rev-parse "$SINGULAR_TARGET_BRANCH" 2>/dev/null || true)"
+  if [[ -f "$task_file" ]]; then
+    candidate_lifecycle_enabled="yes"
+    if ! singular_lifecycle_retain_candidate "$task_id" "$packet" "$sidecar" "$task_file" \
+        "$run_packet" "$branch" "$head_sha" "$candidate_tree" "$candidate_campaign_binding" \
+        "$acceptance_mode" >/dev/null; then
+      echo "skip $task_id: accepted candidate lifecycle binding failed closed"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    candidate_check_rc=0
+    candidate_check_out="$(singular_lifecycle_candidate_check "$task_id" "$head_sha" \
+      "$candidate_tree" "$candidate_campaign_binding" "$target_head" 2>&1)" || candidate_check_rc=$?
+    if [[ "$candidate_check_rc" -eq 3 ]]; then
+      echo "skip $task_id: unchanged failed integration; action: $candidate_check_out"
+      skipped=$((skipped + 1))
+      continue
+    elif [[ "$candidate_check_rc" -ne 0 ]]; then
+      echo "skip $task_id: durable candidate authority mismatch ($candidate_check_out)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+  fi
   if [[ "$integration_campaign_binding" == "legacy" ]]; then
     [[ -n "$packet_campaign_binding" ]] || packet_campaign_binding="legacy"
     [[ -n "$lease_campaign_binding" ]] || lease_campaign_binding="legacy"
@@ -365,9 +411,9 @@ PY
         "accepted packet/audit campaign binding mismatch for $task_id" \
         "$task_id" "$branch" "re-audit-current-campaign" "origin" \
         "review exact head under the current campaign policy" "origin" || true
-      singular_lease_set_status "$task_id" "blocked" 2>/dev/null || true
-      task_file="$SINGULAR_TASKS_DIR/$task_id.md"
-      [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "blocked" || true
+      integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+        "$packet_campaign_binding" "campaign-mismatch" "$target_head" \
+        "re-audit the exact candidate under the current campaign" || exit 2
       singular_append_event "integration.campaign_mismatch" \
         "accepted work refused across campaign identity" \
         "$(python3 - "$run_id" "$task_id" "$integration_campaign_binding" \
@@ -400,9 +446,9 @@ PY
       "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "decide:escalate-parked" \
         --rationale "integration branch missing: $branch; restore the branch or supersede the imported packet" \
         --run "$run_id" --branch "$branch" --authority origin >/dev/null 2>&1 || true
-      singular_lease_set_status "$task_id" "blocked" 2>/dev/null || true
-      task_file="$SINGULAR_TASKS_DIR/$task_id.md"
-      [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "blocked" || true
+      integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+        "$packet_campaign_binding" "branch-missing" "$target_head" \
+        "restore the accepted branch or explicitly supersede the candidate" || exit 2
       singular_append_event "integration.parked" "accepted packet has no integration branch" \
         "$(python3 - "$run_id" "$task_id" "$branch" <<'PY'
 import json, sys
@@ -420,6 +466,9 @@ PY
     echo "skip $task_id: branch head $actual_head != packet headSha $head_sha"
     singular_record_recovery "branch advanced past audited headSha for $task_id" \
       "$task_id" "$branch" "request-human-decision" "origin" "re-audit at current head" "human"
+    integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "branch-head-changed" "$target_head" \
+      "restore the audited head or perform a fresh audit" || exit 2
     skipped=$((skipped + 1))
     continue
   fi
@@ -462,61 +511,16 @@ PY
     singular_append_event "integration.failed" "git lock unavailable" \
       "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"git-lock-timeout\"}"
     echo "FAILED $task_id: git lock unavailable; retrying next cycle"
+    integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "git-lock-timeout" "$target_head" \
+      "retry integration after the repository lock is available" || exit 2
     failed_integrations=$((failed_integrations + 1)); continue
   fi
-  # Opt-in rebase-and-regate (0.5.0, SINGULAR_INTEGRATE_REBASE=1, default 0):
-  # rebase the audited branch onto the target in its worktree, rerun the gate
-  # there, and retry the merge once. A green gate on the rebased tree
-  # substitutes for re-audit (the substitution is recorded as a decision).
-  # 0.4.0 had no path at all — any target drift terminally parked the task.
-  if [[ "$merge_ec" -ne 0 && "${SINGULAR_INTEGRATE_REBASE:-0}" == "1" && "${_rebased_once:-}" != "$task_id" ]]; then
-    rb_wt="$SINGULAR_WORKTREES_DIR/$task_id"
-    rb_ok="no"
-    if [[ -d "$rb_wt" && -z "$(git -C "$rb_wt" status --porcelain 2>/dev/null)" ]]; then
-      singular_append_event "integration.rebase_started" "rebase-and-regate attempt" \
-        "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"branch\":\"$branch\"}"
-      if git -C "$rb_wt" rebase "$SINGULAR_TARGET_BRANCH" >/dev/null 2>&1; then
-        rb_gate_ec=0
-        singular_run_in_worktree_env "$rb_wt" "$SCRIPT_DIR/gate-check.sh" "$run_id-rebase-$task_id" \
-          --task-id "$task_id" --phase integration --workspace-kind integration -- \
-          "$(singular_bash_bin)" -c "$gate_cmd" \
-          >/dev/null 2>&1 || rb_gate_ec=$?
-        if [[ "$rb_gate_ec" -eq 0 ]]; then
-          rb_old_head="$actual_head"
-          actual_head="$(git -C "$rb_wt" rev-parse HEAD)"
-          "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "integrate-rebased" \
-            --rationale "rebased $rb_old_head -> $actual_head onto $SINGULAR_TARGET_BRANCH; gate green on rebased tree substitutes for re-audit (SINGULAR_INTEGRATE_REBASE)" \
-            --run "$run_id" --branch "$branch" --authority origin 2>/dev/null || true
-          singular_append_event "integration.rebased" "audited branch rebased and re-gated" \
-            "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"oldHead\":\"$rb_old_head\",\"newHead\":\"$actual_head\"}"
-          echo "  rebase-and-regate: $rb_old_head -> $actual_head (gate green); retrying merge"
-          rb_ok="yes"
-        else
-          git -C "$rb_wt" rebase --abort 2>/dev/null || true
-          git -C "$rb_wt" reset --hard "$actual_head" >/dev/null 2>&1 || true
-          echo "  rebase-and-regate: gate RED on rebased tree; restored $actual_head"
-        fi
-      else
-        git -C "$rb_wt" rebase --abort 2>/dev/null || true
-        echo "  rebase-and-regate: rebase conflicted; aborted"
-      fi
-    else
-      echo "  rebase-and-regate: worktree missing or dirty; skipping"
-    fi
-    if [[ "$rb_ok" == "yes" ]]; then
-      merge_ec=0
-      _rebased_once="$task_id"
-      if singular_git_lock_acquire; then
-        git -C "$SINGULAR_ROOT" merge --no-ff --no-commit "$actual_head" >/dev/null 2>&1 || merge_ec=$?
-        if [[ "$merge_ec" -ne 0 ]]; then
-          git -C "$SINGULAR_ROOT" diff --name-only --diff-filter=U >"$run_dir/conflict-$task_id.log" 2>/dev/null || true
-          git -C "$SINGULAR_ROOT" merge --abort 2>/dev/null || true
-        fi
-        singular_git_lock_release
-      else
-        merge_ec=1
-      fi
-    fi
+  # An integration conflict must not rewrite an already-audited branch in
+  # place. A rebase creates a new candidate identity and requires an explicit
+  # repair attempt plus fresh audit before this entrypoint can consume it.
+  if [[ "$merge_ec" -ne 0 && "${SINGULAR_INTEGRATE_REBASE:-0}" == "1" ]]; then
+    echo "  rebase-and-regate refused: accepted candidate requires a fresh repair/audit lifecycle"
   fi
   if [[ "$merge_ec" -ne 0 ]]; then
     action="$(integration_decide "integration-conflict" "$task_id" "$branch" "$run_dir/conflict-$task_id.log")"
@@ -528,6 +532,9 @@ PY
     singular_append_event "integration.failed" "integration merge conflict" \
       "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"conflict\",\"action\":\"${action:-escalate-parked}\",\"note\":\"rebase not attempted or failed (SINGULAR_INTEGRATE_REBASE)\"}"
     echo "FAILED $task_id: merge conflict (decider: ${action:-escalate-parked}; rebase not attempted or failed)"
+    integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "integration-conflict" "$target_head" \
+      "repair the conflict in a new attempt and obtain a fresh audit" || exit 2
     failed_integrations=$((failed_integrations + 1)); continue
   fi
 
@@ -639,6 +646,9 @@ PY
     singular_append_event "integration.failed" "integration gate workspace setup failed" \
       "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"$integration_gate_setup_reason\"}"
     echo "FAILED $task_id: exact-tree integration gate setup failed ($integration_gate_setup_reason)"
+    integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "gate-setup-$integration_gate_setup_reason" "$target_head" \
+      "retry after the integration gate workspace is available" || exit 2
     failed_integrations=$((failed_integrations + 1))
     continue
   fi
@@ -671,6 +681,9 @@ PY
     singular_append_event "integration.failed" "integration gate red" \
       "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"gate-red\",\"exitCode\":$gate_ec,\"action\":\"${action:-escalate-parked}\"}"
     echo "FAILED $task_id: post-merge gate red (decider: ${action:-escalate-parked})"
+    integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "gate-red" "$target_head" \
+      "correct the candidate or change a gate dependency before retrying" || exit 2
     failed_integrations=$((failed_integrations + 1))
     continue
   fi
@@ -765,6 +778,9 @@ PY
     singular_append_event "integration.failed" "exact-tree integration finalization failed" \
       "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"$finalize_reason\"}"
     echo "FAILED $task_id: exact-tree integration finalization failed ($finalize_reason)"
+    integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "finalize-$finalize_reason" "$target_head" \
+      "retry after integration finalization infrastructure is repaired" || exit 2
     failed_integrations=$((failed_integrations + 1))
     if [[ -n "$merge_commit" ]]; then
       echo "refuse: committed integration identity mismatch requires operator recovery" >&2
@@ -808,7 +824,15 @@ PY
     --run "$run_id" --branch "$branch" --authority origin || true
   singular_append_event "integration.integrated" "branch integrated" \
     "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"branch\":\"$branch\",\"headSha\":\"$actual_head\",\"mergeCommit\":\"$merge_commit\",\"target\":\"$SINGULAR_TARGET_BRANCH\"}"
-  singular_lease_set_status "$task_id" "integrated" 2>/dev/null || true
+  if [[ "$candidate_lifecycle_enabled" == "yes" ]]; then
+    singular_lifecycle_candidate_integrated "$task_id" "$head_sha" "$candidate_tree" \
+      "$packet_campaign_binding" "$merge_commit" || {
+        echo "refuse: merge committed but durable candidate finalization failed for $task_id" >&2
+        exit 2
+      }
+  else
+    singular_lease_set_status "$task_id" "integrated" 2>/dev/null || true
+  fi
   task_file="$SINGULAR_TASKS_DIR/$task_id.md"
   [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "integrated" || true
   integrated_this_run=$((integrated_this_run + 1))

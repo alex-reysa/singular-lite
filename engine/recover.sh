@@ -16,6 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/lifecycle.sh"
 
 mode="scan"
 case "${1:-}" in
@@ -66,18 +67,29 @@ PY
     case "$status" in running|planned|needs-review) ;; *) continue ;; esac
 
     task_file="$SINGULAR_TASKS_DIR/$task_id.md"
-    task_status=""
-    if [[ -f "$task_file" ]]; then
-      task_status="$(singular_task_field "$task_file" status 2>/dev/null || true)"
+    # Markdown status is a queue projection, not ownership or acceptance
+    # authority. A stale edit must never close another process's reservation.
+    if python3 - "$lease" <<'PY' >/dev/null 2>&1
+import json, sys
+c = json.load(open(sys.argv[1], encoding="utf-8")).get("acceptedCandidate")
+assert isinstance(c, dict) and c.get("state") != "integrated"
+PY
+    then
+      echo "recover: retained accepted candidate $task_id; action: integrate or authorize repair"
+      continue
     fi
-    case "$task_status" in
-      integrated|accepted|failed|blocked|cancelled|superseded|stale)
-        singular_lease_set_status "$task_id" "$task_status" || true
-        echo "recover: closed stale lease $task_id from task status $task_status"
+    if [[ -z "$(singular_json_field "$lease" reservationGeneration 2>/dev/null || true)" ]] \
+        && [[ "$(singular_task_field "$task_file" status 2>/dev/null || true)" == "integrated" ]] \
+        && find "$SINGULAR_ORCH_DIR/packets/imported/$task_id" -maxdepth 1 \
+          -name '*.json' -not -name '*.audit.json' -type f 2>/dev/null | grep -q .; then
+      legacy_sha="$(singular_sha256_file "$lease")"
+      if singular_lifecycle_legacy_finish "$task_id" "$legacy_sha" integrated \
+          "legacy-integrated-projection" "none"; then
+        echo "recover: closed stale lease $task_id from task status integrated"
         actions=$((actions + 1))
         continue
-        ;;
-    esac
+      fi
+    fi
 
     # Skip if a packet for this run is queued for import or already imported.
     if [[ -n "$run_id" && -f "$SINGULAR_INBOX_DIR/$run_id.json" ]]; then
@@ -109,6 +121,40 @@ PY
     fast_stale="no"
     tree_alive="unknown"
     drec="$(singular_dispatch_record_path "$task_id")"
+    reservation_owner="$(singular_json_field "$drec" reservationOwner 2>/dev/null || true)"
+    reservation_generation="$(singular_json_field "$drec" reservationGeneration 2>/dev/null || true)"
+    reservation_batch="$(singular_json_field "$drec" batchId 2>/dev/null || true)"
+    if [[ ! -f "$drec" || -z "$reservation_owner" \
+        || ! "$reservation_generation" =~ ^[1-9][0-9]*$ ]]; then
+      if [[ "$lease_age_min" -ge "$stale_minutes" ]]; then
+        if [[ -z "$(singular_json_field "$lease" reservationGeneration 2>/dev/null || true)" ]]; then
+          # Upgrade compatibility: compare-and-set the exact legacy bytes. This
+          # cannot authorize a generated reservation and never creates candidate
+          # acceptance. A one-way integrated projection additionally requires a
+          # retained imported record so Markdown alone is insufficient.
+          legacy_sha="$(singular_sha256_file "$lease")"
+          dec_out="$("$recovery_decider" --task "$task_id" --failure-class "stale-lease" \
+            --branch "$branch" --run "${run_id:-RECOVER}" --worktree "$SINGULAR_ROOT" 2>/dev/null || true)"
+          action="$(printf '%s\n' "$dec_out" | sed -n 's/^action=//p' | tail -1)"
+          [[ -n "$action" ]] || action="escalate-parked"
+          if singular_lifecycle_legacy_finish "$task_id" "$legacy_sha" failed \
+              "stale-legacy-lease" "apply recovery decision $action"; then
+            case "$action" in
+              retry|rerun-tests|rebuild-context|revalidate-evidence)
+                [[ -f "$task_file" ]] && singular_task_set_status "$task_file" ready || true ;;
+            esac
+            singular_append_event "recover.stale_retry_preserved" \
+              "legacy stale lease CAS preserved product budget" \
+              "{\"taskId\":\"$task_id\",\"runId\":\"${run_id:-}\",\"action\":\"$action\",\"leaseStatus\":\"failed\",\"productBudgetPreserved\":true,\"legacyCasSha256\":\"$legacy_sha\"}" || true
+            echo "recover: preserved stale lease $task_id as failed/recoverable for retry (decider: $action)"
+            actions=$((actions + 1))
+          fi
+        else
+          echo "recover: $task_id is stale but lacks owner-bound dispatch authority; action: inspect and explicitly supersede or rebind"
+        fi
+      fi
+      continue
+    fi
     if [[ -f "$drec" && ! -f "$(singular_dispatch_exit_path "$task_id")" ]] \
       && [[ "$(singular_json_field "$drec" state 2>/dev/null || true)" == "launched" ]]; then
       dpid="$(singular_json_field "$drec" pid 2>/dev/null || true)"
@@ -138,30 +184,35 @@ PY
       # the task dispatchable.  The lease is the durable product-budget and
       # lineage record: deleting it used to mint a fresh initial pass after
       # every crash. cancel/supersede remain terminal; otherwise park as stale.
-      singular_lease_set_status "$task_id" "stale" || true
-      if [[ "$fast_stale" == "yes" ]]; then
-        # Close out the dispatch record here so the reconcile reaper does not
-        # re-count the same crash on its next pass.
-        singular_dispatch_record_finalize "$task_id" "-1" "crashed" || true
-      fi
       dec_out="$("$recovery_decider" --task "$task_id" --failure-class "stale-lease" \
         --branch "$branch" --run "${run_id:-RECOVER}" --worktree "$SINGULAR_ROOT" 2>/dev/null || true)"
       action="$(printf '%s\n' "$dec_out" | sed -n 's/^action=//p' | tail -1)"
       [[ -n "$action" ]] || action="escalate-parked"
+      if ! singular_lifecycle_finish "$task_id" "$reservation_owner" \
+          "$reservation_generation" "$reservation_batch" "stale-lease" \
+          "apply recovery decision $action"; then
+        echo "recover: owner changed for $task_id; stale recovery suppressed"
+        continue
+      fi
+      if [[ "$fast_stale" == "yes" ]]; then
+        # Close out only the dispatch generation whose dead tree was observed.
+        singular_lifecycle_dispatch_finalize "$task_id" "-1" "crashed" \
+          "$reservation_owner" "$reservation_generation" || true
+      fi
       case "$action" in
         retry|rerun-tests|rebuild-context|revalidate-evidence)
-          if singular_lease_set_status "$task_id" "failed"; then
-            [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "ready" || true
-            singular_append_event "recover.stale_retry_preserved" \
-              "stale lease made recoverable without resetting product budget" \
-              "{\"taskId\":\"$task_id\",\"runId\":\"${run_id:-}\",\"action\":\"$action\",\"leaseStatus\":\"failed\",\"productBudgetPreserved\":true}" \
-              || true
-            echo "recover: preserved stale lease $task_id as failed/recoverable for retry (decider: $action)"
-          else
-            echo "recover: could not preserve stale lease $task_id; leaving task non-ready" >&2
-          fi ;;
-        cancel)    singular_lease_set_status "$task_id" "cancelled" || true; echo "recover: cancelled stale $task_id" ;;
-        supersede) singular_lease_set_status "$task_id" "superseded" || true; echo "recover: superseded stale $task_id" ;;
+          [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "ready" || true
+          singular_append_event "recover.stale_retry_preserved" \
+            "owner-bound stale lease made recoverable without resetting product budget" \
+            "{\"taskId\":\"$task_id\",\"runId\":\"${run_id:-}\",\"action\":\"$action\",\"leaseStatus\":\"failed\",\"productBudgetPreserved\":true,\"reservationOwner\":\"$reservation_owner\",\"reservationGeneration\":$reservation_generation}" \
+            || true
+          echo "recover: preserved stale lease $task_id as failed/recoverable for retry (decider: $action)" ;;
+        cancel)
+          [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "cancelled" || true
+          echo "recover: cancelled stale $task_id" ;;
+        supersede)
+          [[ -f "$task_file" ]] && singular_task_set_status "$task_file" "superseded" || true
+          echo "recover: superseded stale $task_id" ;;
         *)         echo "recover: parked stale lease $task_id (decider: $action)" ;;
       esac
       actions=$((actions + 1))
@@ -187,11 +238,20 @@ if [[ -d "$SINGULAR_WORKTREES_DIR" ]]; then
     task_id="$(basename "$wt")"
     status="$(singular_lease_status "$task_id" 2>/dev/null || echo none)"
     case "$status" in
-      running|planned|needs-review)
-        # Active; leave it alone.
+      running|planned|needs-review|accepted|integration-failed)
+        # Active and accepted worktrees are not orphan cleanup targets. An
+        # accepted branch remains useful across failed integration and restart.
         continue
         ;;
     esac
+    if python3 - "$(singular_lease_path "$task_id")" <<'PY' >/dev/null 2>&1
+import json, sys
+c = json.load(open(sys.argv[1], encoding="utf-8")).get("acceptedCandidate")
+assert isinstance(c, dict) and c.get("state") != "integrated"
+PY
+    then
+      continue
+    fi
     # Report-once (0.5.0): the field run printed the same ~40 orphaned
     # worktrees on every reconcile cycle for days. Track first/last sight in
     # recover-orphans.json and echo only new paths or status changes.

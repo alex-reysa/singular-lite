@@ -15,30 +15,40 @@ fi
 # can attribute the outcome out-of-process. If the driver died before reaching
 # its own lease lifecycle (e.g. a preflight failure while a reconcile pre-lease
 # is still 'planned'), the lease is backstopped to 'failed' so it stops
-# consuming a concurrency slot. usage: dispatch-wrap.sh <task_id> <driver>
+# consuming a concurrency slot. usage:
+# dispatch-wrap.sh <task_id> <driver> <reservation_owner> <generation> <batch>
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/lifecycle.sh"
 
 task_id="$1"
 driver="$2"
+reservation_owner="${3:-}"
+reservation_generation="${4:-}"
+reservation_batch="${5:-}"
+
+if [[ -z "$reservation_owner" || ! "$reservation_generation" =~ ^[1-9][0-9]*$ ]]; then
+  echo "dispatch-wrap: owner and generation are required; refusing unattributed launch" >&2
+  exit 2
+fi
 
 rc=0
-"$driver" "$task_id" || rc=$?
-singular_dispatch_exit_write "$task_id" "$rc"
-lease_status="$(singular_lease_status "$task_id" 2>/dev/null || true)"
-if [[ "$lease_status" == "planned" ]]; then
-  # The driver never took lease ownership (it overwrites the pre-lease to
-  # 'running' at startup): preflight refusal, STOP-frozen no-op exit 0, or a
-  # crash before the lease write. Clear the reconcile pre-lease so the task
-  # stops holding a concurrency slot.
-  rm -f "$(singular_lease_path "$task_id")"
-elif [[ "$rc" -ne 0 && "$lease_status" == "running" ]]; then
-  # Nonzero exit with the lease still 'running' means the driver died without
-  # its EXIT trap (e.g. SIGKILL); mark it failed so the slot frees now instead
-  # of after the stale-lease window.
-  singular_lease_set_status "$task_id" "failed" 2>/dev/null || true
+SINGULAR_RESERVATION_OWNER="$reservation_owner" \
+SINGULAR_RESERVATION_GENERATION="$reservation_generation" \
+  "$driver" "$task_id" || rc=$?
+
+if [[ "$rc" -eq 0 ]]; then
+  finish_reason="driver-returned-with-active-lease"
+  finish_next="inspect publication state, then retry only if no accepted candidate exists"
+else
+  finish_reason="driver-exit-$rc"
+  finish_next="classify the bounded failure before retrying"
 fi
+singular_lifecycle_finish "$task_id" "$reservation_owner" "$reservation_generation" \
+  "$reservation_batch" "$finish_reason" "$finish_next" 2>/dev/null || true
+singular_lifecycle_exit_write "$task_id" "$rc" "$reservation_owner" \
+  "$reservation_generation" 2>/dev/null || true
 
 # Detached workers finish outside reconcile's process tree. Without a wakeup,
 # the newly free slot is invisible until autonomate's next polling interval,
