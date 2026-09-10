@@ -71,6 +71,7 @@ singular_lifecycle_dispatch_finalize() {
 singular_lifecycle_reap_dispatches() {
   local run_id="$1" reaped_ok=0 reaped_failures=0 reaped_refused=0 reaped_terminal=0 workers_running=0
   local record tid state pid pid_start pgid rec_run ec owner generation batch outcome exit_data
+  local finish_reason finish_next
   if [[ -d "$SINGULAR_DISPATCH_DIR" ]]; then
     for record in "$SINGULAR_DISPATCH_DIR"/*.json; do
       [[ -f "$record" ]] || continue
@@ -131,6 +132,18 @@ singular_lifecycle_reap_dispatches() {
           3) outcome="terminal"; reaped_terminal=$((reaped_terminal + 1)) ;;
           *) outcome="failed"; reaped_failures=$((reaped_failures + 1)) ;;
         esac
+        if [[ "$ec" -eq 0 ]]; then
+          finish_reason="driver-returned-with-active-lease"
+          finish_next="inspect publication state, then retry only if no accepted candidate exists"
+        else
+          finish_reason="driver-exit-$ec"
+          finish_next="classify the bounded failure before retrying"
+        fi
+        # The wrapper normally performs this transition. Repeating it here is
+        # idempotent and closes the narrow spawn/record publication race where
+        # a very fast wrapper could not yet verify its dispatch record.
+        singular_lifecycle_finish "$tid" "$owner" "$generation" "$batch" \
+          "$finish_reason" "$finish_next" 2>/dev/null || true
         singular_lifecycle_dispatch_finalize "$tid" "$ec" "$outcome" "$owner" "$generation" || continue
         singular_append_event "origin.dispatch_reaped" "dispatch reaped" \
           "{\"runId\":\"$run_id\",\"taskId\":\"$tid\",\"exitCode\":$ec,\"outcome\":\"$outcome\",\"reservationOwner\":\"$owner\",\"reservationGeneration\":$generation}"
