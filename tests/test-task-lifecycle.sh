@@ -94,6 +94,7 @@ cat >"$SINGULAR_TASKS_DIR/$task.md" <<'EOF'
 # TASK-0001: lifecycle fixture
 
 Status: accepted
+Gate command: `bash lifecycle-gate.sh`
 EOF
 packet="$SINGULAR_ORCH_DIR/packets/imported/$task/RUN-ACCEPT.json"
 audit="$SINGULAR_ORCH_DIR/packets/imported/$task/RUN-ACCEPT.audit.json"
@@ -101,8 +102,33 @@ cat >"$packet" <<'EOF'
 {"taskId":"TASK-0001","runId":"RUN-ACCEPT","branch":"agent/test/TASK-0001","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"accepted"}
 EOF
 cat >"$audit" <<'EOF'
-{"taskId":"TASK-0001","runId":"RUN-ACCEPT","branch":"agent/test/TASK-0001","verdict":"accepted"}
+{"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-0001","runId":"RUN-ACCEPT","branch":"agent/test/TASK-0001","verdict":"accepted"}
 EOF
+verification_run="$SINGULAR_RUNS_DIR/RUN-ACCEPT"
+mkdir -p "$verification_run"
+cp "$SINGULAR_TASKS_DIR/$task.md" "$verification_run/verification-task-contract-1.md"
+printf '%s\n' '{"campaign":"campaign:test","policy":"campaign:test"}' \
+  >"$verification_run/verification-policy-1.json"
+printf 'lifecycle fixture host gate passed\n' >"$verification_run/gate.log"
+python3 "$SCRIPT_DIR/gate-report.py" create-verification-request \
+  --output "$verification_run/verification-request-1.json" --task-id "$task" \
+  --run-id RUN-ACCEPT --attempt 1 \
+  --head-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --tree-sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --campaign campaign:test \
+  --task-contract "$verification_run/verification-task-contract-1.md" \
+  --policy-contract "$verification_run/verification-policy-1.json" \
+  --suite-id task-contract-gate >/dev/null
+python3 "$SCRIPT_DIR/gate-report.py" create \
+  --output "$verification_run/audit-verification.json" --task-id "$task" \
+  --run-id RUN-ACCEPT --head-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --command 'bash lifecycle-gate.sh' --exit-code 0 --log "$verification_run/gate.log" \
+  --phase audit-verification --workspace-kind disposable --integrity-status verified >/dev/null
+python3 "$SCRIPT_DIR/gate-report.py" bind-verification-result \
+  --request "$verification_run/verification-request-1.json" \
+  --report "$verification_run/audit-verification.json" \
+  --task-contract "$verification_run/verification-task-contract-1.md" \
+  --policy-contract "$verification_run/verification-policy-1.json"
 singular_lifecycle_retain_candidate "$task" "$packet" "$audit" "$SINGULAR_TASKS_DIR/$task.md" \
   RUN-ACCEPT agent/test/TASK-0001 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test accepted >/dev/null

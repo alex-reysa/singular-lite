@@ -26,6 +26,31 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$verification_task_contract" && -z "$verification_request" ]]; then
+  canonical_task_contract="$SINGULAR_TASKS_DIR/$task_id.md"
+  if ! python3 - "$verification_task_contract" "$canonical_task_contract" "$task_id" <<'PY'
+import pathlib
+import re
+import sys
+
+provided, canonical, task_id = map(str, sys.argv[1:4])
+provided_path = pathlib.Path(provided).resolve()
+canonical_path = pathlib.Path(canonical).resolve()
+if provided_path != canonical_path or not provided_path.is_file():
+    raise SystemExit("gate-check: task contract is not the canonical task record")
+text = provided_path.read_text(encoding="utf-8")
+match = re.search(r"^#\s+(TASK-[0-9]{4,})(?::|\s|$)", text, re.MULTILINE)
+if not match or match.group(1) != task_id:
+    raise SystemExit("gate-check: task contract identity mismatch")
+PY
+  then
+    exit 2
+  fi
+  export SINGULAR_TEST_TASK_CONTRACT="$verification_task_contract"
+  export SINGULAR_TEST_TASK_ID="$task_id"
+  export SINGULAR_TEST_TASKS_DIR="$SINGULAR_TASKS_DIR"
+fi
+
 trusted_gate_command=""
 verification_expected_head=""
 verification_expected_tree=""
@@ -291,6 +316,13 @@ if [[ -n "$verification_request" ]]; then
     --request "$verification_request" --report "$report" \
     --task-contract "$verification_task_contract" \
     --policy-contract "$verification_policy_contract" || exit 20
+  python3 "$SCRIPT_DIR/gate-report.py" verify-verification-result \
+    --request "$verification_request" --report "$report" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" \
+    --expected-task "$task_id" --expected-run "$run_id" \
+    --expected-head "$verification_expected_head" \
+    --expected-tree "$verification_expected_tree" || exit 20
 fi
 
 cp "$report" "$summary"

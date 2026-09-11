@@ -8,7 +8,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 state="$tmp/state"
 tasks="$tmp/tasks"
-mkdir -p "$state/leases" "$tasks" "$tmp/orchestration"
+mkdir -p "$state/leases" "$state/runs" "$tasks" "$tmp/orchestration"
 lease="$state/leases/TASK-1107.json"
 task="$tasks/TASK-1107.md"
 packet="$tmp/RUN-OLD.json"
@@ -21,13 +21,46 @@ cat >"$task" <<'MD'
 # TASK-1107 fixture
 Gate command: `bash tests/run.sh test-candidate-recovery.sh`
 MD
+make_synthetic_verification() {
+  local fixture_run="$1" fixture_head="$2" fixture_tree="$3"
+  local run_path="$state/runs/$fixture_run"
+  local request_path="$run_path/verification-request-1.json"
+  local task_snapshot="$run_path/verification-task-contract-1.md"
+  local policy_path="$run_path/verification-policy-1.json"
+  local report_path="$run_path/audit-verification.json"
+  mkdir -p "$run_path"
+  cp "$task" "$task_snapshot"
+  printf '%s\n' '{"campaign":"legacy","policy":"legacy"}' >"$policy_path"
+  printf 'synthetic host gate passed\n' >"$run_path/gate.log"
+  python3 "$ROOT/engine/gate-report.py" create-verification-request \
+    --output "$request_path" --task-id TASK-1107 --run-id "$fixture_run" \
+    --attempt 1 --head-sha "$fixture_head" --tree-sha "$fixture_tree" \
+    --campaign legacy --task-contract "$task_snapshot" \
+    --policy-contract "$policy_path" --suite-id task-contract-gate >/dev/null
+  python3 "$ROOT/engine/gate-report.py" create --output "$report_path" \
+    --task-id TASK-1107 --run-id "$fixture_run" --head-sha "$fixture_head" \
+    --command 'bash tests/run.sh test-candidate-recovery.sh' --exit-code 0 \
+    --log "$run_path/gate.log" --phase audit-verification \
+    --workspace-kind disposable --integrity-status verified >/dev/null
+  python3 "$ROOT/engine/gate-report.py" bind-verification-result \
+    --request "$request_path" --report "$report_path" \
+    --task-contract "$task_snapshot" --policy-contract "$policy_path"
+}
 cat >"$packet" <<JSON
 {"taskId":"TASK-1107","runId":"RUN-OLD","branch":"agent/old","headSha":"$old_head","status":"accepted"}
 JSON
 cat >"$audit" <<'JSON'
-{"taskId":"TASK-1107","runId":"RUN-OLD","branch":"agent/old","verdict":"accepted"}
+{"schema":"singular.orchestration.audit-verdict.v1","taskId":"TASK-1107","runId":"RUN-OLD","branch":"agent/old","verdict":"accepted"}
 JSON
-python3 "$ROOT/engine/task_lifecycle.py" retain-candidate --lease "$lease" \
+make_synthetic_verification RUN-OLD "$old_head" "$old_tree"
+if SINGULAR_RUNS_DIR="$state/runs" python3 "$ROOT/engine/task_lifecycle.py" retain-candidate \
+    --lease "$lease" --packet "$packet" --audit "$audit" --task-file "$task" \
+    --task TASK-1107 --run RUN-OLD --branch agent/old --head "$old_head" \
+    --tree "$old_tree" --campaign campaign:relabeled \
+    --acceptance-mode accepted >/dev/null 2>&1; then
+  fail "direct retention relabeled a legacy verification tuple into another campaign"
+fi
+SINGULAR_RUNS_DIR="$state/runs" python3 "$ROOT/engine/task_lifecycle.py" retain-candidate --lease "$lease" \
   --packet "$packet" --audit "$audit" --task-file "$task" --task TASK-1107 \
   --run RUN-OLD --branch agent/old --head "$old_head" --tree "$old_tree" \
   --campaign legacy --acceptance-mode accepted >/dev/null
@@ -157,7 +190,7 @@ cat >"$tmp/RUN-REPAIR.json" <<JSON
 {"taskId":"TASK-1107","runId":"RUN-REPAIR","branch":"agent/repair","headSha":"$new_head","status":"accepted"}
 JSON
 cat >"$tmp/RUN-REPAIR.audit.json" <<'JSON'
-{"taskId":"TASK-1107","runId":"RUN-REPAIR","branch":"agent/repair","verdict":"needs-fix"}
+{"schema":"singular.orchestration.audit-verdict.v1","taskId":"TASK-1107","runId":"RUN-REPAIR","branch":"agent/repair","verdict":"needs-fix"}
 JSON
 if python3 "$ROOT/engine/task_lifecycle.py" retain-candidate --lease "$lease" \
     --packet "$tmp/RUN-REPAIR.json" --audit "$tmp/RUN-REPAIR.audit.json" \
@@ -170,7 +203,8 @@ python3 - "$tmp/RUN-REPAIR.audit.json" <<'PY'
 import json, sys
 p=sys.argv[1]; d=json.load(open(p)); d["verdict"]="accepted"; json.dump(d,open(p,"w"))
 PY
-python3 "$ROOT/engine/task_lifecycle.py" retain-candidate --lease "$lease" \
+make_synthetic_verification RUN-REPAIR "$new_head" "$new_tree"
+SINGULAR_RUNS_DIR="$state/runs" python3 "$ROOT/engine/task_lifecycle.py" retain-candidate --lease "$lease" \
   --packet "$tmp/RUN-REPAIR.json" --audit "$tmp/RUN-REPAIR.audit.json" \
   --task-file "$task" --task TASK-1107 --run RUN-REPAIR --branch agent/repair \
   --head "$new_head" --tree "$new_tree" --campaign legacy \
@@ -202,6 +236,23 @@ JSON
 auth_id="$(python3 "$ROOT/engine/task_lifecycle.py" authorize-recovery --lease "$lease" \
   --authority "$tmp/regate.json" --task-contract "$task" --expected-task TASK-1107 \
   --expected-campaign legacy --expected-policy legacy)"
+# Capacity is checked again at execution because limits can change after an
+# authority is issued.
+python3 - "$lease" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["regate"]=1
+json.dump(d, open(p,"w"))
+PY
+if python3 "$ROOT/engine/task_lifecycle.py" claim-recovery --lease "$lease" \
+    --authorization-id "$auth_id" --action regate --head "$new_head" \
+    --tree "$new_tree" --campaign legacy --run RUN-REGATE >/dev/null 2>&1; then
+  fail "regate launched after its execution ceiling was reached"
+fi
+python3 - "$lease" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["regate"]=3
+json.dump(d, open(p,"w"))
+PY
 cp "$tmp/regate.json" "$tmp/regate.pristine.json"
 printf ' ' >>"$tmp/regate.json"
 if python3 "$ROOT/engine/task_lifecycle.py" claim-recovery --lease "$lease" \
@@ -221,6 +272,21 @@ mv "$tmp/task.pristine.md" "$task"
 python3 "$ROOT/engine/task_lifecycle.py" claim-recovery --lease "$lease" \
   --authorization-id "$auth_id" --action regate --head "$new_head" \
   --tree "$new_tree" --campaign legacy --run RUN-REGATE >/dev/null
+python3 - "$lease" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["regate"]=1
+json.dump(d, open(p,"w"))
+PY
+if python3 "$ROOT/engine/task_lifecycle.py" claim-recovery --lease "$lease" \
+    --authorization-id "$auth_id" --action regate --head "$new_head" \
+    --tree "$new_tree" --campaign legacy --run RUN-REGATE >/dev/null 2>&1; then
+  fail "claimed crash-resume replay bypassed its execution ceiling"
+fi
+python3 - "$lease" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["regate"]=3
+json.dump(d, open(p,"w"))
+PY
 # The exact same claim is resumable after a crash before gate publication;
 # changed identities still cannot steal it.
 python3 "$ROOT/engine/task_lifecycle.py" claim-recovery --lease "$lease" \
@@ -314,10 +380,9 @@ JSON
 cat >"$repo/recovery-gate.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ -z "${GATE_RUN_COUNTER:-}" ]] || printf 'gate\n' >>"$GATE_RUN_COUNTER"
 failure=""
 [[ "${FORCE_GATE_RED:-0}" != 1 ]] || failure="forced regate failure"
-[[ ! -e app1.txt || "$(cat app1.txt)" == "fixed-one" ]] || failure="app1 behavior failure"
-[[ ! -e app2.txt || "$(cat app2.txt)" == "fixed-two" ]] || failure="app2 behavior failure"
 if [[ -n "$failure" ]]; then
   printf '{"schema":"singular.orchestration.gate-observation.v0","failures":[{"signature":"recovery:behavior","title":"%s"}]}\n' "$failure" >"$SINGULAR_GATE_REPORT_FILE"
   echo "AssertionError: $failure" >&2
@@ -370,21 +435,46 @@ real_env=(env -i PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
   SINGULAR_CONFIG_FILE=/dev/null SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
   SINGULAR_AUTO_PROMOTE_GATES=0 SINGULAR_PUSH=0)
 
+make_bound_verification() {
+  local fixture_run="$1" fixture_task="$2" fixture_head="$3" fixture_worktree="$4"
+  local fixture_tree run_path request_path task_snapshot policy_path
+  fixture_tree="$(git -C "$fixture_worktree" rev-parse "$fixture_head^{tree}")"
+  run_path="$real_state/runs/$fixture_run"
+  request_path="$run_path/verification-request-1.json"
+  task_snapshot="$run_path/verification-task-contract-1.md"
+  policy_path="$run_path/verification-policy-1.json"
+  mkdir -p "$run_path"
+  cp "$orch/tasks/$fixture_task.md" "$task_snapshot"
+  printf '%s\n' '{"campaign":"legacy","policy":"legacy"}' >"$policy_path"
+  python3 "$ROOT/engine/gate-report.py" create-verification-request \
+    --output "$request_path" --task-id "$fixture_task" --run-id "$fixture_run" \
+    --attempt 1 --head-sha "$fixture_head" --tree-sha "$fixture_tree" \
+    --campaign legacy --task-contract "$task_snapshot" \
+    --policy-contract "$policy_path" --suite-id task-contract-gate >/dev/null
+  (cd "$fixture_worktree" && "${real_env[@]}" SINGULAR_ROOT="$fixture_worktree" \
+    "$ROOT/engine/gate-check.sh" "$fixture_run" \
+    --verification-request "$request_path" --task-contract "$task_snapshot" \
+    --policy-contract "$policy_path") >/dev/null
+  mv "$run_path/gate-report.json" "$run_path/audit-verification.json"
+}
+
 git -C "$repo" checkout -qb agent/regate
 printf 'fixed-one\n' >"$repo/app1.txt"
 git -C "$repo" add app1.txt
 git -C "$repo" commit -qm regate-candidate
 regate_head="$(git -C "$repo" rev-parse HEAD)"
+make_bound_verification RUN-REGATE-OLD TASK-1201 "$regate_head" "$repo"
 git -C "$repo" checkout -q target
 cat >"$orch/packets/imported/TASK-1201/RUN-REGATE-OLD.json" <<JSON
-{"schema":"singular.orchestration.state-packet.v0","packetId":"RUN-REGATE-OLD","runId":"RUN-REGATE-OLD","taskId":"TASK-1201","area":"brain","role":"l2-developer","status":"accepted","baseRef":"target","branch":"agent/regate","headSha":"$regate_head","workspace":"$repo","ownedFiles":["app1.txt"],"changedFiles":["app1.txt"],"commands":[{"cmd":"bash recovery-gate.sh","exitCode":0}],"tests":[{"name":"fixture","phase":"regression","status":"passed"}],"evidence":[{"kind":"test","ref":"fixture"}],"blockers":[],"nextAction":"integrate","createdAt":"2026-09-11T00:00:00Z"}
+{"schema":"singular.orchestration.state-packet.v0","packetId":"RUN-REGATE-OLD","runId":"RUN-REGATE-OLD","taskId":"TASK-1201","area":"brain","role":"l2-developer","status":"accepted","baseRef":"target","branch":"agent/regate","headSha":"$regate_head","workspace":"$repo","ownedFiles":["app1.txt"],"changedFiles":["app1.txt"],"commands":[{"cmd":"bash recovery-gate.sh","exitCode":0}],"tests":[{"name":"fixture","phase":"regression","status":"passed"}],"evidence":[{"kind":"test","ref":"fixture"},{"kind":"audit-verification","ref":"runs/RUN-REGATE-OLD/audit-verification.json"}],"blockers":[],"nextAction":"integrate","createdAt":"2026-09-11T00:00:00Z"}
 JSON
 cat >"$orch/packets/imported/TASK-1201/RUN-REGATE-OLD.audit.json" <<'JSON'
-{"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-1201","runId":"RUN-REGATE-OLD","branch":"agent/regate","verdict":"accepted","evidenceReviewed":["fixture"],"commandsRun":["bash recovery-gate.sh"],"findings":[],"requiredFixes":[],"rationale":"fresh fixture audit"}
+{"schema":"singular.orchestration.audit-verdict.v1","taskId":"TASK-1201","runId":"RUN-REGATE-OLD","branch":"agent/regate","verdict":"accepted","evidenceReviewed":["fixture","audit-verification.json"],"verificationResults":[{"status":"passed","command":"bash recovery-gate.sh","exitCode":0,"evidenceRefs":["audit-verification.json"],"rationale":"host-bound fixture gate"}],"commandsRun":[],"findings":[],"requiredFixes":[],"rationale":"fresh fixture audit"}
 JSON
 git -C "$repo" add "$orch/packets/imported/TASK-1201"
 git -C "$repo" commit -qm regate-packet
-if "${real_env[@]}" FORCE_GATE_RED=1 bash "$ROOT/engine/integrate.sh" \
+if "${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" FORCE_GATE_RED=1 \
+    bash "$ROOT/engine/integrate.sh" \
     --task TASK-1201 --run-id RUN-REGATE-RED >"$tmp/regate-red.out" 2>&1; then
   fail "forced real integration gate unexpectedly passed"
 fi
@@ -395,14 +485,59 @@ print(d["acceptedCandidate"]["failures"][-1]["failureId"])
 PY
 )"
 regate_auth_out="$("${real_env[@]}" "$ROOT/engine/recover.sh" candidate TASK-1201 \
-  --action regate --successor-run RUN-REGATE-GREEN --successor-branch agent/regate \
+  --action regate --successor-run RUN-REGATE-FAIL --successor-branch agent/regate \
   --successor-worktree "$repo/.worktrees/regate" --failure-id "$regate_failure")"
 regate_auth="$(printf '%s\n' "$regate_auth_out" | sed -n 's/^authorizationId=//p')"
 [[ -n "$regate_auth" ]] || fail "real regate authorization was not issued"
-"${real_env[@]}" SINGULAR_RECOVERY_AUTHORIZATION_ID="$regate_auth" \
+if "${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" FORCE_GATE_RED=1 \
+    SINGULAR_RECOVERY_AUTHORIZATION_ID="$regate_auth" \
+    bash "$ROOT/engine/integrate.sh" --task TASK-1201 --run-id RUN-REGATE-FAIL \
+    >"$tmp/regate-authorized-red.out" 2>&1; then
+  fail "authorized failing regate unexpectedly integrated"
+fi
+gate_runs_before_replay="$(wc -l <"$tmp/gate-runs" | tr -d ' ')"
+"${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" \
+  SINGULAR_RECOVERY_AUTHORIZATION_ID="$regate_auth" \
+  bash "$ROOT/engine/integrate.sh" --task TASK-1201 --run-id RUN-REGATE-FAIL \
+  >"$tmp/regate-failed-replay.out" 2>&1 || true
+[[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_before_replay" ]] \
+  || fail "completed failed regate replay reran the gate"
+python3 - "$real_state/leases/TASK-1201.json" "$regate_failure" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1])); a=d["recoveryAuthorization"]
+assert a["state"] == "failed", a
+assert a["executionFailureId"] != sys.argv[2], (a, sys.argv[2])
+assert len(d["acceptedCandidate"]["failures"]) == 2, d
+failure=d["acceptedCandidate"]["failures"][-1]
+assert failure["domain"] == "regate", failure
+assert failure["recoveryAction"] == "regate", failure
+PY
+regate_retry_failure="$(python3 - "$real_state/leases/TASK-1201.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["acceptedCandidate"]["failures"][-1]["failureId"])
+PY
+)"
+regate_retry_out="$("${real_env[@]}" "$ROOT/engine/recover.sh" candidate TASK-1201 \
+  --action regate --successor-run RUN-REGATE-GREEN --successor-branch agent/regate \
+  --successor-worktree "$repo/.worktrees/regate" --failure-id "$regate_retry_failure")"
+regate_retry_auth="$(printf '%s\n' "$regate_retry_out" | sed -n 's/^authorizationId=//p')"
+[[ -n "$regate_retry_auth" ]] || fail "fresh regate authority was not issued"
+# Kill the actual integration entrypoint immediately after its durable claim,
+# then restart in a fresh process from that checkpoint.
+if "${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" \
+    SINGULAR_RECOVERY_AUTHORIZATION_ID="$regate_retry_auth" \
+    SINGULAR_TEST_INTERRUPT_AFTER_RECOVERY_CLAIM=1 \
+    bash "$ROOT/engine/integrate.sh" --task TASK-1201 --run-id RUN-REGATE-GREEN \
+    >"$tmp/regate-crash.out" 2>&1; then
+  fail "deterministic recovery-entrypoint interrupt did not stop integration"
+fi
+[[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_before_replay" ]] \
+  || fail "interrupted recovery ran the gate before its durable checkpoint"
+"${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" \
+  SINGULAR_RECOVERY_AUTHORIZATION_ID="$regate_retry_auth" \
   bash "$ROOT/engine/integrate.sh" --task TASK-1201 --run-id RUN-REGATE-GREEN \
   >"$tmp/regate-green.out" 2>&1 \
-  || fail "authorized unchanged regate did not integrate: $(cat "$tmp/regate-green.out")"
+  || fail "crash-resumed unchanged regate did not integrate: $(cat "$tmp/regate-green.out")"
 regate_merge="$(git -C "$repo" rev-parse HEAD)"
 "${real_env[@]}" bash "$ROOT/engine/integrate.sh" --task TASK-1201 \
   --run-id RUN-REGATE-REPLAY >"$tmp/regate-replay.out" 2>&1 \
@@ -420,16 +555,17 @@ printf 'broken-two\n' >"$repo/app2.txt"
 git -C "$repo" add app2.txt
 git -C "$repo" commit -qm repair-candidate-old
 repair_old_head="$(git -C "$repo" rev-parse HEAD)"
+make_bound_verification RUN-REPAIR-OLD TASK-1202 "$repair_old_head" "$repo"
 git -C "$repo" checkout -q target
 cat >"$orch/packets/imported/TASK-1202/RUN-REPAIR-OLD.json" <<JSON
-{"schema":"singular.orchestration.state-packet.v0","packetId":"RUN-REPAIR-OLD","runId":"RUN-REPAIR-OLD","taskId":"TASK-1202","area":"brain","role":"l2-developer","status":"accepted","baseRef":"target","branch":"agent/repair-old","headSha":"$repair_old_head","workspace":"$repo","ownedFiles":["app2.txt"],"changedFiles":["app2.txt"],"commands":[{"cmd":"bash recovery-gate.sh","exitCode":0}],"tests":[{"name":"fixture","phase":"regression","status":"passed"}],"evidence":[{"kind":"test","ref":"fixture"}],"blockers":[],"nextAction":"integrate","createdAt":"2026-09-11T00:00:00Z"}
+{"schema":"singular.orchestration.state-packet.v0","packetId":"RUN-REPAIR-OLD","runId":"RUN-REPAIR-OLD","taskId":"TASK-1202","area":"brain","role":"l2-developer","status":"accepted","baseRef":"target","branch":"agent/repair-old","headSha":"$repair_old_head","workspace":"$repo","ownedFiles":["app2.txt"],"changedFiles":["app2.txt"],"commands":[{"cmd":"bash recovery-gate.sh","exitCode":0}],"tests":[{"name":"fixture","phase":"regression","status":"passed"}],"evidence":[{"kind":"test","ref":"fixture"},{"kind":"audit-verification","ref":"runs/RUN-REPAIR-OLD/audit-verification.json"}],"blockers":[],"nextAction":"integrate","createdAt":"2026-09-11T00:00:00Z"}
 JSON
 cat >"$orch/packets/imported/TASK-1202/RUN-REPAIR-OLD.audit.json" <<'JSON'
-{"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-1202","runId":"RUN-REPAIR-OLD","branch":"agent/repair-old","verdict":"accepted","evidenceReviewed":["fixture"],"commandsRun":["bash recovery-gate.sh"],"findings":[],"requiredFixes":[],"rationale":"fresh fixture audit"}
+{"schema":"singular.orchestration.audit-verdict.v1","taskId":"TASK-1202","runId":"RUN-REPAIR-OLD","branch":"agent/repair-old","verdict":"accepted","evidenceReviewed":["fixture","audit-verification.json"],"verificationResults":[{"status":"passed","command":"bash recovery-gate.sh","exitCode":0,"evidenceRefs":["audit-verification.json"],"rationale":"host-bound fixture gate"}],"commandsRun":[],"findings":[],"requiredFixes":[],"rationale":"fresh fixture audit"}
 JSON
 git -C "$repo" add "$orch/packets/imported/TASK-1202"
 git -C "$repo" commit -qm repair-packet-old
-if "${real_env[@]}" bash "$ROOT/engine/integrate.sh" --task TASK-1202 \
+if "${real_env[@]}" FORCE_GATE_RED=1 bash "$ROOT/engine/integrate.sh" --task TASK-1202 \
     --run-id RUN-REPAIR-RED >"$tmp/repair-red.out" 2>&1; then
   fail "broken repair predecessor unexpectedly integrated"
 fi
@@ -439,13 +575,18 @@ d=json.load(open(sys.argv[1])); assert d["acceptedCandidate"]["state"]=="integra
 print(d["acceptedCandidate"]["failures"][-1]["failureId"])
 PY
 )"
-python3 - "$real_state/leases/TASK-1202.json" "$tmp/repair-predecessor" <<'PY'
+repair_predecessor="$repo/.worktrees/repair-predecessor"
+git -C "$repo" worktree add -q "$repair_predecessor" agent/repair-old
+printf 'dirty tracked predecessor bytes\n' >"$repair_predecessor/app2.txt"
+printf 'untracked predecessor bytes\n' >"$repair_predecessor/untracked.txt"
+mkdir -p "$repair_predecessor/.singular-evidence"
+printf 'predecessor evidence\n' >"$repair_predecessor/.singular-evidence/red.log"
+predecessor_status="$(git -C "$repair_predecessor" status --porcelain=v1 --untracked-files=all)"
+predecessor_branch="$(git -C "$repair_predecessor" branch --show-current)"
+python3 - "$real_state/leases/TASK-1202.json" "$repair_predecessor" <<'PY'
 import json, sys
 p=sys.argv[1]; d=json.load(open(p)); d["worktree"]=sys.argv[2]; json.dump(d,open(p,"w"))
 PY
-mkdir -p "$tmp/repair-predecessor/.singular-evidence"
-printf 'predecessor work\n' >"$tmp/repair-predecessor/untracked.txt"
-printf 'predecessor evidence\n' >"$tmp/repair-predecessor/.singular-evidence/red.log"
 repair_auth_out="$("${real_env[@]}" "$ROOT/engine/recover.sh" candidate TASK-1202 \
   --action repair --successor-run RUN-REPAIR-ZNEW --successor-branch agent/repair-new \
   --successor-worktree "$repo/.worktrees/repair-new" --failure-id "$repair_failure")"
@@ -538,13 +679,43 @@ cp "$real_state/inbox/RUN-REPAIR-ZNEW.json" \
   "$orch/packets/imported/TASK-1202/RUN-REPAIR-ZNEW.json"
 cp "$real_state/runs/RUN-REPAIR-ZNEW/audit.json" \
   "$orch/packets/imported/TASK-1202/RUN-REPAIR-ZNEW.audit.json"
+repair_verification="$real_state/runs/RUN-REPAIR-ZNEW/audit-verification.json"
+cp "$repair_verification" "$tmp/repair-verification.pristine.json"
+python3 - "$repair_verification" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["rawExitCode"]=1
+json.dump(d, open(p,"w"))
+PY
+repair_new_tree="$(git -C "$repo" rev-parse "$repair_new_head^{tree}")"
+if SINGULAR_RUNS_DIR="$real_state/runs" python3 "$ROOT/engine/task_lifecycle.py" \
+    retain-candidate --lease "$real_state/leases/TASK-1202.json" \
+    --packet "$orch/packets/imported/TASK-1202/RUN-REPAIR-ZNEW.json" \
+    --audit "$orch/packets/imported/TASK-1202/RUN-REPAIR-ZNEW.audit.json" \
+    --task-file "$orch/tasks/TASK-1202.md" --task TASK-1202 \
+    --run RUN-REPAIR-ZNEW --branch agent/repair-new \
+    --head "$repair_new_head" --tree "$repair_new_tree" --campaign legacy \
+    --acceptance-mode accepted >/dev/null 2>&1; then
+  fail "retain-candidate accepted a rejected production verification binding"
+fi
+repair_target_before_rejection="$(git -C "$repo" rev-parse target)"
+"${real_env[@]}" bash "$ROOT/engine/integrate.sh" --task TASK-1202 \
+  --run-id RUN-REPAIR-BINDING-REJECT >"$tmp/repair-binding-reject.out" 2>&1 || true
+grep -Eq 'no accepted auditor verdict|accepted candidate lifecycle binding failed closed' \
+  "$tmp/repair-binding-reject.out" \
+  || fail "tampered v1 verification binding reached integration eligibility"
+[[ "$(git -C "$repo" rev-parse target)" == "$repair_target_before_rejection" ]] \
+  || fail "rejected verification binding changed the target"
+mv "$tmp/repair-verification.pristine.json" "$repair_verification"
 "${real_env[@]}" bash "$ROOT/engine/integrate.sh" --task TASK-1202 \
   --run-id RUN-REPAIR-INTEGRATE >"$tmp/repair-green.out" 2>&1 \
   || fail "authorized repair did not integrate: $(cat "$tmp/repair-green.out")"
 grep -q '^INTEGRATED TASK-1202:' "$tmp/repair-green.out" \
   || fail "authorized repair was skipped: $(cat "$tmp/repair-green.out")"
-[[ "$(cat "$tmp/repair-predecessor/untracked.txt")" == "predecessor work" \
-    && "$(cat "$tmp/repair-predecessor/.singular-evidence/red.log")" == "predecessor evidence" ]] \
+[[ "$(git -C "$repair_predecessor" branch --show-current)" == "$predecessor_branch" \
+    && "$(git -C "$repair_predecessor" status --porcelain=v1 --untracked-files=all)" == "$predecessor_status" \
+    && "$(cat "$repair_predecessor/app2.txt")" == "dirty tracked predecessor bytes" \
+    && "$(cat "$repair_predecessor/untracked.txt")" == "untracked predecessor bytes" \
+    && "$(cat "$repair_predecessor/.singular-evidence/red.log")" == "predecessor evidence" ]] \
   || fail "real repair flow changed predecessor work or evidence"
 python3 - "$real_state/leases/TASK-1202.json" "$repair_old_head" "$repair_new_head" <<'PY'
 import json, sys

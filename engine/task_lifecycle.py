@@ -16,6 +16,7 @@ import fcntl
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -54,6 +55,90 @@ def failure_identity(failure: dict[str, Any]) -> str:
     return sha256_text("legacy:" + legacy_key) if legacy_key else ""
 
 
+def failure_counters(lease: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+    budgets = lease.setdefault("failureBudgets", {})
+    for name in ("product", "infrastructure", "regate"):
+        budgets[name] = int(budgets.get(name, 0) or 0)
+    limits = lease.setdefault("failureLimits", {
+        "product": int(lease.get("maxRetries", 3) or 0),
+        "infrastructure": int(os.environ.get("SINGULAR_INFRASTRUCTURE_RECOVERY_MAX", "3")),
+        "regate": int(os.environ.get("SINGULAR_REGATE_MAX", "3")),
+    })
+    for name in ("product", "infrastructure", "regate"):
+        limits[name] = int(limits.get(name, 0) or 0)
+    return budgets, limits
+
+
+def ensure_recovery_capacity(lease: dict[str, Any], budget_domain: str) -> None:
+    budgets, limits = failure_counters(lease)
+    if budgets[budget_domain] >= limits[budget_domain]:
+        raise LifecycleError(f"{budget_domain} recovery budget is exhausted")
+
+
+def verification_artifacts(
+    args: argparse.Namespace, audit: dict[str, Any]
+) -> tuple[Path, Path, Path, Path] | None:
+    """Locate the host verification tuple consumed by accepted audit authority."""
+    if args.acceptance_mode not in {"accepted", "accepted-waiver"}:
+        return None
+    schema = audit.get("schema")
+    if args.acceptance_mode == "accepted" and schema not in {
+        "singular.orchestration.audit-verdict.v0",
+        "singular.orchestration.audit-verdict.v1",
+    }:
+        raise LifecycleError("accepted audit has an unsupported or missing schema")
+    report_arg = str(args.verification_report or "")
+    request_arg = str(args.verification_request or "")
+    policy_arg = str(args.verification_policy or "")
+    report = Path(report_arg)
+    request = Path(request_arg)
+    policy = Path(policy_arg)
+    if not all((report_arg, request_arg, policy_arg)):
+        runs_dir = os.environ.get("SINGULAR_RUNS_DIR", "")
+        if not runs_dir:
+            raise LifecycleError("accepted audit is missing host verification paths")
+        run_dir = Path(runs_dir) / args.run
+        report = run_dir / "audit-verification.json"
+        report_value = read_object(report)
+        bound_request = report_value.get("verificationRequest")
+        attempt = bound_request.get("attempt") if isinstance(bound_request, dict) else None
+        if not isinstance(attempt, int) or isinstance(attempt, bool):
+            raise LifecycleError("accepted audit has no bound verification attempt")
+        request = run_dir / f"verification-request-{attempt}.json"
+        policy = run_dir / f"verification-policy-{attempt}.json"
+    request_value = read_object(request)
+    bound_task = Path(str(request_value.get("taskContractPath", "")))
+    if not str(request_value.get("taskContractPath", "")):
+        raise LifecycleError("accepted audit request has no bound task contract")
+    return request, report, bound_task, policy
+
+
+def validate_verification_binding(
+    request: Path, report: Path, bound_task_contract: Path, policy_contract: Path,
+    current_task_contract: Path, task_id: str, run_id: str, head_sha: str, tree_sha: str,
+    campaign: str,
+) -> None:
+    """Call the canonical validator; keep request/result logic out of lifecycle."""
+    validator = Path(__file__).with_name("gate-report.py")
+    command = [
+        sys.executable, str(validator), "verify-verification-result",
+        "--request", str(request), "--report", str(report),
+        "--task-contract", str(bound_task_contract), "--policy-contract", str(policy_contract),
+        "--current-task-contract", str(current_task_contract),
+        "--expected-task", task_id, "--expected-run", run_id,
+        "--expected-head", head_sha, "--expected-tree", tree_sha,
+        "--expected-campaign", campaign,
+        "--expected-suite", "task-contract-gate", "--require-pass",
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        raise LifecycleError(
+            "accepted candidate verification binding failed"
+            + (f": {detail[0]}" if detail else "")
+        )
+
+
 def validate_candidate_artifacts(candidate: dict[str, Any]) -> None:
     """Re-read the acceptance authorities instead of trusting cached hashes."""
     packet_path = Path(str(candidate.get("packetPath", "")))
@@ -80,6 +165,25 @@ def validate_candidate_artifacts(candidate: dict[str, Any]) -> None:
     task_path = Path(str(candidate.get("taskContractPath", "")))
     if not task_path.is_file() or sha256(task_path) != candidate.get("taskContractSha256"):
         raise LifecycleError("recovery task contract is missing or changed")
+    if candidate.get("acceptanceMode") in {"accepted", "accepted-waiver"}:
+        request_path = Path(str(candidate.get("verificationRequestPath", "")))
+        report_path = Path(str(candidate.get("verificationReportPath", "")))
+        bound_task_path = Path(str(candidate.get("verificationTaskContractPath", "")))
+        policy_path = Path(str(candidate.get("verificationPolicyPath", "")))
+        for label, path, expected in (
+            ("request", request_path, candidate.get("verificationRequestSha256")),
+            ("report", report_path, candidate.get("verificationReportSha256")),
+            ("bound task contract", bound_task_path, candidate.get("verificationTaskContractSha256")),
+            ("policy", policy_path, candidate.get("verificationPolicySha256")),
+        ):
+            if not path.is_file() or sha256(path) != expected:
+                raise LifecycleError(f"recovery verification {label} is missing or changed")
+        validate_verification_binding(
+            request_path, report_path, bound_task_path, policy_path, task_path,
+            str(candidate.get("taskId", "")), str(candidate.get("runId", "")),
+            str(candidate.get("headSha", "")), str(candidate.get("treeSha", "")),
+            str(candidate.get("campaignBinding", "")),
+        )
 
 
 def recovery_predecessor(lease: dict[str, Any], authority: dict[str, Any]) -> dict[str, Any]:
@@ -414,6 +518,7 @@ def retain_candidate(args: argparse.Namespace) -> None:
         if str(packet.get(field, "")) != expected:
             raise LifecycleError(f"packet {field} binding mismatch")
     audit_path: Path | None = None
+    audit: dict[str, Any] = {}
     if args.acceptance_mode == "accepted":
         audit_path = Path(args.audit)
         audit = read_object(audit_path)
@@ -423,6 +528,25 @@ def retain_candidate(args: argparse.Namespace) -> None:
         if audit.get("verdict") != "accepted":
             raise LifecycleError("audit verdict is not accepted")
     task_path = Path(args.task_file)
+    verification = verification_artifacts(args, audit)
+    verification_identity: dict[str, Any] = {"auditSchema": str(audit.get("schema", ""))}
+    if verification is not None:
+        request_path, report_path, bound_task_path, policy_path = verification
+        validate_verification_binding(
+            request_path, report_path, bound_task_path, policy_path, task_path,
+            args.task, args.run, args.head, args.tree,
+            args.campaign,
+        )
+        verification_identity.update({
+            "verificationRequestPath": str(request_path),
+            "verificationRequestSha256": sha256(request_path),
+            "verificationReportPath": str(report_path),
+            "verificationReportSha256": sha256(report_path),
+            "verificationTaskContractPath": str(bound_task_path),
+            "verificationTaskContractSha256": sha256(bound_task_path),
+            "verificationPolicyPath": str(policy_path),
+            "verificationPolicySha256": sha256(policy_path),
+        })
     identity = {
         "taskId": args.task,
         "runId": args.run,
@@ -437,6 +561,7 @@ def retain_candidate(args: argparse.Namespace) -> None:
         "auditSha256": sha256(audit_path) if audit_path else "",
         "taskContractPath": str(task_path),
         "taskContractSha256": sha256(task_path),
+        **verification_identity,
     }
     lease_path = Path(args.lease)
     with locked(lease_path, missing=True) as lease:
@@ -525,20 +650,63 @@ def candidate_failed(args: argparse.Namespace) -> None:
         if observed != expected:
             raise LifecycleError("candidate compare-and-set failed")
         failures = candidate.setdefault("failures", [])
+        authority = lease.get("recoveryAuthorization")
+        execution_binding = {
+            "failureClass": args.failure_class,
+            "targetHead": args.target_head,
+            "candidateHead": args.head,
+            "candidateTree": args.tree,
+            "campaignBinding": args.campaign,
+            "invalidationKey": args.invalidation_key,
+        }
+        recovery_context: dict[str, Any] = {}
+        if isinstance(authority, dict) and authority.get("state") in {
+            "claimed", "audit-accepted", "gate-passed",
+        }:
+            recovery_context = {
+                "authorizationId": str(authority.get("authorizationId", "")),
+                "action": str(authority.get("action", "")),
+                "successorRunId": str(authority.get("successorRunId", "")),
+                "claimId": str(authority.get("claimId", "")),
+            }
+        elif isinstance(authority, dict) and authority.get("state") == "failed":
+            if authority.get("executionFailureBinding") != execution_binding:
+                raise LifecycleError("completed recovery execution cannot record another failure")
+            recovery_context = {
+                "authorizationId": str(authority.get("authorizationId", "")),
+                "action": str(authority.get("action", "")),
+                "successorRunId": str(authority.get("successorRunId", "")),
+                "claimId": str(authority.get("claimId", "")),
+            }
         domain = args.domain
         if not domain:
             domain = (
                 "infrastructure"
-                if args.failure_class in {"branch-missing", "git-lock-timeout", "setup-failed"}
+                if args.failure_class in {
+                    "branch-missing", "git-lock-timeout", "setup-failed",
+                    "gate-infrastructure", "gate-report-invalid",
+                }
                 else "regate"
-                if isinstance(lease.get("recoveryAuthorization"), dict)
-                and lease["recoveryAuthorization"].get("action") == "regate"
+                if recovery_context.get("action") == "regate"
                 else "product"
             )
         legacy_key = f"{args.failure_class}:{args.target_head}:{args.head}:{args.invalidation_key}"
-        failure_id = args.failure_id or sha256_text(
-            legacy_key
-        )
+        failure_key = {
+            "failureClass": args.failure_class,
+            "targetHead": args.target_head,
+            "candidateHead": args.head,
+            "invalidationKey": args.invalidation_key,
+            "recovery": recovery_context,
+        }
+        failure_id = args.failure_id or sha256_text(json.dumps(
+            failure_key, sort_keys=True, separators=(",", ":")
+        ))
+        if (
+            isinstance(authority, dict)
+            and authority.get("state") == "failed"
+            and authority.get("executionFailureId") != failure_id
+        ):
+            raise LifecycleError("completed recovery execution cannot publish a second failure")
         key = failure_id
         existing = next(
             (item for item in failures if isinstance(item, dict) and (
@@ -553,8 +721,11 @@ def candidate_failed(args: argparse.Namespace) -> None:
                 "targetHead": args.target_head,
                 "invalidationKey": args.invalidation_key,
                 "domain": domain,
+                "recoveryAuthorizationId": recovery_context.get("authorizationId", ""),
+                "recoveryAction": recovery_context.get("action", ""),
+                "recoveryRunId": recovery_context.get("successorRunId", ""),
             }
-            if any(existing.get(name) != value for name, value in immutable.items()):
+            if any(existing.get(name, "") != value for name, value in immutable.items()):
                 raise LifecycleError("failure identity replay changed its binding")
             existing["failureId"] = failure_id
             existing["domain"] = domain
@@ -568,12 +739,13 @@ def candidate_failed(args: argparse.Namespace) -> None:
                 "targetHead": args.target_head,
                 "invalidationKey": args.invalidation_key,
                 "nextAction": args.next_action,
+                "recoveryAuthorizationId": recovery_context.get("authorizationId", ""),
+                "recoveryAction": recovery_context.get("action", ""),
+                "recoveryRunId": recovery_context.get("successorRunId", ""),
                 "observedAt": now(),
             })
         if was_unaccounted:
-            budgets = lease.setdefault("failureBudgets", {})
-            for name in ("product", "infrastructure", "regate"):
-                budgets[name] = int(budgets.get(name, 0) or 0)
+            budgets, _ = failure_counters(lease)
             budgets[domain] += 1
         candidate["state"] = "integration-failed"
         candidate["nextAction"] = args.next_action
@@ -583,6 +755,12 @@ def candidate_failed(args: argparse.Namespace) -> None:
         lease["status"] = "accepted"
         lease["nextAction"] = args.next_action
         lease["updatedAt"] = now()
+        if recovery_context and isinstance(authority, dict):
+            authority["state"] = "failed"
+            authority["executionCompletedAt"] = now()
+            authority["executionFailureId"] = failure_id
+            authority["executionFailureDomain"] = domain
+            authority["executionFailureBinding"] = execution_binding
 
 
 def authorize_recovery(args: argparse.Namespace) -> None:
@@ -654,23 +832,16 @@ def authorize_recovery(args: argparse.Namespace) -> None:
                 budgets[name] = int(budgets.get(name, 0) or 0)
             budgets[historical_domain] += 1
         failure_domain = str(failure.get("domain", ""))
-        eligible_domains = {"product"} if action == "repair" else {"product", "regate"}
+        eligible_domains = {"product", "infrastructure", "regate"}
         if failure_domain not in eligible_domains:
             raise LifecycleError(
                 f"{action} recovery cannot consume a {failure_domain or 'missing'} failure"
             )
-        budgets = lease.setdefault("failureBudgets", {})
-        for name in ("product", "infrastructure", "regate"):
-            budgets[name] = int(budgets.get(name, 0) or 0)
-        limits = lease.setdefault("failureLimits", {
-            "product": int(lease.get("maxRetries", 3) or 0),
-            "infrastructure": int(os.environ.get("SINGULAR_INFRASTRUCTURE_RECOVERY_MAX", "3")),
-            "regate": int(os.environ.get("SINGULAR_REGATE_MAX", "3")),
-        })
-        budget_domain = "product" if action == "repair" else "regate"
-        limit = int(limits.get(budget_domain, 0) or 0)
-        if budgets[budget_domain] > limit:
-            raise LifecycleError(f"{budget_domain} recovery budget is exhausted")
+        budget_domain = (
+            "infrastructure" if failure_domain == "infrastructure"
+            else "product" if action == "repair" else "regate"
+        )
+        ensure_recovery_capacity(lease, budget_domain)
         existing = lease.get("recoveryAuthorization")
         history_authorizations = lease.setdefault("recoveryAuthorizations", [])
         all_authorizations = [
@@ -679,6 +850,8 @@ def authorize_recovery(args: argparse.Namespace) -> None:
         ]
         if any(item.get("authoritySha256") == authority_sha for item in all_authorizations):
             raise LifecycleError("recovery authority replay was already recorded")
+        if any(item.get("failureId") == authority.get("failureId") for item in all_authorizations):
+            raise LifecycleError("recovery failure was already consumed by an authorization")
         if isinstance(existing, dict) and existing.get("state") in {
             "issued", "claimed", "audit-accepted", "gate-passed",
         }:
@@ -708,6 +881,7 @@ def authorize_recovery(args: argparse.Namespace) -> None:
             "predecessorAuditSha256": candidate.get("auditSha256", ""),
             "predecessorWorktree": predecessor_worktree,
             "freshAuditRequired": action == "repair",
+            "budgetDomain": budget_domain,
             "state": "issued",
             "authorizedAt": now(),
         }
@@ -755,9 +929,13 @@ def claim_recovery(args: argparse.Namespace) -> None:
             "campaignBinding": args.campaign,
         }
         claim_id = sha256_text(json.dumps(claim_binding, sort_keys=True, separators=(",", ":")))
-        if authority.get("state") == "claimed":
+        budget_domain = str(authority.get("budgetDomain", "") or "")
+        if budget_domain not in {"product", "infrastructure", "regate"}:
+            budget_domain = "product" if args.recovery_action == "repair" else "regate"
+        if authority.get("state") in {"claimed", "audit-accepted", "gate-passed"}:
             if authority.get("claimId") != claim_id:
                 raise LifecycleError("recovery authorization claim replay changed identity")
+            ensure_recovery_capacity(lease, budget_domain)
             print(authority["authorizationId"])
             return
         if authority.get("state") != "issued":
@@ -770,9 +948,11 @@ def claim_recovery(args: argparse.Namespace) -> None:
                 raise LifecycleError("unchanged regate candidate identity changed")
         elif (predecessor.get("headSha"), predecessor.get("treeSha")) != (args.head, args.tree):
             raise LifecycleError("repair predecessor identity changed")
+        ensure_recovery_capacity(lease, budget_domain)
         authority["state"] = "claimed"
         authority["claimId"] = claim_id
         authority["claimedAt"] = now()
+        authority["executionStartedAt"] = authority["claimedAt"]
         lease["updatedAt"] = now()
         print(authority["authorizationId"])
 
@@ -955,6 +1135,9 @@ def parser() -> argparse.ArgumentParser:
     retain = commands.add_parser("retain-candidate")
     for flag in ("lease", "packet", "audit", "task_file", "task", "run", "branch", "head", "tree", "campaign", "acceptance_mode"):
         retain.add_argument("--" + flag.replace("_", "-"), required=True)
+    retain.add_argument("--verification-request", default="")
+    retain.add_argument("--verification-report", default="")
+    retain.add_argument("--verification-policy", default="")
     retain.set_defaults(action=retain_candidate)
 
     check = commands.add_parser("candidate-check")

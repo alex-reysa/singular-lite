@@ -88,6 +88,13 @@ target_branch="$(tf targetBranch)"
 test_policy="$(tf testPolicy)"
 gate_cmd="$(tf gateCommand)"
 [[ -n "$gate_cmd" ]] || gate_cmd="$SINGULAR_DEFAULT_GATE_CMD"
+# tests/run.sh treats focused execution after a registry-write denial as
+# authorized only when L1 supplies the canonical task selected by the host.
+# These values also reach the implementer runner, whose direct test-first gate
+# invocation happens before the host repeats the gate through gate-check.sh.
+export SINGULAR_TEST_TASK_CONTRACT="$task_file"
+export SINGULAR_TEST_TASK_ID="$task_id"
+export SINGULAR_TEST_TASKS_DIR="$SINGULAR_TASKS_DIR"
 [[ -n "$target_branch" ]] || target_branch="$SINGULAR_TARGET_BRANCH"
 dispatch_batch_id="${SINGULAR_DISPATCH_BATCH_ID:-}"
 dispatch_base_sha="${SINGULAR_DISPATCH_BASE_SHA:-}"
@@ -1741,7 +1748,8 @@ run_worker_phase() {
   l1_status gating active "Running the worker regression gate for attempt $n" false \
     "Classify the gate and commit verified content" "" "gate-controller"
   singular_run_in_worktree_env "$worktree" "$SCRIPT_DIR/gate-check.sh" "$run_id" \
-    --task-id "$task_id" --phase worker --workspace-kind worker -- \
+    --task-id "$task_id" --phase worker --workspace-kind worker \
+    --task-contract "$task_file" -- \
     "$(singular_bash_bin)" -c "$gate_cmd" || gate_exit=$?
   local gate_outcome
   gate_outcome="$(singular_json_field "$run_dir/gate-report.json" outcome 2>/dev/null || true)"
@@ -2172,10 +2180,15 @@ PY
   fi
 
   local verification_request="$run_dir/verification-request-${n}.json"
+  local verification_task_contract="$run_dir/verification-task-contract-${n}.md"
   local verification_policy="$run_dir/verification-policy-${n}.json"
   local verification_tree=""
   verification_tree="$(git -C "$worktree" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
-  python3 - "$verification_policy" "$l1_campaign_binding" <<'PY'
+  local verification_contract_rc=0
+  cp "$task_file" "$verification_task_contract" || verification_contract_rc=$?
+  if [[ "$verification_contract_rc" -eq 0 ]]; then
+    python3 - "$verification_policy" "$l1_campaign_binding" <<'PY' \
+      || verification_contract_rc=$?
 import json, os, sys
 path, campaign = sys.argv[1:3]
 temporary = path + ".tmp"
@@ -2184,11 +2197,13 @@ with open(temporary, "w", encoding="utf-8") as handle:
     handle.write("\n")
 os.replace(temporary, path)
 PY
-  if [[ ! "$verification_tree" =~ ^[0-9a-fA-F]{40,64}$ ]] \
+  fi
+  if [[ "$verification_contract_rc" -ne 0 \
+      || ! "$verification_tree" =~ ^[0-9a-fA-F]{40,64}$ ]] \
       || ! "$SCRIPT_DIR/gate-report.py" create-verification-request \
           --output "$verification_request" --task-id "$task_id" --run-id "$run_id" \
           --attempt "$n" --head-sha "$head_sha" --tree-sha "$verification_tree" \
-          --campaign "$l1_campaign_binding" --task-contract "$task_file" \
+          --campaign "$l1_campaign_binding" --task-contract "$verification_task_contract" \
           --policy-contract "$verification_policy" --suite-id "task-contract-gate" \
           >"$run_dir/verification-request-${n}.out" \
           2>"$run_dir/verification-request-${n}.err"; then
@@ -2216,7 +2231,7 @@ PY
         --head-sha "$head_sha" --gate-command "$gate_cmd" \
         --worker-gate-report "$run_dir/gate-report.json" \
         --verification-request "$verification_request" \
-        --task-contract "$task_file" --policy-contract "$verification_policy" \
+        --task-contract "$verification_task_contract" --policy-contract "$verification_policy" \
         --attempt "$n" --try "$verification_try" \
         >"$run_dir/audit-verification-driver.log" 2>&1 || verification_rc=$?
       verification_outcome="$(singular_json_field "$run_dir/audit-verification.json" outcome 2>/dev/null || true)"
@@ -2242,19 +2257,23 @@ PY
       fi
       case "$verification_outcome" in
         passed|passed-with-acknowledged-baseline|not-rerun-evidence-verified)
-          verification_ready="yes"
-          break
+          if [[ "$verification_rc" -eq 0 ]]; then
+            verification_ready="yes"
+            break
+          fi
           ;;
         failed-product)
-          write_host_audit_verdict "failed-product" "needs-fix" \
-            "The independently rerun gate failed with a product-test signal at the committed head."
-          verdict="needs-fix"
-          append_audit_evidence
-          singular_append_event "l1.audit_completed" "host audit verification found a product failure" \
-            "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"verdict\":\"needs-fix\",\"verification\":\"failed-product\"}"
-          attempt_failure="audit-needs-fix"
-          attempt_ctx="$run_dir/audit-verification.json"
-          return 1
+          if [[ "$verification_rc" -eq 10 ]]; then
+            write_host_audit_verdict "failed-product" "needs-fix" \
+              "The independently rerun gate failed with a product-test signal at the committed head."
+            verdict="needs-fix"
+            append_audit_evidence
+            singular_append_event "l1.audit_completed" "host audit verification found a product failure" \
+              "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"verdict\":\"needs-fix\",\"verification\":\"failed-product\"}"
+            attempt_failure="audit-needs-fix"
+            attempt_ctx="$run_dir/audit-verification.json"
+            return 1
+          fi
           ;;
         *)
           : # infrastructure/invalid report: bounded disposable retry
@@ -2279,7 +2298,7 @@ PY
       --worker-gate-report "$run_dir/gate-report.json" \
       --worker-gate-command "$(singular_bash_bin) -c $gate_cmd" --evidence-only \
       --verification-request "$verification_request" \
-      --task-contract "$task_file" --policy-contract "$verification_policy" \
+      --task-contract "$verification_task_contract" --policy-contract "$verification_policy" \
       >"$run_dir/audit-verification-evidence-only.log" 2>&1 || verification_rc=$?
     verification_outcome="$(singular_json_field "$run_dir/audit-verification.json" outcome 2>/dev/null || true)"
     if [[ "$verification_rc" -eq 0 && "$verification_outcome" == "not-rerun-evidence-verified" ]]; then
@@ -2298,6 +2317,25 @@ PY
       attempt_ctx="$run_dir/audit-verification.json"
       return 1
     fi
+  fi
+
+  # The report outcome is only descriptive until the complete request/result
+  # binding validates. Reject a failed validator before any paid auditor sees
+  # the report, even when stale JSON still says "passed".
+  if ! singular_validate_verification_binding \
+      "$verification_request" "$run_dir/audit-verification.json" \
+      "$verification_task_contract" "$verification_policy" \
+      "$task_id" "$run_id" "$head_sha" "$verification_tree" "$task_file" \
+      "$l1_campaign_binding" \
+      >"$run_dir/verification-consumption-${n}.out" \
+      2>"$run_dir/verification-consumption-${n}.err"; then
+    write_host_audit_verdict "inconclusive-infrastructure" "blocked" \
+      "The host verification request/result binding was rejected before audit."
+    verdict="blocked"
+    append_audit_evidence
+    attempt_failure="audit-infra"
+    attempt_ctx="$run_dir/verification-consumption-${n}.err"
+    return 1
   fi
 
   # The host owns verification classification. In particular, successful

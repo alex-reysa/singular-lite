@@ -101,13 +101,22 @@ singular recover candidate TASK-1234 --action repair \
 
 The generated authority binds the predecessor packet/audit/contract,
 commit/tree, campaign/policy, eligible failure and successor action. It is
-claim-once and crash-resumable only for the exact same successor identity.
+claim-once and crash-resumable only for the exact same successor identity while
+execution is incomplete. A completed failed execution closes that claim and a
+new host authorization must bind the resulting failure before another launch.
+Recovery limits are checked both when authority is issued and when execution is
+claimed, so a stale issued record cannot bypass a changed or exhausted ceiling.
 Repair candidates always need a fresh accepted audit even when the
 tree is unchanged; regate keeps the exact candidate and prints the bound
 `singular integrate --run-id ...` next action. `singular health --json` exposes
 retained candidates with dependencies, reason/domain, owner, budgets and the
 permitted next action. Product, infrastructure and regate failures are counted
-once by durable failure identity in separate counters.
+once by durable failure identity in separate counters. The identity includes an
+active recovery action and successor attempt, and integration consumes the gate
+report's product/infrastructure outcome instead of charging every red exit as a
+product failure. Supported accepted audit schemas and waiver acceptance also
+revalidate their exact host verification request, result and policy through the
+canonical gate-report validator before retention or recovery.
 
 ## Dispatch model
 

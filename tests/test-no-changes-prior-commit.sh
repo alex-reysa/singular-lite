@@ -88,6 +88,15 @@ while [[ $i -lt ${#args[@]} ]]; do
   esac
 done
 if [[ "$level" == "l2" ]]; then
+  [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]] || {
+    echo "missing host task id: ${SINGULAR_TEST_TASK_ID:-unset}" >&2
+    exit 94
+  }
+  [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
+    "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]] || {
+    echo "noncanonical host task contract: ${SINGULAR_TEST_TASK_CONTRACT:-unset}" >&2
+    exit 95
+  }
   if [[ "${WRITE_MODE:-fixed}" == "fixed" ]]; then
     mkdir -p "$worktree/internal/widget"
     printf 'package widget\n// stable content\n' >"$worktree/internal/widget/parser.go"

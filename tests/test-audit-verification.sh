@@ -60,6 +60,7 @@ printf 'committed\n' >"$repo/app.txt"
 git -C "$repo" add .gitignore singular.config.json app.txt
 git -C "$repo" commit -qm init
 head_sha="$(git -C "$repo" rev-parse HEAD)"
+tree_sha="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
 
 base_env=(
   SINGULAR_ROOT="$repo"
@@ -71,12 +72,43 @@ base_env=(
   SINGULAR_BOOTSTRAP_JSON="{}"
 )
 
+verification_sequence=0
+verification_request=""
+verification_task_contract=""
+verification_policy_contract=""
+verification_args=()
+prepare_verification() {
+  local command="$1"
+  verification_sequence=$((verification_sequence + 1))
+  verification_request="$run_dir/verification-request-$verification_sequence.json"
+  verification_task_contract="$run_dir/verification-task-contract-$verification_sequence.md"
+  verification_policy_contract="$run_dir/verification-policy-$verification_sequence.json"
+  printf '# TASK-0001: audit verification fixture\n\nStatus: running\nTest policy: `strict_test_first`\nGate command: `%s`\n' \
+    "$command" >"$verification_task_contract"
+  printf '%s\n' '{"campaign":"campaign:audit-test","policy":"strict-test-first"}' \
+    >"$verification_policy_contract"
+  python3 "$ROOT/engine/gate-report.py" create-verification-request \
+    --output "$verification_request" --task-id TASK-0001 --run-id RUN-AUDIT \
+    --attempt "$verification_sequence" --head-sha "$head_sha" \
+    --tree-sha "$tree_sha" --campaign campaign:audit-test \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" \
+    --suite-id task-contract-gate >/dev/null
+  verification_args=(
+    --verification-request "$verification_request"
+    --task-contract "$verification_task_contract"
+    --policy-contract "$verification_policy_contract"
+  )
+}
+
 run_verify() {
   local command="$1" expected_rc="$2" rc=0
+  prepare_verification "$command"
   env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
     --run-dir "$run_dir" --task-id TASK-0001 \
     --source-worktree "$repo" --head-sha "$head_sha" \
     --gate-command "$command" --attempt 1 --try 0 \
+    "${verification_args[@]}" \
     >"$run_dir/driver.log" 2>&1 || rc=$?
   [[ "$rc" -eq "$expected_rc" ]] || {
     echo "audit verification exit mismatch: expected $expected_rc, got $rc" >&2
@@ -196,11 +228,12 @@ python3 "$ROOT/engine/gate-report.py" create \
   --run-id RUN-AUDIT --head-sha "$head_sha" --command true \
   --exit-code 0 --log "$run_dir/worker-gate.log" \
   --phase worker --workspace-kind worker --integrity-status verified >/dev/null
+prepare_verification true
 env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-report "$run_dir/worker-gate.json" \
-  --evidence-only >/dev/null
+  --evidence-only "${verification_args[@]}" >/dev/null
 [[ "$(outcome)" == "not-rerun-evidence-verified" ]]
 
 # The worker gate may have recorded the host shell wrapper while the
@@ -211,12 +244,13 @@ python3 "$ROOT/engine/gate-report.py" create \
   --run-id RUN-AUDIT --head-sha "$head_sha" --command "bash -c true" \
   --exit-code 0 --log "$run_dir/worker-gate.log" \
   --phase worker --workspace-kind worker --integrity-status verified >/dev/null
+prepare_verification true
 env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-command "bash -c true" \
   --worker-gate-report "$run_dir/wrapped-worker-gate.json" \
-  --evidence-only >/dev/null
+  --evidence-only "${verification_args[@]}" >/dev/null
 [[ "$(outcome)" == "not-rerun-evidence-verified" ]]
 
 # A successful-looking report is not eligible for evidence-only substitution
@@ -226,11 +260,12 @@ python3 "$ROOT/engine/gate-report.py" create \
   --run-id RUN-AUDIT --head-sha "$head_sha" --command true \
   --exit-code 0 --log "$run_dir/worker-gate.log" \
   --phase worker --workspace-kind worker --integrity-status not-checked >/dev/null
+prepare_verification true
 if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-report "$run_dir/unverified-gate.json" \
-  --evidence-only >/dev/null 2>&1; then
+  --evidence-only "${verification_args[@]}" >/dev/null 2>&1; then
   echo "unverified source integrity must fail evidence-only validation" >&2
   exit 1
 fi
@@ -254,21 +289,23 @@ data["outcome"] = "passed"
 data["unexpectedFailures"] = []
 json.dump(data, open(path, "w"))
 PY
+prepare_verification false
 if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command false --worker-gate-report "$run_dir/failed-gate.json" \
-  --evidence-only >/dev/null 2>&1; then
+  --evidence-only "${verification_args[@]}" >/dev/null 2>&1; then
   echo "outcome-only gate report forgery must fail verification" >&2
   exit 1
 fi
 
 printf 'tampered\n' >>"$run_dir/worker-gate.log"
+prepare_verification true
 if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-report "$run_dir/worker-gate.json" \
-  --evidence-only >/dev/null 2>&1; then
+  --evidence-only "${verification_args[@]}" >/dev/null 2>&1; then
   echo "tampered gate evidence must fail verification" >&2
   exit 1
 fi
@@ -301,17 +338,21 @@ python3 "$ROOT/engine/gate_report.py" \
   --baseline "$run_dir/baseline.json" \
   --integrity-status verified \
   --output "$run_dir/baseline-gate.json" >/dev/null
+prepare_verification "$baseline_command"
 env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command "$baseline_command" \
-  --worker-gate-report "$run_dir/baseline-gate.json" --evidence-only >/dev/null
+  --worker-gate-report "$run_dir/baseline-gate.json" --evidence-only \
+  "${verification_args[@]}" >/dev/null
 printf '\n' >>"$run_dir/baseline.json"
+prepare_verification "$baseline_command"
 if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command "$baseline_command" \
   --worker-gate-report "$run_dir/baseline-gate.json" --evidence-only \
+  "${verification_args[@]}" \
   >/dev/null 2>&1; then
   echo "changed acknowledged baseline must fail evidence verification" >&2
   exit 1

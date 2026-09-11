@@ -7,6 +7,11 @@ pass=0
 fail=0
 failed=""
 gate_report_file="${SINGULAR_GATE_REPORT_FILE:-}"
+# These are host-set by gate-check.sh after it resolves the canonical task
+# record. Capture them before the general SINGULAR_* scrub below.
+focused_task_contract="${SINGULAR_TEST_TASK_CONTRACT:-}"
+focused_task_id="${SINGULAR_TEST_TASK_ID:-}"
+focused_tasks_dir="${SINGULAR_TEST_TASKS_DIR:-}"
 # Durable per-run artifact directory, set by `singular test`'s supervisor. Read
 # here, before the env scrub below, for the same reason gate_report_file is:
 # the scrub deletes every SINGULAR_* from the environment a few lines down.
@@ -55,6 +60,71 @@ if [[ "$preflight_rc" -ne 0 ]]; then
   # capability is explicit and remains unrun; an unfiltered canonical suite,
   # or missing source/history, still fails before discovery.
   if [[ "$#" -gt 0 && ( "$preflight_rc" -eq 2 || "$preflight_rc" -eq 3 ) ]]; then
+    # Positional basenames are only a filter. They do not authorize execution
+    # after a host capability check fails. Continue only when the host supplied
+    # the canonical task contract, its strict policy selects this exact focused
+    # invocation, and every selected body is present and worker-capable.
+    focused_eligibility="$(python3 - "$focused_task_contract" "$focused_task_id" \
+        "$focused_tasks_dir" "$TESTS_DIR" "$@" <<'PY' 2>&1
+import pathlib
+import re
+import shlex
+import sys
+
+contract_raw, expected_task, tasks_raw, tests_raw, *requested = sys.argv[1:]
+if not contract_raw or not expected_task or not tasks_raw:
+    raise SystemExit("focused verification requires a host-resolved task contract")
+contract = pathlib.Path(contract_raw).resolve()
+tasks_dir = pathlib.Path(tasks_raw).resolve()
+try:
+    contract.relative_to(tasks_dir)
+except ValueError:
+    raise SystemExit("focused verification task contract is outside the canonical task directory")
+if contract != tasks_dir / f"{expected_task}.md" or not contract.is_file():
+    raise SystemExit("focused verification task contract is not canonical")
+text = contract.read_text(encoding="utf-8")
+title = re.search(r"^#\s+(TASK-[0-9]{4,})(?::|\s|$)", text, re.MULTILINE)
+if not title or title.group(1) != expected_task:
+    raise SystemExit("focused verification task identity mismatch")
+policy = re.search(r"^Test policy:\s*`?([^`\n]+)`?\s*$", text, re.MULTILINE)
+if not policy or policy.group(1).strip() != "strict_test_first":
+    raise SystemExit("focused verification requires strict_test_first policy")
+gate = re.search(r"^Gate command:\s*`([^`]+)`\s*$", text, re.MULTILINE)
+if not gate:
+    raise SystemExit("focused verification task contract has no gate command")
+lexer = shlex.shlex(gate.group(1), posix=True, punctuation_chars=";&|")
+lexer.whitespace_split = True
+tokens = list(lexer)
+authorized = []
+for index, token in enumerate(tokens):
+    if pathlib.PurePosixPath(token).name != "run.sh":
+        continue
+    selected = []
+    for candidate in tokens[index + 1:]:
+        if candidate in {";", "&&", "&", "||", "|"}:
+            break
+        if re.fullmatch(r"test-[A-Za-z0-9_.-]+\.sh", candidate):
+            selected.append(candidate)
+    if selected:
+        authorized.append(selected)
+if requested not in authorized:
+    raise SystemExit("focused verification filter does not match the trusted gate command")
+tests_dir = pathlib.Path(tests_raw).resolve()
+for name in requested:
+    candidates = [tests_dir / name, tests_dir.parent / "singular-ext" / "tests" / name]
+    matches = [path for path in candidates if path.is_file()]
+    if len(matches) != 1:
+        raise SystemExit(f"focused verification body is unknown or ambiguous: {name}")
+    header = "\n".join(matches[0].read_text(encoding="utf-8", errors="replace").splitlines()[:40])
+    if re.search(r"^#\s*singular-test:\s*(?:host-only|host-required)(?:\s|=|$)", header, re.MULTILINE):
+        raise SystemExit(f"focused verification body is host-only: {name}")
+print("eligible")
+PY
+)" || {
+      printf '%s\n' "$preflight_out" >&2
+      printf 'tests/run.sh: %s\n' "$focused_eligibility" >&2
+      exit 1
+    }
     printf '%s\n' "$preflight_out" >&2
     case "$preflight_rc" in
       2) host_required_check="git-registry-write" ;;

@@ -247,8 +247,73 @@ EOF
 EOF
 }
 
+write_bound_verification() {
+  local run_id="RUN-TEST-9001"
+  local run_dir="$SINGULAR_RUNS_DIR/$run_id"
+  local packet="$run_dir/packet.json"
+  local task_snapshot="$run_dir/verification-task-contract-1.md"
+  local policy="$run_dir/verification-policy-1.json"
+  local request="$run_dir/verification-request-1.json"
+  local report="$run_dir/audit-verification.json"
+  local log="$run_dir/audit-verification.log"
+  local head tree
+  head="$(json_field "$packet" headSha)"
+  tree="$(git -C "$SINGULAR_ROOT" rev-parse "$head^{tree}")"
+
+  cp "$SINGULAR_TASKS_DIR/TASK-9001.md" "$task_snapshot"
+  printf '{"campaign":"legacy"}\n' >"$policy"
+  printf 'verification passed\n' >"$log"
+  python3 "$SCRIPT_DIR/gate-report.py" create-verification-request \
+    --output "$request" \
+    --task-id TASK-9001 \
+    --run-id "$run_id" \
+    --attempt 1 \
+    --head-sha "$head" \
+    --tree-sha "$tree" \
+    --campaign legacy \
+    --task-contract "$task_snapshot" \
+    --policy-contract "$policy" \
+    --suite-id task-contract-gate >/dev/null
+  python3 "$SCRIPT_DIR/gate-report.py" create \
+    --output "$report" \
+    --task-id TASK-9001 \
+    --run-id "$run_id" \
+    --head-sha "$head" \
+    --command true \
+    --exit-code 0 \
+    --log "$log" \
+    --phase audit-verification \
+    --workspace-kind disposable \
+    --integrity-status verified
+  python3 "$SCRIPT_DIR/gate-report.py" bind-verification-result \
+    --request "$request" \
+    --report "$report" \
+    --task-contract "$task_snapshot" \
+    --policy-contract "$policy"
+  python3 - "$packet" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    packet = json.load(handle)
+packet["evidence"] = [
+    item for item in packet.get("evidence", [])
+    if item.get("kind") != "audit-verification"
+]
+packet["evidence"].append({
+    "kind": "audit-verification",
+    "ref": "runs/RUN-TEST-9001/audit-verification.json",
+})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(packet, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
 write_accept_waiver_records() {
   local run_id="RUN-TEST-9001"
+  write_bound_verification
   python3 - "$SINGULAR_RUNS_DIR/$run_id/packet.json" <<'PY'
 import json
 import sys

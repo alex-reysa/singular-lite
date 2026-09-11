@@ -637,11 +637,90 @@ singular_unbound_waivers_enabled() {
   [[ "${SINGULAR_CONFIG_SCHEMA_VERSION:-}" != "v2" ]]
 }
 
+# Validate the one host-owned request/result contract used by audit and
+# integration. Arguments after the four artifact paths are expected task, run,
+# commit, tree, and (optionally) the current mutable task record and current
+# campaign identity. The bound task snapshot remains immutable; only a lifecycle
+# Status: transition may differ in the current record.
+singular_validate_verification_binding() {
+  local request="$1" report="$2" task_contract="$3" policy_contract="$4"
+  local expected_task="$5" expected_run="$6" expected_head="$7" expected_tree="$8"
+  local current_task_contract="${9:-}"
+  local expected_campaign="${10:-}"
+  local -a args=(
+    verify-verification-result
+    --request "$request" --report "$report"
+    --task-contract "$task_contract" --policy-contract "$policy_contract"
+    --expected-task "$expected_task" --expected-run "$expected_run"
+    --expected-head "$expected_head" --expected-tree "$expected_tree"
+    --expected-suite task-contract-gate
+    --require-pass
+  )
+  [[ -n "$current_task_contract" ]] \
+    && args+=(--current-task-contract "$current_task_contract")
+  [[ -n "$expected_campaign" ]] \
+    && args+=(--expected-campaign "$expected_campaign")
+  python3 "$SINGULAR_LIB_DIR/gate-report.py" "${args[@]}"
+}
+
 singular_packet_acceptance_mode() {
   local packet="$1"
   local audit_record="$2"
-  local verdict=""
+  local verdict="" audit_schema="" run_id="" task_id="" head_sha="" attempt=""
+  local verification_report="" verification_request=""
+  local verification_task_contract="" verification_policy_contract=""
+  local current_task_contract="" tree_sha="" current_campaign_binding=""
+  local -a acceptance_identity=()
+
+  mapfile -t acceptance_identity < <(python3 - "$packet" <<'PY' 2>/dev/null
+import json
+import sys
+
+packet = json.load(open(sys.argv[1], encoding="utf-8"))
+run_id = packet.get("runId")
+task_id = packet.get("taskId")
+head = packet.get("headSha")
+expected_ref = f"runs/{run_id}/audit-verification.json"
+if not all(isinstance(value, str) and value for value in (run_id, task_id, head)):
+    raise SystemExit(2)
+if not any(
+    isinstance(item, dict)
+    and item.get("kind") == "audit-verification"
+    and item.get("ref") == expected_ref
+    for item in packet.get("evidence", [])
+):
+    raise SystemExit(2)
+print(run_id)
+print(task_id)
+print(head)
+PY
+  )
+  [[ "${#acceptance_identity[@]}" -eq 3 ]] || return 1
+  run_id="${acceptance_identity[0]}"
+  task_id="${acceptance_identity[1]}"
+  head_sha="${acceptance_identity[2]}"
+  verification_report="$SINGULAR_RUNS_DIR/$run_id/audit-verification.json"
+  attempt="$(singular_json_field "$verification_report" verificationRequest.attempt 2>/dev/null || true)"
+  [[ "$attempt" =~ ^[0-9]+$ ]] || return 1
+  verification_request="$SINGULAR_RUNS_DIR/$run_id/verification-request-$attempt.json"
+  verification_task_contract="$SINGULAR_RUNS_DIR/$run_id/verification-task-contract-$attempt.md"
+  verification_policy_contract="$SINGULAR_RUNS_DIR/$run_id/verification-policy-$attempt.json"
+  current_task_contract="$SINGULAR_TASKS_DIR/$task_id.md"
+  tree_sha="$(git -C "$SINGULAR_ROOT" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
+  [[ "$tree_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] || return 1
+  current_campaign_binding="$(singular_campaign_binding 2>/dev/null)" || return 1
+  singular_validate_verification_binding \
+    "$verification_request" "$verification_report" \
+    "$verification_task_contract" "$verification_policy_contract" \
+    "$task_id" "$run_id" "$head_sha" "$tree_sha" \
+    "$current_task_contract" "$current_campaign_binding" || return 1
+
   if [[ -f "$audit_record" ]]; then
+    audit_schema="$(singular_json_field "$audit_record" schema 2>/dev/null || true)"
+    case "$audit_schema" in
+      singular.orchestration.audit-verdict.v0|singular.orchestration.audit-verdict.v1) ;;
+      *) return 1 ;;
+    esac
     verdict="$(singular_json_field "$audit_record" verdict 2>/dev/null || true)"
     if [[ "$verdict" == "accepted" ]]; then
       echo "accepted"
