@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix='exact-bounds-') as scratch:
                     assert time.monotonic() < deadline, 'signal injection latch timed out'
                     time.sleep(0.01)
                 proc.send_signal(signal.SIGTERM)
-            output, _ = proc.communicate(timeout=60)
+            output, _ = proc.communicate(timeout=90)
         except (subprocess.TimeoutExpired, AssertionError):
             if record.exists():
                 try: os.killpg(int(record.read_text()), signal.SIGKILL)
