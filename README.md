@@ -565,6 +565,23 @@ under the node staging directory. One atomically replaced
 all engine readers pin that generation before enumerating files. Direct
 `TASK-*.candidate.md` files are a legacy pre-migration read fallback only; new
 revision batches are never published through sequential direct-file moves.
+L0 imports the pinned generation through byte-verified private writable copies.
+It allocates the complete monotonic ID range once, applies one simultaneous
+whole-token mapping to every private candidate, validates the transformed batch,
+and publishes it all-or-nothing. The canonical generation, pointer, file modes,
+and adjacent critique evidence remain read-only and unchanged on success or
+rollback.
+
+Task scope uses one parser across dispatch, preflight, node indexing, batch
+validation, and duplicate detection. A list item may be a bare legacy path or
+contain exactly one backtick-delimited path followed by prose; quoting is
+required for paths containing spaces. Traversal, globs, malformed/multiple
+backtick spans, and ambiguous unquoted annotations fail closed. Historical
+sentences in a `Forbidden files` list remain non-executable policy prose and do
+not become path authority. Acceptance-criteria continuations and nested content
+are retained, and the complete original task document is appended unchanged to
+worker and fresh-auditor prompts (with an explicit 256 KiB mandatory-content
+limit).
 
 ## Modules
 

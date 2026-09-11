@@ -39,6 +39,26 @@ if [[ ${#allow_prefixes[@]} -eq 0 ]]; then
   exit 2
 fi
 
+# Direct callers receive the same fail-closed path validation as task parsing.
+# Quoting/annotation has already been interpreted by task_parser.py; this layer
+# accepts only the resulting repository-relative path values.
+for prefix in "${allow_prefixes[@]}"; do
+  [[ -n "$prefix" ]] || continue
+  python3 "$SINGULAR_LIB_DIR/task_parser.py" validate-path "$prefix" >/dev/null || {
+    echo "invalid scope prefix: $prefix" >&2
+    exit 2
+  }
+done
+if [[ ${#forbid_prefixes[@]} -gt 0 ]]; then
+  for prefix in "${forbid_prefixes[@]}"; do
+    [[ -n "$prefix" ]] || continue
+    python3 "$SINGULAR_LIB_DIR/task_parser.py" validate-path "$prefix" >/dev/null || {
+      echo "invalid scope prefix: $prefix" >&2
+      exit 2
+    }
+  done
+fi
+
 # A path matches a prefix only if it equals the prefix or sits beneath it as a
 # path segment (so "internal/artifact" does NOT match "internal/artifact-x.go").
 #
