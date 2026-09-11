@@ -38,6 +38,11 @@ RUNTIME_SETTING_NAMES = {
     "SINGULAR_ORIGIN_LOCK_CAPABILITY",
     "SINGULAR_CAMPAIGN_LOCK_CAPABILITY",
     "SINGULAR_GIT_LOCK_CAPABILITY",
+    # Per-dispatch compare-and-set authority. Reconcile creates a fresh token
+    # for each launch and dispatch-wrap must carry it into L1, but that token is
+    # not configuration or campaign policy.
+    "SINGULAR_RESERVATION_OWNER",
+    "SINGULAR_RESERVATION_GENERATION",
     "SINGULAR_RESOLVED_CAPABILITY_DECLARED",
     "SINGULAR_RESOLVED_CAPABILITY_PROFILE",
     "SINGULAR_RESOLVED_CAPABILITY_STRICT",

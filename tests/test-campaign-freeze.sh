@@ -208,6 +208,58 @@ if ( cd "$repo" && SINGULAR_ENGINE_HOME="$ROOT" \
   exit 1
 fi
 
+# Native reconcile dispatches through dispatch-wrap, which injects a fresh
+# owner/generation CAS token into L1. Those values must reach the job while the
+# frozen campaign check treats them as invocation identity rather than policy.
+# STOP keeps this regression entirely before provider/worktree mutation.
+native_l1="$tmp/native-l1-entry.sh"
+native_tokens="$tmp/native-reservation-tokens"
+cat >"$native_l1" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "\${SINGULAR_RESERVATION_OWNER:-}" == 'reconcile:RUN-NATIVE:TASK-9999' ]]
+[[ "\${SINGULAR_RESERVATION_GENERATION:-}" == 7 ]]
+printf '%s@%s\n' "\$SINGULAR_RESERVATION_OWNER" "\$SINGULAR_RESERVATION_GENERATION" \
+  >'$native_tokens'
+exec '$ROOT/engine/l1-drive.sh' "\$@"
+SH
+chmod +x "$native_l1"
+: >"$repo/.singular-state/STOP"
+native_out="$tmp/native-dispatch.out"
+if ! ( cd "$repo" && \
+    SINGULAR_ENGINE_HOME="$ROOT" \
+    SINGULAR_CODEX_BIN="$ROOT/tests/fixtures/does-not-exist" \
+    SINGULAR_RECONCILE_SCRIPT="$cycle_stub" SINGULAR_SLEEP=0 \
+    "$ROOT/engine/dispatch-wrap.sh" TASK-9999 "$native_l1" \
+      reconcile:RUN-NATIVE:TASK-9999 7 RUN-NATIVE-batch \
+  ) >"$native_out" 2>&1; then
+  cat "$native_out" >&2
+  echo "native reservation context caused campaign drift at L1 entry" >&2
+  exit 1
+fi
+rm -f "$repo/.singular-state/STOP"
+[[ "$(cat "$native_tokens")" == 'reconcile:RUN-NATIVE:TASK-9999@7' ]] \
+  || { echo "dispatch-wrap stripped reservation CAS authority from L1" >&2; exit 1; }
+grep -q 'frozen (STOP sentinel present' "$native_out" \
+  || { cat "$native_out" >&2; echo "native fixture did not reach L1 after campaign verification" >&2; exit 1; }
+[[ ! -e "$repo/.worktrees/TASK-9999" ]] \
+  || { echo "native STOP fixture reached provider/worktree mutation" >&2; exit 1; }
+
+# The exclusion is exact-name only; a different setting under the same prefix
+# remains frozen like every unknown resolved SINGULAR_* policy input.
+if SINGULAR_RESERVATION_POLICY_SENTINEL=changed run verify --quiet >/dev/null 2>&1; then
+  echo "reservation exclusion widened to unrelated resolved settings" >&2
+  exit 1
+fi
+
+# Excluding request identity must not hide a real resolved-policy change.
+if SINGULAR_RESERVATION_OWNER=reconcile:RUN-NATIVE:TASK-9999 \
+    SINGULAR_RESERVATION_GENERATION=8 SINGULAR_ENABLE_L1_PARALLEL=1 \
+    run verify --quiet >/dev/null 2>&1; then
+  echo "reservation context hid resolved campaign policy drift" >&2
+  exit 1
+fi
+
 # Campaign transitions share the git->campaign lock order with integration and
 # must never fingerprint or deactivate a transient staged merge tree.
 git -C "$repo" checkout -qb staged-merge-source
