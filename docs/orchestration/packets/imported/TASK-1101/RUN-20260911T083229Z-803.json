@@ -1,0 +1,213 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PKT-RUN-20260911T083229Z-803-TASK-1101",
+  "runId": "RUN-20260911T083229Z-803",
+  "taskId": "TASK-1101",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "f5bc73562434c48f9ea72a6d1b0ab5f52038b7b5",
+  "branch": "codex/brain-rescue/TASK-1101-package",
+  "headSha": "e80a6a852a12b994bf88e2a92ec5a1155e299826",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1101",
+  "ownedFiles": [
+    "vendor/singular-brain/",
+    "engine/brain_manifest.py",
+    "engine/brain_documents.py",
+    "engine/ctx-rehydrate-authored-config.sh",
+    "engine/ctx-rehydrate-event.sh",
+    "engine/l1-drive.sh",
+    "engine/doctor.py",
+    "engine/campaign_manifest.py",
+    "cli/singular",
+    "install.sh",
+    "schemas/brain-documents.v1.schema.json",
+    "schemas/orchestration/brain-documents.v1.schema.json",
+    "tests/test-brain-schema-bundle.sh",
+    "tests/test-brain-package.sh",
+    "tests/test-brain-manifest-consumer.sh",
+    "tests/test-brain-ingestion-e2e.sh",
+    "tests/fixtures/brain-manifest-consumer/",
+    "tests/fixtures/singular-brain/",
+    "README.md"
+  ],
+  "changedFiles": [
+    "README.md",
+    "cli/singular",
+    "engine/brain_documents.py",
+    "engine/brain_manifest.py",
+    "engine/campaign_manifest.py",
+    "engine/ctx-rehydrate-authored-config.sh",
+    "engine/ctx-rehydrate-event.sh",
+    "engine/doctor.py",
+    "engine/l1-drive.sh",
+    "install.sh",
+    "schemas/brain-documents.v1.schema.json",
+    "schemas/orchestration/brain-documents.v1.schema.json",
+    "tests/fixtures/brain-manifest-consumer/CAPTURE-PROVENANCE.json",
+    "tests/fixtures/brain-manifest-consumer/corpus/handoffs/generated-summary.md",
+    "tests/fixtures/brain-manifest-consumer/corpus/handoffs/session-2026-07-05.md",
+    "tests/fixtures/brain-manifest-consumer/corpus/notes/decision-log.md",
+    "tests/fixtures/brain-manifest-consumer/corpus/skills/example-skill/SKILL.md",
+    "tests/fixtures/brain-manifest-consumer/expected/.knowledge-freshness.json",
+    "tests/fixtures/brain-manifest-consumer/expected/KNOWLEDGE.json",
+    "tests/fixtures/brain-manifest-consumer/singular-brain.config.json",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/.knowledge-freshness.json",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/KNOWLEDGE.json",
+    "tests/fixtures/singular-brain/knowledge-scope/expected/KNOWLEDGE.md",
+    "tests/fixtures/singular-brain/knowledge-scope/handoffs/generated-summary.md",
+    "tests/fixtures/singular-brain/knowledge-scope/handoffs/session-2026-07-05.md",
+    "tests/fixtures/singular-brain/knowledge-scope/notes/decision-log.md",
+    "tests/fixtures/singular-brain/knowledge-scope/singular-brain.config.json",
+    "tests/fixtures/singular-brain/knowledge-scope/skills/example-skill/SKILL.md",
+    "tests/test-brain-ingestion-e2e.sh",
+    "tests/test-brain-manifest-consumer.sh",
+    "tests/test-brain-package.sh",
+    "tests/test-brain-schema-bundle.sh",
+    "vendor/singular-brain/CHANGELOG.md",
+    "vendor/singular-brain/PROVENANCE.json",
+    "vendor/singular-brain/README.md",
+    "vendor/singular-brain/SCHEMA_VERSION",
+    "vendor/singular-brain/SHA256SUMS",
+    "vendor/singular-brain/VERSION",
+    "vendor/singular-brain/docs/AUDIT-BRIEF.md",
+    "vendor/singular-brain/docs/spec.md",
+    "vendor/singular-brain/engine/adapters/claude-skill.mjs",
+    "vendor/singular-brain/engine/adapters/markdown-doc.mjs",
+    "vendor/singular-brain/engine/cli.mjs",
+    "vendor/singular-brain/engine/config.mjs",
+    "vendor/singular-brain/engine/freshness.mjs",
+    "vendor/singular-brain/engine/frontmatter.mjs",
+    "vendor/singular-brain/engine/gates.mjs",
+    "vendor/singular-brain/engine/hash.mjs",
+    "vendor/singular-brain/engine/pipeline.mjs",
+    "vendor/singular-brain/engine/render/json.mjs",
+    "vendor/singular-brain/engine/render/markdown.mjs",
+    "vendor/singular-brain/engine/walk.mjs"
+  ],
+  "commands": [
+    {
+      "cmd": "bash tests/test-brain-schema-bundle.sh >.singular-evidence/red.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Strict-test-first red: the public scaffold lacked brain-documents.v1.schema.json."
+    },
+    {
+      "cmd": "{ bash tests/test-brain-schema-bundle.sh && bash tests/test-brain-package.sh && bash tests/test-brain-manifest-consumer.sh && bash tests/test-brain-ingestion-e2e.sh; } >.singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Post-implementation focused gate passed."
+    },
+    {
+      "cmd": "bash tests/test-brain-package.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Pinned producer, CLI, doctor, installation, freshness, and fingerprint coverage passed."
+    },
+    {
+      "cmd": "bash tests/test-brain-manifest-consumer.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Normalization, selection, lifecycle, containment, legacy compatibility, and L1 ingestion passed."
+    },
+    {
+      "cmd": "bash tests/test-brain-ingestion-e2e.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Actual vendored generation-to-consumption and installed-runtime path passed."
+    },
+    {
+      "cmd": "bash tests/test-doctor-json.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/maintenance.log",
+      "rationale": "Current structured doctor behavior remained green."
+    },
+    {
+      "cmd": "bash tests/test-effective-config-parity.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/maintenance.log",
+      "rationale": "Current effective-config resolution behavior remained green."
+    },
+    {
+      "cmd": "{ bash tests/test-brain-schema-bundle.sh && bash tests/test-brain-package.sh && bash tests/test-brain-manifest-consumer.sh && bash tests/test-brain-ingestion-e2e.sh; } >.singular-evidence/regression.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "Authoritative four-test regression gate passed."
+    }
+  ],
+  "tests": [
+    {
+      "name": "brain-schema-bundle",
+      "phase": "red",
+      "status": "failed-as-expected",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "brain-focused-gate",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "doctor-and-effective-config-maintenance",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/maintenance.log"
+    },
+    {
+      "name": "brain-regression-gate",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "test-red",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "test-green",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "regression",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "maintenance-regression",
+      "ref": ".singular-evidence/maintenance.log"
+    },
+    {
+      "kind": "upstream-provenance",
+      "ref": "vendor/singular-brain/PROVENANCE.json"
+    },
+    {
+      "kind": "upstream-byte-inventory",
+      "ref": "vendor/singular-brain/SHA256SUMS"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260911T083229Z-803/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A4:sha256:2b38cfcfac837de05f4a58eddc8c6a6d356b63377dd8652a374367b47670bd8b:epoch:4901a8ece65f6a910724c0551125ed468391ea200ecb1e52"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260911T083229Z-803/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260911T083229Z-803/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260911T083229Z-803/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-11T08:50:53Z"
+}

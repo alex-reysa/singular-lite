@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-11T09:18:53Z — TASK-1101 — integrate
+
+- Run: `ORIGIN-20260911T085624Z-67477`
+- Branch: `codex/brain-rescue/TASK-1101-package`
+- Authority: origin
+- Rationale: merged codex/brain-rescue/TASK-1101-package (e80a6a852a12b994bf88e2a92ec5a1155e299826) into codex/brain-integration as f8f14b87df8ffa2dd5196af8ef4d820dc21cb03e; gate green; acceptance=accepted
+
 ### 2026-09-11T08:55:57Z — TASK-1101 — accept
 
 - Run: `RUN-20260911T083229Z-803`

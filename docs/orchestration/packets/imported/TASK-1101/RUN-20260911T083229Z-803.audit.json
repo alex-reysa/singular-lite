@@ -1,0 +1,49 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1101",
+  "runId": "RUN-20260911T083229Z-803",
+  "branch": "codex/brain-rescue/TASK-1101-package",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json",
+    "packet.json",
+    "audit-verification.json",
+    "gate-check.log: bounded excerpts at offsets 266676 and 269628",
+    "Manifest-bound red, green, regression, and maintenance command evidence",
+    "Committed diff f5bc73562434c48f9ea72a6d1b0ab5f52038b7b5..e80a6a852a12b994bf88e2a92ec5a1155e299826",
+    "All four focused test scripts",
+    "schemas/orchestration/audit-verdict.v1.schema.json",
+    "Both brain-documents.v1 schema copies",
+    "vendor/singular-brain/PROVENANCE.json and upstream engine byte comparison",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A4:sha256:2b38cfcfac837de05f4a58eddc8c6a6d356b63377dd8652a374367b47670bd8b:epoch:4901a8ece65f6a910724c0551125ed468391ea200ecb1e52",
+    "reviewed-head-sha:e80a6a852a12b994bf88e2a92ec5a1155e299826"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "bash tests/test-brain-schema-bundle.sh && bash tests/test-brain-package.sh && bash tests/test-brain-manifest-consumer.sh && bash tests/test-brain-ingestion-e2e.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "audit-verification.json",
+        "evidence-manifest.json",
+        "gate-check.log",
+        "packet.json"
+      ],
+      "rationale": "The authoritative host report binds successful gate evidence to the reviewed committed head with verified source integrity and no unexpected failures. Recorded red evidence identifies the missing public schema before implementation; subsequent green and regression evidence succeeds. Reviewed tests cover actual generation, installation, different cwd, optional Node, lifecycle exclusion, containment, duplicate rejection, legacy compatibility, freshness preservation, and runtime integration. Tests were not rerun."
+    }
+  ],
+  "commandsRun": [
+    "Read compact evidence-manifest.json",
+    "git status --short; git rev-parse HEAD; git diff --stat f5bc73562434c48f9ea72a6d1b0ab5f52038b7b5 HEAD",
+    "git log --oneline -4; git rev-parse codex/brain-integration",
+    "Read focused committed diffs, implementation files, schemas, provenance, and test scripts using git diff, cat, sed, and rg",
+    "Python read-only inspection: verify manifest file hashes, ancestor instructions, and upstream engine completeness and byte identity",
+    "Initial Python heredoc inspection was prevented by sandbox temporary-file restrictions; equivalent python3 -c inspection succeeded",
+    "evidence-show.sh evidence-manifest.json gate-check.log 5000 266676",
+    "evidence-show.sh evidence-manifest.json gate-check.log 2048 269628",
+    "git diff --check f5bc73562434c48f9ea72a6d1b0ab5f52038b7b5 HEAD; git status --porcelain"
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "rationale": "All 52 changed paths are owned, the worktree is clean, and the target remains the recorded base. Every manifest-listed file hash matches. Vendored engine files match the supplied pinned upstream snapshot with none missing. Runtime changes preserve existing maintenance logic and keep authored content non-authoritative. Review and live hashes remain distinct, and explicit selection avoids interpreting loadWhen prose as role tokens. No blocking scope, acceptance, provenance, or foundation violation was found. The sandbox inspection limitation was resolved without writes and is not a product failure. Acceptance applies to the reviewed head; native exact-tree integration remains a subsequent host action."
+}
