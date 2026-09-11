@@ -2315,134 +2315,7 @@ singular_worker_run_id() {
 # Parse a task markdown file into a normalized JSON object on stdout.
 singular_task_json() {
   local task_file="$1"
-  python3 - "$task_file" <<'PY'
-import json
-import re
-import sys
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    task_document = f.read()
-    lines = task_document.splitlines()
-
-def strip_ticks(s):
-    return s.strip().strip("`").strip()
-
-data = {
-    "taskDocument": task_document,
-    "taskId": "",
-    "title": "",
-    "status": "",
-    "area": "",
-    "targetBranch": "",
-    "workerBranch": "",
-    "testPolicy": "",
-    "gateCommand": "",
-    "dispatchMode": "",
-    "dagNode": "",
-    "supersedes": [],
-    "supersededBy": [],
-    "dependsOn": [],
-    "objective": "",
-    "ownedFiles": [],
-    "forbiddenFiles": [],
-    "prerequisites": [],
-    "acceptanceCriteria": [],
-    "planCritique": [],
-}
-
-header_keys = {
-    "status": "status",
-    "area": "area",
-    "target branch": "targetBranch",
-    "worker branch": "workerBranch",
-    "test policy": "testPolicy",
-    "gate command": "gateCommand",
-    "dispatch mode": "dispatchMode",
-    "dag node": "dagNode",
-}
-
-def parse_depends(raw):
-    raw = strip_ticks(raw)
-    if raw in ("", "[]", "none", "None", "NONE"):
-        return []
-    return re.findall(r"TASK-\d{4,}", raw)
-
-section = None
-subsection = None
-objective_lines = []
-for raw in lines:
-    line = raw.rstrip()
-    m = re.match(r"^#\s+(TASK-\d{4,})\s*:\s*(.*)$", line)
-    if m:
-        data["taskId"] = m.group(1)
-        data["title"] = m.group(2).strip()
-        continue
-    hm = re.match(r"^##\s+(.*)$", line)
-    if hm:
-        section = hm.group(1).strip().lower()
-        subsection = None
-        continue
-    if section is None:
-        km = re.match(r"^([A-Za-z][A-Za-z ]+):\s*(.*)$", line)
-        if km:
-            key = km.group(1).strip().lower()
-            if key == "depends on":
-                data["dependsOn"] = parse_depends(km.group(2))
-            elif key == "supersedes" or key == "superseded by":
-                # "Supersedes:" declares intentional replacement (duplicate-guard
-                # bypass); "Superseded by:" is the inverse pointer written by the
-                # supersede verb. Both parse to TASK-id lists.
-                field = "supersedes" if key == "supersedes" else "supersededBy"
-                data[field] = parse_depends(km.group(2))
-            elif key in header_keys:
-                data[header_keys[key]] = strip_ticks(km.group(2))
-        continue
-    if section == "objective":
-        if line.strip():
-            objective_lines.append(line.strip())
-        continue
-    if section == "scope":
-        sm = re.match(r"^(Owned files|Forbidden files)\s*:?\s*$", line.strip(), re.I)
-        if sm:
-            subsection = sm.group(1).lower()
-            continue
-        im = re.match(r"^[-*]\s+(.*)$", line.strip())
-        if im:
-            item = strip_ticks(im.group(1))
-            if subsection == "owned files":
-                data["ownedFiles"].append(item)
-            elif subsection == "forbidden files":
-                data["forbiddenFiles"].append(item)
-        continue
-    if section == "prerequisites":
-        im = re.match(r"^[-*]\s+(.*)$", line.strip())
-        if im:
-            data["prerequisites"].append(im.group(1).strip())
-        continue
-    if section == "acceptance criteria":
-        im = re.match(r"^[-*]\s+(.*)$", line.strip())
-        if im:
-            data["acceptanceCriteria"].append(im.group(1).strip())
-        continue
-    if section.startswith("plan critique"):
-        # Advisory findings carried forward from the plan critic (0.21.0);
-        # rendered into the worker and auditor prompts, never into scope.
-        im = re.match(r"^[-*]\s+(.*)$", line.strip())
-        if im:
-            data["planCritique"].append(im.group(1).strip())
-        continue
-    if section == "executable dag frontier" and not data["dagNode"]:
-        # Planner-appended provenance ("- node: `X`") — the dagNode fallback for
-        # tasks authored before the `DAG node:` header existed.
-        nm = re.match(r"^[-*]\s+node:\s*(.+)$", line.strip(), re.I)
-        if nm:
-            data["dagNode"] = strip_ticks(nm.group(1))
-        continue
-
-data["objective"] = " ".join(objective_lines).strip()
-print(json.dumps(data, separators=(",", ":")))
-PY
+  python3 "$SINGULAR_LIB_DIR/task_parser.py" task "$task_file"
 }
 
 # The DAG node a task belongs to (header `DAG node:` first, planner frontier
@@ -2459,79 +2332,7 @@ singular_task_node() {
 # Output: [{"taskId","status","ownedFiles":[],"supersededBy":[],"file"}...]
 singular_node_task_index_json() {
   local node="$1"
-  python3 - "$SINGULAR_TASKS_DIR" "$node" <<'PY'
-import json
-import os
-import re
-import sys
-
-tasks_dir, want_node = sys.argv[1], sys.argv[2]
-out = []
-
-
-def strip_ticks(s):
-    return s.strip().strip("`").strip()
-
-
-for dirpath, _dirs, files in os.walk(tasks_dir):
-    for name in sorted(files):
-        if not (name.startswith("TASK-") and name.endswith(".md")):
-            continue
-        path = os.path.join(dirpath, name)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-        except OSError:
-            continue
-        task_id = status = dag_node = ""
-        owned, superseded_by = [], []
-        section = subsection = None
-        for raw in lines:
-            line = raw.rstrip()
-            m = re.match(r"^#\s+(TASK-\d{4,})\s*:", line)
-            if m:
-                task_id = m.group(1)
-                continue
-            hm = re.match(r"^##\s+(.*)$", line)
-            if hm:
-                section = hm.group(1).strip().lower()
-                subsection = None
-                continue
-            if section is None:
-                km = re.match(r"^([A-Za-z][A-Za-z ]+):\s*(.*)$", line)
-                if km:
-                    key = km.group(1).strip().lower()
-                    if key == "status":
-                        status = strip_ticks(km.group(2)).lower()
-                    elif key == "dag node":
-                        dag_node = strip_ticks(km.group(2))
-                    elif key == "superseded by":
-                        superseded_by = re.findall(r"TASK-\d{4,}", km.group(2))
-                continue
-            if section == "scope":
-                sm = re.match(r"^(Owned files|Forbidden files)\s*:?\s*$", line.strip(), re.I)
-                if sm:
-                    subsection = sm.group(1).lower()
-                    continue
-                im = re.match(r"^[-*]\s+(.*)$", line.strip())
-                if im and subsection == "owned files":
-                    owned.append(strip_ticks(im.group(1)))
-                continue
-            if section == "executable dag frontier" and not dag_node:
-                nm = re.match(r"^[-*]\s+node:\s*(.+)$", line.strip(), re.I)
-                if nm:
-                    dag_node = strip_ticks(nm.group(1))
-                continue
-        if task_id and dag_node == want_node:
-            out.append({
-                "taskId": task_id,
-                "status": status,
-                "ownedFiles": sorted(set(owned)),
-                "supersededBy": superseded_by,
-                "file": path,
-            })
-print(json.dumps(out, separators=(",", ":")))
-PY
+  python3 "$SINGULAR_LIB_DIR/task_parser.py" index "$SINGULAR_TASKS_DIR" "$node"
 }
 
 # A node is "pending promotion" when its planned work is done but its gate has
@@ -2694,9 +2495,8 @@ print(json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)
 #   (the default).
 # Owned/forbidden conflicts use the same segment-boundary semantics as
 # scope-check.sh: "a/b" conflicts with "a/b" and "a/b/c", but NOT with "a/bc".
-# Forbidden entries are considered only when path-like (contain "/" and no
-# space), matching the driver's forbidden-prefix filter, so prose entries like
-# "Any file outside the owned scope." are ignored.
+# Forbidden prose is removed by the canonical task parser; every remaining
+# entry is an executable path, including quoted paths containing spaces.
 singular_task_preflight() {
   local task_json="$1" gate_cmd="${2-}" target_branch="${3-}" require_gate="${4:-1}"
   python3 - "$task_json" "$gate_cmd" "$target_branch" "$require_gate" \
@@ -2737,10 +2537,7 @@ if not owned:
     reasons.append("task declares no owned files")
 
 # Forbidden-prefix filter mirrors the driver: path-like entries only.
-forbidden = [
-    str(x).strip() for x in (task.get("forbiddenFiles") or [])
-    if "/" in str(x) and " " not in str(x) and str(x).strip()
-]
+forbidden = [str(x).strip() for x in (task.get("forbiddenFiles") or []) if str(x).strip()]
 
 def paths_conflict(a, b):
     a, b = a.rstrip("/"), b.rstrip("/")
@@ -7173,16 +6970,19 @@ singular_l1_import_staged() {
     # Validate the whole batch first (all-or-nothing); real ids come from the
     # durable monotonic allocator AFTER validation succeeds (so a rejected
     # batch never burns ids).
-	    local ok=1 real v_id v_status v_area v_owned v_mode
+	    local ok=1 real v_id v_status v_area v_owned v_mode v_deps
 	    local duplicate_json="" duplicate_event_json=""
 	    local -a src=() ids=() temps=()
     for cand in "${cands[@]}"; do
       v_id="$(singular_task_field "$cand" taskId 2>/dev/null || echo '')"
       v_status="$(singular_task_field "$cand" status 2>/dev/null || echo '')"
       v_area="$(singular_task_field "$cand" area 2>/dev/null || echo '')"
-      v_owned="$(singular_task_field "$cand" ownedFiles 2>/dev/null || echo '[]')"
-      v_mode="$(singular_task_field "$cand" dispatchMode 2>/dev/null || echo '')"
-	      if [[ -z "$v_id" || "$v_status" != "ready" || "$v_area" != "$node_area" || "$v_owned" == "[]" || "$v_mode" != "canonical" ]]; then
+	      v_owned="$(singular_task_field "$cand" ownedFiles 2>/dev/null || echo '[]')"
+	      v_mode="$(singular_task_field "$cand" dispatchMode 2>/dev/null || echo '')"
+	      v_deps="$(singular_task_field "$cand" dependsOn 2>/dev/null || echo '[]')"
+	      if [[ -z "$v_id" || "$(basename "$cand" .candidate.md)" != "$v_id" \
+	          || "$v_status" != "ready" || "$v_area" != "$node_area" \
+	          || "$v_owned" == "[]" || "$v_mode" != "canonical" ]]; then
 	        ok=0; break
 	      fi
 	      if duplicate_json="$(singular_find_duplicate_task_signature "$cand" "$node" 2>/dev/null)"; then
@@ -7190,6 +6990,43 @@ singular_l1_import_staged() {
 	      fi
 	      src+=("$cand"); temps+=("$v_id")
 	    done
+	    # Duplicate temporary identities make a mapping ambiguous. Internal
+	    # dependencies remain prohibited by planner policy; only external task
+	    # references may survive unchanged through import.
+	    if [[ "$ok" -eq 1 ]]; then
+	      local mapping_validation
+	      mapping_validation="$(python3 - \
+	        "$(printf '%s\n' "${temps[@]}" | python3 -c 'import json,sys; print(json.dumps([x.strip() for x in sys.stdin if x.strip()]))')" \
+	        "$(printf '%s\n' "${src[@]}" | python3 -c 'import json,sys; print(json.dumps([x.strip() for x in sys.stdin if x.strip()]))')" <<'PY'
+import json
+import re
+import sys
+
+temps = json.loads(sys.argv[1])
+paths = json.loads(sys.argv[2])
+if len(set(temps)) != len(temps):
+    print("duplicate-temporary-id")
+    raise SystemExit(1)
+temporary = set(temps)
+for path in paths:
+    text = open(path, encoding="utf-8").read().splitlines()
+    for line in text:
+        if line.lower().startswith("depends on:"):
+            if temporary.intersection(re.findall(r"TASK-[0-9]{4,}", line)):
+                print("internal-dependency")
+                raise SystemExit(1)
+print("valid")
+PY
+)" || ok=0
+	      [[ "$mapping_validation" == "valid" ]] || ok=0
+	    fi
+	    local private_dir="$stage_dir/.import-${BASHPID:-$$}-${RANDOM}"
+	    if [[ "$ok" -eq 1 ]]; then
+	      if [[ "${SINGULAR_TEST_IMPORT_FAIL_AT:-}" == "prepare" ]] \
+	          || ! singular_task_batch_prepare_import "$stage_dir" "$private_dir"; then
+	        ok=0
+	      fi
+	    fi
 	    if [[ "$ok" -eq 1 ]]; then
 	      while IFS= read -r real; do
 	        [[ -n "$real" ]] && ids+=("$real")
@@ -7205,24 +7042,48 @@ singular_l1_import_staged() {
 	      continue
 	    fi
 	    if [[ "$ok" -ne 1 ]]; then
+	      [[ "$private_dir" == "$stage_dir"/.import-* ]] && rm -rf -- "$private_dir"
 	      import_rejections=$((import_rejections + 1))
 	      singular_l1_lease_set_status "$node" failed 2>/dev/null || true
       singular_append_event "origin.l1_import_rejected" "staged batch failed validation" \
         "{\"runId\":\"$run_id\",\"node\":\"$node\"}"
       continue
     fi
-    # Rewrite each candidate's temp id (token-safe) to its real id and VERIFY the
-    # result, all BEFORE promoting any file — so a botched rewrite fails the whole
-    # node with nothing left in the global tasks dir (all-or-nothing).
+    # Rewrite private copies only. The mapping is simultaneous across the whole
+    # batch, so overlapping old/new ranges cannot cascade and sibling references
+    # are transformed consistently without touching canonical evidence.
     local j rid mv_ok=1
     local -a moved=()
-    for j in "${!src[@]}"; do
-      singular_rewrite_task_id_token "${src[$j]}" "${temps[$j]}" "${ids[$j]}" || { ok=0; break; }
-      if [[ "$(singular_task_field "${src[$j]}" taskId 2>/dev/null || echo '')" != "${ids[$j]}" ]]; then
-        ok=0; break
-      fi
-    done
+	    local mapping_json
+	    mapping_json="$(python3 - \
+	      "$(printf '%s\n' "${temps[@]}" | python3 -c 'import json,sys; print(json.dumps([x.strip() for x in sys.stdin if x.strip()]))')" \
+	      "$(printf '%s\n' "${ids[@]}" | python3 -c 'import json,sys; print(json.dumps([x.strip() for x in sys.stdin if x.strip()]))')" <<'PY'
+import json, sys
+old, new = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+print(json.dumps(dict(zip(old, new)), separators=(",", ":")))
+PY
+)" || ok=0
+	    if [[ "$ok" -eq 1 ]]; then
+	      singular_task_batch_rewrite_import "$private_dir" "$mapping_json" || ok=0
+	    fi
+	    local -a private_src=()
+	    for j in "${!src[@]}"; do
+	      private_src+=("$private_dir/$(basename "${src[$j]}")")
+	      if [[ "$ok" -eq 1 ]]; then
+	        v_id="$(singular_task_field "${private_src[$j]}" taskId 2>/dev/null || echo '')"
+	        v_status="$(singular_task_field "${private_src[$j]}" status 2>/dev/null || echo '')"
+	        v_area="$(singular_task_field "${private_src[$j]}" area 2>/dev/null || echo '')"
+	        v_owned="$(singular_task_field "${private_src[$j]}" ownedFiles 2>/dev/null || echo '[]')"
+	        v_mode="$(singular_task_field "${private_src[$j]}" dispatchMode 2>/dev/null || echo '')"
+	        if [[ "$v_id" != "${ids[$j]}" || "$v_status" != "ready" \
+	            || "$v_area" != "$node_area" || "$v_owned" == "[]" \
+	            || "$v_mode" != "canonical" ]]; then
+	          ok=0
+	        fi
+	      fi
+	    done
 	    if [[ "$ok" -ne 1 ]]; then
+	      [[ "$private_dir" == "$stage_dir"/.import-* ]] && rm -rf -- "$private_dir"
 	      import_rejections=$((import_rejections + 1))
 	      singular_l1_lease_set_status "$node" failed 2>/dev/null || true
       singular_append_event "origin.l1_import_rejected" "id rewrite verification failed" \
@@ -7233,7 +7094,8 @@ singular_l1_import_staged() {
     # never aborts the whole import under `set -e`; on failure, roll back the files
     # already promoted so a partial batch never lands in the global tasks dir, mark
     # the node failed, and move on to the next node.
-    for j in "${!src[@]}"; do
+    # Preflight every destination before the first publication.
+    for j in "${!private_src[@]}"; do
       # Collision preflight: never overwrite an existing task file. With the
       # monotonic allocator this cannot happen; if it does (foreign file, clock
       # rollback), reject the batch loudly instead of destroying state.
@@ -7241,23 +7103,32 @@ singular_l1_import_staged() {
         singular_append_event "origin.task_id_collision" "refusing to overwrite existing task file" \
           "{\"runId\":\"$run_id\",\"node\":\"$node\",\"taskId\":\"${ids[$j]}\"}"
         mv_ok=0; break
-      fi
-      if mv "${src[$j]}" "$SINGULAR_TASKS_DIR/${ids[$j]}.md" 2>/dev/null; then
+	      fi
+    done
+    if [[ "$mv_ok" -eq 1 ]]; then
+      for j in "${!private_src[@]}"; do
+        if [[ "${SINGULAR_TEST_IMPORT_FAIL_AT:-}" == "publish:$((j + 1))" ]]; then
+          mv_ok=0; break
+        fi
+      if mv "${private_src[$j]}" "$SINGULAR_TASKS_DIR/${ids[$j]}.md" 2>/dev/null; then
         moved+=("${ids[$j]}")
       else
         mv_ok=0; break
       fi
     done
+	    fi
 	    if [[ "$mv_ok" -ne 1 ]]; then
 	      import_rejections=$((import_rejections + 1))
-	    for rid in "${moved[@]}"; do
+      for rid in "${moved[@]}"; do
         rm -f "$SINGULAR_TASKS_DIR/$rid.md" 2>/dev/null || true
       done
+	      [[ "$private_dir" == "$stage_dir"/.import-* ]] && rm -rf -- "$private_dir"
       singular_l1_lease_set_status "$node" failed 2>/dev/null || true
       singular_append_event "origin.l1_import_rejected" "promotion failed; rolled back partial batch" \
         "{\"runId\":\"$run_id\",\"node\":\"$node\"}"
       continue
     fi
+	    [[ "$private_dir" == "$stage_dir"/.import-* ]] && rm -rf -- "$private_dir"
     for rid in "${moved[@]}"; do
       singular_append_event "planner.generated" "task imported from l1 plan" \
         "{\"runId\":\"$run_id\",\"node\":\"$node\",\"taskId\":\"$rid\"}"

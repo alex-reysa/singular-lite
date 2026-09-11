@@ -95,7 +95,7 @@ branch_base="${dispatch_base_sha:-$target_branch}"
 packet_base_ref="${dispatch_base_sha:-$target_branch}"
 
 mapfile -t owned_files < <(printf '%s' "$task_json" | python3 -c 'import json,sys; [print(x) for x in json.load(sys.stdin)["ownedFiles"]]')
-mapfile -t forbidden_files < <(printf '%s' "$task_json" | python3 -c 'import json,sys; [print(x) for x in json.load(sys.stdin)["forbiddenFiles"] if "/" in x and " " not in x]')
+mapfile -t forbidden_files < <(printf '%s' "$task_json" | python3 -c 'import json,sys; [print(x) for x in json.load(sys.stdin)["forbiddenFiles"]]')
 
 # ---- Host-only task preflight (fail closed BEFORE run_id/lease/worktree) ----
 # Absorbs the historical ad-hoc refusals (empty gate command [fail closed: a

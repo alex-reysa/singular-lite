@@ -38,6 +38,49 @@ singular_task_batch_has_candidates() {
     -print -quit 2>/dev/null | grep -q .
 }
 
+# Pin and verify the selected canonical batch, then copy it byte-for-byte into
+# a new private writable directory. The publisher lock protects selection while
+# copying; canonical bytes and modes are verified again before the copy appears.
+singular_task_batch_prepare_import() {
+  local stage_dir="${1:-}" private_dir="${2:-}"
+  [[ -d "$stage_dir" && -n "$private_dir" ]] || return 2
+  [[ "$private_dir" == "$stage_dir"/.import-* ]] || return 2
+  [[ ! -e "$private_dir" && ! -L "$private_dir" ]] || return 2
+  python3 "$SINGULAR_ENGINE_DIR/task_batch_publish.py" prepare-import \
+    --stage-dir "$stage_dir" --output-dir "$private_dir" >/dev/null
+}
+
+# Apply a whole-batch TASK-id mapping in one tokenization pass per private file.
+# Looking every original token up in the immutable mapping avoids A->B, B->C
+# cascades when planner ids overlap the newly allocated range.
+singular_task_batch_rewrite_import() {
+  local private_dir="${1:-}" mapping_json="${2:-}"
+  [[ -d "$private_dir" && -n "$mapping_json" ]] || return 2
+  python3 - "$private_dir" "$mapping_json" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+directory, mapping_raw = sys.argv[1:3]
+mapping = json.loads(mapping_raw)
+if not isinstance(mapping, dict) or not mapping:
+    raise SystemExit(2)
+token = re.compile(r"TASK-[0-9]{4,}")
+paths = sorted(Path(directory).glob("TASK-*.candidate.md"))
+if len(paths) != len(mapping):
+    raise SystemExit(2)
+fail_at = os.environ.get("SINGULAR_TEST_IMPORT_FAIL_AT", "")
+for index, path in enumerate(paths, 1):
+    text = path.read_text(encoding="utf-8")
+    rewritten = token.sub(lambda match: mapping.get(match.group(0), match.group(0)), text)
+    path.write_text(rewritten, encoding="utf-8")
+    if fail_at == f"rewrite:{index}":
+        raise SystemExit(73)
+PY
+}
+
 singular_task_batch_materialize() {
   local raw_message="${1:-}" normalized_batch="${2:-}" candidate_dir="${3:-}"
   local expected_area="${4:-}" expected_ids_json="${5:-[]}" identity_mode="${6:-assign}"

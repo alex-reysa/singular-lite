@@ -239,6 +239,57 @@ def publish(stage_dir: Path, candidate_dir: Path) -> dict[str, Any]:
         return pointer
 
 
+def prepare_import(stage_dir: Path, output_dir: Path) -> dict[str, Any]:
+    """Copy one pinned canonical generation into a private writable directory."""
+
+    if output_dir.exists() or output_dir.is_symlink():
+        raise BatchError("private import directory already exists")
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = stage_dir / ".candidate-publish.lock"
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        source_dir, record, token = resolve_batch(stage_dir)
+        source_modes = {
+            item["name"]: (source_dir / item["name"]).stat().st_mode & 0o7777
+            for item in record["candidates"]
+        }
+        temporary = Path(
+            tempfile.mkdtemp(prefix=".candidate-import-", dir=str(output_dir.parent))
+        )
+        try:
+            for item in record["candidates"]:
+                source = source_dir / item["name"]
+                destination = temporary / item["name"]
+                with source.open("rb") as reader, destination.open("xb") as writer:
+                    shutil.copyfileobj(reader, writer)
+                    writer.flush()
+                    os.fsync(writer.fileno())
+                destination.chmod(0o600)
+            if batch_record(temporary) != record:
+                raise BatchError("private candidate copy failed integrity validation")
+            # Re-resolve and compare the selection, bytes, and source modes while
+            # the cooperative publisher lock is still held. Canonical inputs are
+            # never chmodded, renamed, or rewritten by this operation.
+            latest_dir, latest_record, latest_token = resolve_batch(stage_dir)
+            latest_modes = {
+                item["name"]: (latest_dir / item["name"]).stat().st_mode & 0o7777
+                for item in latest_record["candidates"]
+            }
+            if latest_token != token or latest_record != record or latest_modes != source_modes:
+                raise BatchError("canonical candidate batch changed during private copy")
+            fsync_directory(temporary)
+            os.rename(temporary, output_dir)
+            fsync_directory(output_dir.parent)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+        return {
+            "sourceToken": token,
+            "sourceDirectory": str(source_dir),
+            **record,
+        }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -247,6 +298,9 @@ def main() -> None:
     publish_parser = subparsers.add_parser("publish")
     publish_parser.add_argument("--stage-dir", required=True)
     publish_parser.add_argument("--candidate-dir", required=True)
+    prepare_parser = subparsers.add_parser("prepare-import")
+    prepare_parser.add_argument("--stage-dir", required=True)
+    prepare_parser.add_argument("--output-dir", required=True)
     args = parser.parse_args()
 
     try:
@@ -254,6 +308,10 @@ def main() -> None:
         if args.command == "resolve":
             directory, _, _ = resolve_batch(stage_dir)
             print(directory)
+            return
+        if args.command == "prepare-import":
+            prepared = prepare_import(stage_dir, Path(args.output_dir).resolve())
+            print(json.dumps(prepared, sort_keys=True, separators=(",", ":")))
             return
         pointer = publish(stage_dir, Path(args.candidate_dir).resolve())
         print(json.dumps(pointer, sort_keys=True, separators=(",", ":")))
