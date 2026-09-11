@@ -17,6 +17,9 @@ worker_gate_command=""
 attempt="1"
 try_number="0"
 evidence_only="no"
+verification_request=""
+verification_task_contract=""
+verification_policy_contract=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,9 +33,27 @@ while [[ $# -gt 0 ]]; do
     --attempt) attempt="${2:-}"; shift 2 ;;
     --try) try_number="${2:-}"; shift 2 ;;
     --evidence-only) evidence_only="yes"; shift ;;
+    --verification-request) verification_request="${2:-}"; shift 2 ;;
+    --task-contract) verification_task_contract="${2:-}"; shift 2 ;;
+    --policy-contract) verification_policy_contract="${2:-}"; shift 2 ;;
     *) echo "audit-verify: unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$verification_request" ]]; then
+  [[ -n "$verification_task_contract" && -n "$verification_policy_contract" ]] || {
+    echo "audit-verify: verification request requires trusted task and policy contracts" >&2
+    exit 2
+  }
+  trusted_gate_command="$(python3 "$SCRIPT_DIR/gate-report.py" resolve-verification-request \
+    --request "$verification_request" --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" --expected-task "$task_id")" || exit 2
+  if [[ -n "$gate_command" && "$gate_command" != "$trusted_gate_command" ]]; then
+    echo "audit-verify: caller gate command differs from trusted verification contract" >&2
+    exit 2
+  fi
+  gate_command="$trusted_gate_command"
+fi
 
 [[ -n "$run_dir" && -d "$run_dir" ]] || { echo "audit-verify: --run-dir is required" >&2; exit 2; }
 [[ "$task_id" =~ ^TASK-[0-9]{4,}$ ]] || { echo "audit-verify: valid --task-id is required" >&2; exit 2; }
@@ -414,6 +435,12 @@ else
     "${report_args[@]}"
   )
   "$SCRIPT_DIR/gate-report.py" "${legacy_args[@]}" || report_rc=$?
+fi
+if [[ -n "$verification_request" ]]; then
+  "$SCRIPT_DIR/gate-report.py" bind-verification-result \
+    --request "$verification_request" --report "$output" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" || report_rc=20
 fi
 printf '%s\n' "$output"
 exit "$report_rc"

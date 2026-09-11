@@ -2123,6 +2123,38 @@ PY
       "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"mode\":\"$audit_verify_mode\",\"reason\":\"${audit_verify_reason#skip:}\",\"riskTier\":\"$risk_tier\"}" || true
   fi
 
+  local verification_request="$run_dir/verification-request-${n}.json"
+  local verification_policy="$run_dir/verification-policy-${n}.json"
+  local verification_tree=""
+  if [[ "$audit_verify_run" == "yes" ]]; then
+    verification_tree="$(git -C "$worktree" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
+    python3 - "$verification_policy" "$l1_campaign_binding" <<'PY'
+import json, os, sys
+path, campaign = sys.argv[1:3]
+temporary = path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump({"campaign": campaign, "policy": campaign}, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PY
+    if [[ ! "$verification_tree" =~ ^[0-9a-fA-F]{40,64}$ ]] \
+        || ! "$SCRIPT_DIR/gate-report.py" create-verification-request \
+          --output "$verification_request" --task-id "$task_id" --run-id "$run_id" \
+          --attempt "$n" --head-sha "$head_sha" --tree-sha "$verification_tree" \
+          --campaign "$l1_campaign_binding" --task-contract "$task_file" \
+          --policy-contract "$verification_policy" --suite-id "task-contract-gate" \
+          >"$run_dir/verification-request-${n}.out" \
+          2>"$run_dir/verification-request-${n}.err"; then
+      write_host_audit_verdict "inconclusive-infrastructure" "blocked" \
+        "The host could not bind verification to the trusted task/policy contract."
+      verdict="blocked"
+      append_audit_evidence
+      attempt_failure="audit-infra"
+      attempt_ctx="$run_dir/verification-request-${n}.err"
+      return 1
+    fi
+  fi
+
   # Re-run the committed gate in a disposable writable worktree. Cache and log
   # writes are isolated there; the original audited worktree remains untouched.
   if [[ "$audit_verify_run" == "yes" ]]; then
@@ -2137,6 +2169,8 @@ PY
         --run-dir "$run_dir" --task-id "$task_id" --source-worktree "$worktree" \
         --head-sha "$head_sha" --gate-command "$gate_cmd" \
         --worker-gate-report "$run_dir/gate-report.json" \
+        --verification-request "$verification_request" \
+        --task-contract "$task_file" --policy-contract "$verification_policy" \
         --attempt "$n" --try "$verification_try" \
         >"$run_dir/audit-verification-driver.log" 2>&1 || verification_rc=$?
       verification_outcome="$(singular_json_field "$run_dir/audit-verification.json" outcome 2>/dev/null || true)"

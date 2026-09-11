@@ -121,6 +121,169 @@ def atomic_json(path: pathlib.Path, data: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+REQUEST_FIELDS = {
+    "schema", "taskId", "runId", "attempt", "headSha", "treeSha",
+    "campaignBinding", "taskContractPath", "taskContractSha256",
+    "policyContractPath", "policyContractSha256", "suiteId",
+    "commandIdentity", "requestIdentity", "createdAt",
+}
+
+
+def trusted_gate_command(task_contract: pathlib.Path) -> str:
+    text = task_contract.read_text(encoding="utf-8")
+    match = re.search(r"^Gate command:\s*`([^`]+)`\s*$", text, re.MULTILINE)
+    if not match or not match.group(1).strip():
+        raise ValueError("trusted task contract has no Gate command")
+    return match.group(1).strip()
+
+
+def request_binding(request: dict[str, Any]) -> str:
+    return sha_bytes(json.dumps(
+        {key: request.get(key) for key in sorted(REQUEST_FIELDS - {"requestIdentity", "createdAt"})},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+
+
+def load_verification_request(
+    request_path: pathlib.Path,
+    task_contract: pathlib.Path,
+    policy_contract: pathlib.Path,
+) -> tuple[dict[str, Any], str]:
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    if not isinstance(request, dict):
+        raise ValueError("verification request is not an object")
+    unexpected = sorted(set(request) - REQUEST_FIELDS)
+    missing = sorted(REQUEST_FIELDS - set(request))
+    if unexpected:
+        raise ValueError("verification request contains unsupported fields: " + ", ".join(unexpected))
+    if missing:
+        raise ValueError("verification request missing: " + ", ".join(missing))
+    if request.get("schema") != "singular.orchestration.verification-request.v0":
+        raise ValueError("unsupported verification request schema")
+    if not isinstance(request.get("attempt"), int) or isinstance(request.get("attempt"), bool):
+        raise ValueError("verification request attempt is invalid")
+    if request.get("taskContractSha256") != sha_bytes(task_contract.read_bytes()):
+        raise ValueError("verification task contract changed")
+    if request.get("policyContractSha256") != sha_bytes(policy_contract.read_bytes()):
+        raise ValueError("verification policy contract changed")
+    try:
+        policy = json.loads(policy_contract.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"verification policy contract is malformed: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise ValueError("verification policy contract is not an object")
+    trusted_campaign = str(policy.get("campaign", ""))
+    if trusted_campaign and request.get("campaignBinding") != trusted_campaign:
+        raise ValueError("verification request campaign does not match trusted policy")
+    if pathlib.Path(str(request.get("taskContractPath"))).resolve() != task_contract.resolve():
+        raise ValueError("verification task contract path mismatch")
+    if pathlib.Path(str(request.get("policyContractPath"))).resolve() != policy_contract.resolve():
+        raise ValueError("verification policy contract path mismatch")
+    command = trusted_gate_command(task_contract)
+    if request.get("commandIdentity") != sha_bytes(command.encode("utf-8")):
+        raise ValueError("trusted verification command identity changed")
+    if request.get("requestIdentity") != request_binding(request):
+        raise ValueError("verification request binding mismatch")
+    if valid_head(str(request.get("headSha", ""))) != request.get("headSha"):
+        raise ValueError("verification request head is invalid")
+    if valid_head(str(request.get("treeSha", ""))) != request.get("treeSha"):
+        raise ValueError("verification request tree is invalid")
+    return request, command
+
+
+def command_create_verification_request(args: argparse.Namespace) -> int:
+    task_contract = pathlib.Path(args.task_contract).resolve()
+    policy_contract = pathlib.Path(args.policy_contract).resolve()
+    command = trusted_gate_command(task_contract)
+    request: dict[str, Any] = {
+        "schema": "singular.orchestration.verification-request.v0",
+        "taskId": args.task_id,
+        "runId": args.run_id,
+        "attempt": args.attempt,
+        "headSha": valid_head(args.head_sha),
+        "treeSha": valid_head(args.tree_sha),
+        "campaignBinding": args.campaign,
+        "taskContractPath": str(task_contract),
+        "taskContractSha256": sha_bytes(task_contract.read_bytes()),
+        "policyContractPath": str(policy_contract),
+        "policyContractSha256": sha_bytes(policy_contract.read_bytes()),
+        "suiteId": args.suite_id,
+        "commandIdentity": sha_bytes(command.encode("utf-8")),
+        "createdAt": utc_now(),
+    }
+    request["requestIdentity"] = request_binding(request)
+    atomic_json(pathlib.Path(args.output), request)
+    print(request["requestIdentity"])
+    return 0
+
+
+def command_resolve_verification_request(args: argparse.Namespace) -> int:
+    request, command = load_verification_request(
+        pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
+    )
+    if args.expected_task and request.get("taskId") != args.expected_task:
+        raise ValueError("verification request task mismatch")
+    print(command)
+    return 0
+
+
+def result_binding(report: dict[str, Any]) -> str:
+    request = report.get("verificationRequest") or {}
+    bound = {
+        "requestIdentity": request.get("requestIdentity"),
+        "taskId": report.get("taskId"), "headSha": report.get("headSha"),
+        "commandSha256": report.get("commandSha256"), "outcome": report.get("outcome"),
+        "rawExitCode": report.get("rawExitCode"), "logSha256": report.get("logSha256"),
+        "evidenceBindingSha256": report.get("evidenceBindingSha256"),
+    }
+    return sha_bytes(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def command_bind_verification_result(args: argparse.Namespace) -> int:
+    request, command = load_verification_request(
+        pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
+    )
+    path = pathlib.Path(args.report)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report.get("taskId") != request.get("taskId"):
+        raise ValueError("verification result task mismatch")
+    if report.get("headSha") != request.get("headSha"):
+        raise ValueError("verification result head mismatch")
+    if report.get("commandSha256") != sha_bytes(command.encode("utf-8")):
+        raise ValueError("verification result command mismatch")
+    report["verificationRequest"] = {
+        key: request[key] for key in (
+            "requestIdentity", "runId", "attempt", "headSha", "treeSha",
+            "campaignBinding", "taskContractSha256", "policyContractSha256",
+            "suiteId", "commandIdentity",
+        )
+    }
+    report["verificationResultBindingSha256"] = result_binding(report)
+    atomic_json(path, report)
+    return 0
+
+
+def command_verify_verification_result(args: argparse.Namespace) -> int:
+    request, command = load_verification_request(
+        pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
+    )
+    report, reason = load_verified_evidence(pathlib.Path(args.report), request["headSha"], command)
+    if report is None:
+        raise ValueError(reason)
+    expected = {
+        key: request[key] for key in (
+            "requestIdentity", "runId", "attempt", "headSha", "treeSha",
+            "campaignBinding", "taskContractSha256", "policyContractSha256",
+            "suiteId", "commandIdentity",
+        )
+    }
+    if report.get("verificationRequest") != expected:
+        raise ValueError("verification result request binding mismatch")
+    if report.get("verificationResultBindingSha256") != result_binding(report):
+        raise ValueError("verification result binding mismatch")
+    return 0
+
+
 def command_create(args: argparse.Namespace) -> int:
     log = pathlib.Path(args.log).resolve()
     try:
@@ -372,6 +535,28 @@ def build_parser() -> argparse.ArgumentParser:
     copy_evidence.add_argument("--expected-head", required=True)
     copy_evidence.add_argument("--expected-command", required=True)
     copy_evidence.set_defaults(handler=command_copy_evidence)
+
+    request = commands.add_parser("create-verification-request")
+    for flag in ("output", "task_id", "run_id", "head_sha", "tree_sha", "campaign", "task_contract", "policy_contract", "suite_id"):
+        request.add_argument("--" + flag.replace("_", "-"), required=True)
+    request.add_argument("--attempt", type=int, required=True)
+    request.set_defaults(handler=command_create_verification_request)
+
+    resolve = commands.add_parser("resolve-verification-request")
+    for flag in ("request", "task_contract", "policy_contract"):
+        resolve.add_argument("--" + flag.replace("_", "-"), required=True)
+    resolve.add_argument("--expected-task", default="")
+    resolve.set_defaults(handler=command_resolve_verification_request)
+
+    bind_result = commands.add_parser("bind-verification-result")
+    for flag in ("request", "report", "task_contract", "policy_contract"):
+        bind_result.add_argument("--" + flag.replace("_", "-"), required=True)
+    bind_result.set_defaults(handler=command_bind_verification_result)
+
+    verify_result = commands.add_parser("verify-verification-result")
+    for flag in ("request", "report", "task_contract", "policy_contract"):
+        verify_result.add_argument("--" + flag.replace("_", "-"), required=True)
+    verify_result.set_defaults(handler=command_verify_verification_result)
     return parser
 
 

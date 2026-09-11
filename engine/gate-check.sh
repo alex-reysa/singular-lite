@@ -10,15 +10,54 @@ shift || true
 task_id="${SINGULAR_GATE_TASK_ID:-TASK-0000}"
 phase="${SINGULAR_GATE_PHASE:-other}"
 workspace_kind="${SINGULAR_GATE_WORKSPACE_KIND:-worker}"
+verification_request=""
+verification_task_contract=""
+verification_policy_contract=""
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --task-id) task_id="${2:-}"; shift 2 ;;
     --phase) phase="${2:-}"; shift 2 ;;
     --workspace-kind) workspace_kind="${2:-}"; shift 2 ;;
+    --verification-request) verification_request="${2:-}"; shift 2 ;;
+    --task-contract) verification_task_contract="${2:-}"; shift 2 ;;
+    --policy-contract) verification_policy_contract="${2:-}"; shift 2 ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
+
+trusted_gate_command=""
+verification_expected_head=""
+verification_expected_tree=""
+if [[ -n "$verification_request" ]]; then
+  [[ -n "$verification_task_contract" && -n "$verification_policy_contract" ]] || {
+    echo "gate-check: verification request requires trusted task and policy contracts" >&2
+    exit 2
+  }
+  trusted_gate_command="$(python3 "$SCRIPT_DIR/gate-report.py" resolve-verification-request \
+    --request "$verification_request" --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract")" || exit 2
+  mapfile -t verification_identity < <(python3 - "$verification_request" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+print(d["taskId"]); print(d["headSha"]); print(d["treeSha"])
+PY
+  )
+  [[ "${#verification_identity[@]}" -eq 3 ]] || exit 2
+  task_id="${verification_identity[0]}"
+  verification_expected_head="${verification_identity[1]}"
+  verification_expected_tree="${verification_identity[2]}"
+  actual_request_head="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)"
+  actual_request_tree="$(git -C "$PWD" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+  if [[ "$actual_request_head" != "$verification_expected_head" \
+      || "$actual_request_tree" != "$verification_expected_tree" ]]; then
+    echo "gate-check: verification request candidate identity is stale" >&2
+    exit 2
+  fi
+  # Shell interpretation is host-owned and only applied to the command read
+  # from the trusted task contract. No packet/request command is accepted.
+  set -- "$(singular_bash_bin)" -c "$trusted_gate_command"
+fi
 
 if [[ $# -eq 0 ]]; then
   set -- make check
@@ -30,7 +69,11 @@ log="$run_dir/gate-check.log"
 observation="$run_dir/gate-observation.json"
 report="$run_dir/gate-report.json"
 summary="$run_dir/gate-check.json" # compatibility mirror
-command_text="$*"
+if [[ -n "$verification_request" ]]; then
+  command_text="$trusted_gate_command"
+else
+  command_text="$*"
+fi
 head_sha="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || printf '%040d' 0)"
 started_ms="$(python3 -c 'import time; print(time.time_ns() // 1000000)')"
 rm -f "$observation" "$report" "$summary"
@@ -234,6 +277,20 @@ if [[ "$normalize_rc" -ne 0 || ! -f "$report" ]]; then
   done
   "$SCRIPT_DIR/gate-report.py" "${fallback_args[@]}" || fallback_rc=$?
   outcome="inconclusive-infrastructure"
+fi
+
+if [[ -n "$verification_request" ]]; then
+  verification_final_head="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)"
+  verification_final_tree="$(git -C "$PWD" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+  if [[ "$verification_final_head" != "$verification_expected_head" \
+      || "$verification_final_tree" != "$verification_expected_tree" ]]; then
+    echo "gate-check: candidate changed during host verification" >&2
+    exit 20
+  fi
+  python3 "$SCRIPT_DIR/gate-report.py" bind-verification-result \
+    --request "$verification_request" --report "$report" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" || exit 20
 fi
 
 cp "$report" "$summary"

@@ -165,6 +165,112 @@ ops_unpark() {
   echo "unparked $task_id"
 }
 
+# --- recover-candidate ---------------------------------------------------------
+# Mint recovery authority only from the locked host operations surface. The
+# lifecycle helper validates every predecessor binding again before changing
+# dispatch/integration eligibility; the decision log is an audit trail, never
+# authority by itself.
+ops_recover_candidate() {
+  local task_id="" action="" successor_run="" successor_branch=""
+  local successor_worktree="" failure_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      TASK-*) task_id="$1"; shift ;;
+      --action) action="${2:-}"; shift 2 ;;
+      --successor-run) successor_run="${2:-}"; shift 2 ;;
+      --successor-branch) successor_branch="${2:-}"; shift 2 ;;
+      --successor-worktree) successor_worktree="${2:-}"; shift 2 ;;
+      --failure-id) failure_id="${2:-}"; shift 2 ;;
+      *) echo "usage: singular recover-candidate TASK-XXXX --action repair|regate --successor-run RUN --successor-branch BRANCH --successor-worktree PATH [--failure-id ID]" >&2; return 2 ;;
+    esac
+  done
+  [[ -n "$task_id" && ( "$action" == repair || "$action" == regate ) \
+      && -n "$successor_run" && -n "$successor_branch" && -n "$successor_worktree" ]] || {
+    echo "recover-candidate: complete task/action/successor identity is required" >&2
+    return 2
+  }
+  local lease task_file campaign run_id authority_dir authority_file authorization_id
+  lease="$(singular_lease_path "$task_id")"
+  task_file="$SINGULAR_TASKS_DIR/$task_id.md"
+  [[ -f "$lease" && -f "$task_file" ]] || {
+    echo "recover-candidate: retained lease and trusted task contract are required" >&2
+    return 2
+  }
+  singular_campaign_verify_or_refuse ops recover-candidate || return 2
+  campaign="$(singular_campaign_binding)" || return 2
+  run_id="$(singular_run_id)"
+  singular_acquire_lock "$run_id" || { echo "recover-candidate: origin lock busy" >&2; return 2; }
+  trap "singular_release_lock '$run_id' 2>/dev/null || true" EXIT
+  authority_dir="$SINGULAR_STATE_DIR/recovery-authority/$task_id"
+  mkdir -p "$authority_dir"
+  authority_file="$authority_dir/$successor_run.json"
+  if [[ -e "$authority_file" ]]; then
+    echo "recover-candidate: successor authority already exists" >&2
+    return 2
+  fi
+  if ! python3 - "$lease" "$authority_file" "$task_id" "$action" "$successor_run" \
+      "$successor_branch" "$successor_worktree" "$failure_id" "$campaign" <<'PY'
+import hashlib, json, os, sys
+(lease_path, output, task_id, action, successor_run, successor_branch,
+ successor_worktree, failure_id, campaign) = sys.argv[1:10]
+lease = json.load(open(lease_path, encoding="utf-8"))
+candidate = lease.get("acceptedCandidate")
+if not isinstance(candidate, dict):
+    raise SystemExit("recover-candidate: no retained candidate")
+failures = [item for item in candidate.get("failures", []) if isinstance(item, dict)]
+def durable_id(item):
+    explicit = str(item.get("failureId", "") or "")
+    if explicit:
+        return explicit
+    key = str(item.get("key", "") or "")
+    return hashlib.sha256(("legacy:" + key).encode()).hexdigest() if key else ""
+if not failure_id and failures:
+    failure_id = durable_id(failures[-1])
+if not failure_id or not any(durable_id(item) == failure_id for item in failures):
+    raise SystemExit("recover-candidate: failure identity is not eligible")
+record = {
+    "schema": "singular.orchestration.recovery-authority.v0",
+    "taskId": task_id,
+    "predecessorRunId": candidate.get("runId", ""),
+    "predecessorHeadSha": candidate.get("headSha", ""),
+    "predecessorTreeSha": candidate.get("treeSha", ""),
+    "campaignBinding": campaign,
+    "policyIdentity": campaign,
+    "failureId": failure_id,
+    "action": action,
+    "successorRunId": successor_run,
+    "successorBranch": successor_branch,
+    "successorWorktree": successor_worktree,
+    "authorizedBy": "origin-ops",
+}
+temporary = output + ".tmp"
+with open(temporary, "x", encoding="utf-8") as handle:
+    json.dump(record, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, output)
+PY
+  then
+    rm -f "$authority_file" 2>/dev/null || true
+    return 2
+  fi
+  authorization_id="$(python3 "$SCRIPT_DIR/task_lifecycle.py" authorize-recovery \
+    --lease "$lease" --authority "$authority_file" --task-contract "$task_file" \
+    --expected-task "$task_id" --expected-campaign "$campaign" \
+    --expected-policy "$campaign")" || return 2
+  "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "authorize-$action" \
+    --rationale "recovery authorization $authorization_id for $failure_id -> $successor_run" \
+    --run "$run_id" --branch "$successor_branch" --authority origin >/dev/null || true
+  singular_append_event "candidate.recovery_authorized" \
+    "host authorized bounded candidate recovery" \
+    "{\"taskId\":\"$task_id\",\"action\":\"$action\",\"authorizationId\":\"$authorization_id\",\"successorRunId\":\"$successor_run\",\"campaignBinding\":\"$campaign\"}" || true
+  echo "authorizationId=$authorization_id"
+  if [[ "$action" == regate ]]; then
+    echo "nextAction=SINGULAR_RECOVERY_AUTHORIZATION_ID=$authorization_id singular integrate --task $task_id --run-id $successor_run"
+  else
+    echo "nextAction=dispatch the distinct repair attempt $successor_run in $successor_worktree"
+  fi
+}
+
 # --- supersede ----------------------------------------------------------------
 # The "four resurrection surfaces" atomically: decisions.md entry, task file
 # (Superseded by: header + Status + move to tasks/superseded/), lease status,
@@ -526,13 +632,16 @@ except Exception:
   disk_free="$(singular_free_disk_gb 2>/dev/null || echo null)"
   wt_count="$(find "$SINGULAR_WORKTREES_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | grep -c . || true)"
   console_url="$(head -1 "$SINGULAR_STATE_DIR/console.url" 2>/dev/null || true)"
-  lifecycle_json="$(python3 - "$SINGULAR_RUNS_DIR" <<'PY'
+  lifecycle_json="$(python3 - "$SINGULAR_RUNS_DIR" "$SINGULAR_LEASES_DIR" "$SINGULAR_TASKS_DIR" <<'PY'
 import collections
 import json
 import pathlib
+import re
 import sys
 
 runs = pathlib.Path(sys.argv[1])
+leases = pathlib.Path(sys.argv[2])
+tasks = pathlib.Path(sys.argv[3])
 records = []
 if runs.is_dir():
     for path in runs.glob("*/run-status.json"):
@@ -546,11 +655,52 @@ if runs.is_dir():
 records.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
 active = [item for item in records if item.get("state") in ("active", "waiting")]
 counts = collections.Counter(str(item.get("phase") or "unknown") for item in active)
+candidates = []
+if leases.is_dir():
+    for path in sorted(leases.glob("*.json")):
+        try:
+            lease = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        candidate = lease.get("acceptedCandidate")
+        history = lease.get("candidateHistory") or []
+        recovery = lease.get("recoveryAuthorization")
+        retained = candidate if isinstance(candidate, dict) else (history[-1] if history else None)
+        if not isinstance(retained, dict):
+            continue
+        failures = [item for item in retained.get("failures", []) if isinstance(item, dict)]
+        latest = failures[-1] if failures else {}
+        task_id = str(lease.get("taskId") or path.stem)
+        dependencies = []
+        task_path = tasks / (task_id + ".md")
+        try:
+            match = re.search(r"^Depends on:\s*\[(.*?)\]", task_path.read_text(encoding="utf-8"), re.M)
+            if match:
+                dependencies = re.findall(r"TASK-[0-9]+", match.group(1))
+        except OSError:
+            pass
+        candidates.append({
+            "taskId": task_id,
+            "candidateRunId": retained.get("runId"),
+            "candidateHeadSha": retained.get("headSha"),
+            "candidateTreeSha": retained.get("treeSha"),
+            "state": retained.get("state"),
+            "blockedDependencies": dependencies,
+            "blockedReason": latest.get("failureClass") or (retained.get("recoveryBlock") or {}).get("reason"),
+            "failureDomain": latest.get("domain"),
+            "failureId": latest.get("failureId"),
+            "owner": (recovery or {}).get("authorizedBy") or lease.get("owner") or "origin",
+            "permittedNextAction": lease.get("nextAction") or retained.get("nextAction"),
+            "recoveryAction": (recovery or {}).get("action"),
+            "recoveryState": (recovery or {}).get("state"),
+            "failureBudgets": lease.get("failureBudgets", {"product": 0, "infrastructure": 0, "regate": 0}),
+        })
 print(json.dumps({
     "active": active[:50],
     "activeCount": len(active),
     "phaseCounts": dict(sorted(counts.items())),
     "implementersActive": counts.get("implementing", 0),
+    "candidates": candidates,
 }, separators=(",", ":")))
 PY
 )"
@@ -655,6 +805,7 @@ doc = {
     "leases": {"l2Active": num(active), "l1Active": num(l1a), "l1Stale": num(l1s),
                "implementersActive": lifecycle.get("implementersActive", 0)},
     "lifecycle": lifecycle,
+    "candidates": lifecycle.get("candidates", []),
     "resources": resources,
     "diagnostics": health_details.get("diagnostics", {}),
     "humanGates": health_details.get("humanGates", {}),
@@ -728,6 +879,15 @@ else:
             )
     if doc["lifecycle"]["phaseCounts"]:
         print(f"phases:     {doc['lifecycle']['phaseCounts']}")
+    for candidate in doc["candidates"]:
+        print(
+            "candidate:  " + str(candidate.get("taskId"))
+            + " head=" + str(candidate.get("candidateHeadSha"))
+            + " blocked=" + str(candidate.get("blockedDependencies") or candidate.get("blockedReason"))
+            + " domain=" + str(candidate.get("failureDomain"))
+            + " owner=" + str(candidate.get("owner"))
+            + " action=" + str(candidate.get("permittedNextAction"))
+        )
     diagnostics = doc["diagnostics"]
     if diagnostics.get("total"):
         print(f"diagnostics:{diagnostics.get('counts', {})}")
@@ -1387,6 +1547,7 @@ ops_report() {
 case "$verb" in
   supersede)     ops_supersede "$@" ;;
   unpark)        ops_unpark "$@" ;;
+  recover-candidate) ops_recover_candidate "$@" ;;
   clear-backoff) singular_planner_backoff_clear ;;
   breaker)       ops_breaker "$@" ;;
   stop)          ops_stop "$@" ;;
@@ -1399,6 +1560,6 @@ case "$verb" in
   ask)           ops_ask "$@" ;;
   report)        ops_report "$@" ;;
   *)
-    echo "usage: ops.sh supersede|unpark|clear-backoff|breaker|stop|resume|wake|gates|health|gc|plan|ask|report ..." >&2
+    echo "usage: ops.sh supersede|unpark|recover-candidate|clear-backoff|breaker|stop|resume|wake|gates|health|gc|plan|ask|report ..." >&2
     exit 2 ;;
 esac

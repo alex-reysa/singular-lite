@@ -44,7 +44,26 @@ jobs="${SINGULAR_TEST_JOBS:-1}"
 . "$TESTS_DIR/../engine/bash-guard.sh" || exit 2
 # shellcheck source=../engine/git-preflight.sh
 . "$TESTS_DIR/../engine/git-preflight.sh" || exit 2
-singular_git_source_preflight "$TESTS_DIR/.." || exit 1
+preflight_out=""
+preflight_rc=0
+preflight_out="$(singular_git_source_preflight "$TESTS_DIR/.." 2>&1)" || preflight_rc=$?
+if [[ "$preflight_rc" -ne 0 ]]; then
+  # A basename-filtered run is worker-focused. Its bodies may create their own
+  # disposable repositories and should execute when only the checkout's shared
+  # registry or temporary probe workspace is unavailable. The missing host
+  # capability is explicit and remains unrun; an unfiltered canonical suite,
+  # or missing source/history, still fails before discovery.
+  if [[ "$#" -gt 0 && ( "$preflight_rc" -eq 2 || "$preflight_rc" -eq 3 ) ]]; then
+    printf '%s\n' "$preflight_out" >&2
+    case "$preflight_rc" in
+      2) echo "HOST_REQUIRED git-registry-write unrun" >&2 ;;
+      3) echo "HOST_REQUIRED temporary-workspace unrun" >&2 ;;
+    esac
+  else
+    printf '%s\n' "$preflight_out" >&2
+    exit 1
+  fi
+fi
 
 # Hermetic guard: scrub inherited SINGULAR_* env. When this suite runs as the
 # regression gate under l1-drive, the drive has already exported the consumer

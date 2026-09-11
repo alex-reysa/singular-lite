@@ -481,10 +481,29 @@ PY
       skipped=$((skipped + 1))
       continue
     fi
+    recovery_claimed="no"
+    if [[ -n "${SINGULAR_RECOVERY_AUTHORIZATION_ID:-}" ]]; then
+      if python3 "$SCRIPT_DIR/task_lifecycle.py" claim-recovery \
+          --lease "$(singular_lease_path "$task_id")" \
+          --authorization-id "$SINGULAR_RECOVERY_AUTHORIZATION_ID" --action regate \
+          --head "$head_sha" --tree "$candidate_tree" \
+          --campaign "$candidate_campaign_binding" --run "$run_id" >/dev/null; then
+        recovery_claimed="yes"
+        singular_append_event "integration.regate_authorized" \
+          "single-use unchanged candidate regate authority claimed" \
+          "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"headSha\":\"$head_sha\",\"authorizationId\":\"$SINGULAR_RECOVERY_AUTHORIZATION_ID\"}" || true
+      else
+        echo "skip $task_id: recovery authorization is invalid, stale, or already consumed"
+        skipped=$((skipped + 1))
+        continue
+      fi
+    fi
     candidate_check_rc=0
-    candidate_check_out="$(singular_lifecycle_candidate_check "$task_id" "$head_sha" \
-      "$candidate_tree" "$candidate_campaign_binding" "$target_head" \
-      "$integration_invalidation_key" "$branch_invalidation_key" 2>&1)" || candidate_check_rc=$?
+    if [[ "$recovery_claimed" != "yes" ]]; then
+      candidate_check_out="$(singular_lifecycle_candidate_check "$task_id" "$head_sha" \
+        "$candidate_tree" "$candidate_campaign_binding" "$target_head" \
+        "$integration_invalidation_key" "$branch_invalidation_key" 2>&1)" || candidate_check_rc=$?
+    fi
     if [[ "$candidate_check_rc" -eq 3 ]]; then
       echo "skip $task_id: unchanged failed integration; action: $candidate_check_out"
       skipped=$((skipped + 1))
