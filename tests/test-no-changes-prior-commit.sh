@@ -178,9 +178,13 @@ done
 }
 active_status=""
 auditor_pid="$(cat "$workroot/auditor.pid")"
+# Evidence delivery is a host-owned process boundary. The active record names
+# that broker, which directly owns this fixture auditor, rather than its child.
+auditor_owner_pid="$(ps -o ppid= -p "$auditor_pid" | tr -d '[:space:]')"
+[[ "$auditor_owner_pid" =~ ^[1-9][0-9]*$ ]] || fail "auditor has no live owner"
 for _ in $(seq 1 400); do
   active_status="$(find "$root/.singular-state/runs" -name run-status.json -type f | head -1)"
-  if [[ -n "$active_status" ]] && python3 - "$active_status" "$auditor_pid" <<'PY' >/dev/null 2>&1
+  if [[ -n "$active_status" ]] && python3 - "$active_status" "$auditor_owner_pid" <<'PY' >/dev/null 2>&1
 import json
 import sys
 status = json.load(open(sys.argv[1]))
@@ -198,7 +202,7 @@ PY
   fi
   sleep 0.05
 done
-if [[ -z "$active_status" ]] || ! python3 - "$active_status" "$auditor_pid" <<'PY' >/dev/null 2>&1
+if [[ -z "$active_status" ]] || ! python3 - "$active_status" "$auditor_owner_pid" <<'PY' >/dev/null 2>&1
 import json
 import sys
 status = json.load(open(sys.argv[1]))
@@ -208,19 +212,23 @@ PY
 then
   touch "$workroot/auditor.release"
   wait "$drive_pid" || true
-  fail "active lifecycle record did not switch to the auditor PID"
+  fail "active lifecycle record did not switch to the auditor owner PID"
 fi
-python3 - "$active_status" "$workroot/auditor.pid" <<'PY'
+python3 - "$active_status" "$workroot/auditor.pid" "$auditor_owner_pid" <<'PY'
 import json
 import os
+import subprocess
 import sys
 
 status = json.load(open(sys.argv[1]))
 auditor_pid = int(open(sys.argv[2]).read().strip())
+owner_pid = int(sys.argv[3])
 assert status["phase"] == "auditing"
 assert status["state"] == "active"
 assert status["process"]["type"] == "auditor"
-assert status["process"]["pid"] == auditor_pid
+assert status["process"]["pid"] == owner_pid
+assert int(subprocess.check_output(["ps", "-o", "ppid=", "-p", str(auditor_pid)], text=True)) == owner_pid
+os.kill(owner_pid, 0)
 os.kill(auditor_pid, 0)
 PY
 touch "$workroot/auditor.release"
