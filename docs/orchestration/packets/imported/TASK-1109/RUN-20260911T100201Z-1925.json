@@ -1,0 +1,167 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PACKET-RUN-20260911T100201Z-1925-TASK-1109-L2-ATTEMPT-2",
+  "runId": "RUN-20260911T100201Z-1925",
+  "taskId": "TASK-1109",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "dbe1335e3e4c811fd60909a7e25160df6ad8fa5d",
+  "branch": "codex/brain-rescue/TASK-1109-retained-parser",
+  "headSha": "642b26f585a379c2de0b4639244ddecd791b185b",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1109",
+  "ownedFiles": [
+    "engine/lib.sh",
+    "engine/task_parser.py",
+    "engine/l1-drive.sh",
+    "engine/scope-check.sh",
+    "engine/ctx-task-batch.sh",
+    "engine/task_batch_publish.py",
+    "engine/l1-plan-node.sh",
+    "tests/test-task-parsing-fidelity.sh",
+    "tests/test-l1-immutable-import.sh",
+    "tests/test-l1-parallel.sh",
+    "README.md"
+  ],
+  "changedFiles": [
+    "README.md",
+    "engine/ctx-task-batch.sh",
+    "engine/l1-drive.sh",
+    "engine/lib.sh",
+    "engine/scope-check.sh",
+    "engine/task_batch_publish.py",
+    "engine/task_parser.py",
+    "tests/test-l1-immutable-import.sh",
+    "tests/test-l1-parallel.sh",
+    "tests/test-task-parsing-fidelity.sh"
+  ],
+  "commands": [
+    {
+      "cmd": "bash tests/test-task-parsing-fidelity.sh > .singular-evidence/red.log 2>&1; rc1=$?; bash tests/test-l1-immutable-import.sh >> .singular-evidence/red.log 2>&1; rc2=$?; exit $(( rc1 == 0 && rc2 == 0 ? 0 : 1 ))",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Attempt-2 red reproduced both audit findings: quoted root-level paths were rejected and a spaced-header internal dependency was published."
+    },
+    {
+      "cmd": "bash tests/test-task-parsing-fidelity.sh > .singular-evidence/green.log 2>&1; rc1=$?; bash tests/test-l1-immutable-import.sh >> .singular-evidence/green.log 2>&1; rc2=$?; exit $(( rc1 != 0 || rc2 != 0 ))",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Attempt-2 focused green passed both audit-finding regressions."
+    },
+    {
+      "cmd": "env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash -c 'set -e; for test_name in test-task-parsing-fidelity.sh test-l1-immutable-import.sh test-scope-check.sh test-duplicate-guard.sh test-l1-parallel.sh test-task-id-counter.sh test-dynamic-dispatch.sh; do bash \"tests/$test_name\"; done' > .singular-evidence/hermetic-regression.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/hermetic-regression.log",
+      "rationale": "Clean-environment execution passed the six acceptance tests and the reported dynamic-dispatch regression."
+    },
+    {
+      "cmd": "test -f tests/test-task-parsing-fidelity.sh && test -f tests/test-l1-immutable-import.sh && test -f tests/test-scope-check.sh && test -f tests/test-duplicate-guard.sh && test -f tests/test-l1-parallel.sh && test -f tests/test-task-id-counter.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-task-parsing-fidelity.sh test-l1-immutable-import.sh test-scope-check.sh test-duplicate-guard.sh test-l1-parallel.sh test-task-id-counter.sh > .singular-evidence/regression.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "The mandated wrapper stopped before test discovery because the managed sandbox cannot create a disposable worktree using its read-only external Git metadata."
+    }
+  ],
+  "tests": [
+    {
+      "name": "test-task-parsing-fidelity.sh",
+      "phase": "red",
+      "status": "failed-as-expected",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "test-l1-immutable-import.sh",
+      "phase": "red",
+      "status": "failed-as-expected",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "test-task-parsing-fidelity.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-l1-immutable-import.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-scope-check.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/hermetic-regression.log"
+    },
+    {
+      "name": "test-duplicate-guard.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/hermetic-regression.log"
+    },
+    {
+      "name": "test-l1-parallel.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/hermetic-regression.log"
+    },
+    {
+      "name": "test-task-id-counter.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/hermetic-regression.log"
+    },
+    {
+      "name": "test-dynamic-dispatch.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/hermetic-regression.log"
+    },
+    {
+      "name": "supported-six-test-gate",
+      "phase": "regression",
+      "status": "inconclusive-infrastructure",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "red-test-log",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "green-test-log",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "hermetic-regression-log",
+      "ref": ".singular-evidence/hermetic-regression.log"
+    },
+    {
+      "kind": "supported-gate-log",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260911T100201Z-1925/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A5:sha256:859b6d0ae8394234acb66c11adc50b5c2682a90cb5d286dd458bd83e9c8cf7ce:epoch:dd4339ff6961867a0ea9d39bf54991a8055e66217f297307"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260911T100201Z-1925/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260911T100201Z-1925/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260911T100201Z-1925/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-11T10:20:26Z"
+}

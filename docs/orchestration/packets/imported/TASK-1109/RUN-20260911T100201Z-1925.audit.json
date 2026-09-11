@@ -1,0 +1,81 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1109",
+  "runId": "RUN-20260911T100201Z-1925",
+  "branch": "codex/brain-rescue/TASK-1109-retained-parser",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "Authoritative task contract and prior findings ledger",
+    "evidence-manifest.json",
+    "packet.json supplied in audit context",
+    "audit-verification.json",
+    "gate-report.json",
+    "reaudit-diff-attempt-2.patch, offsets 0\u20139973",
+    "Manifest excerpts and hashes for worker-evidence/red.log, green.log, hermetic-regression.log and regression.log",
+    "Committed source and focused tests at 642b26f585a379c2de0b4639244ddecd791b185b",
+    "Git scope, worktree status and target-branch drift",
+    "schemas/orchestration/audit-verdict.v1.schema.json",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A5:sha256:859b6d0ae8394234acb66c11adc50b5c2682a90cb5d286dd458bd83e9c8cf7ce:epoch:dd4339ff6961867a0ea9d39bf54991a8055e66217f297307",
+    "reviewed-head-sha:642b26f585a379c2de0b4639244ddecd791b185b"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "test -f tests/test-task-parsing-fidelity.sh && test -f tests/test-l1-immutable-import.sh && test -f tests/test-scope-check.sh && test -f tests/test-duplicate-guard.sh && test -f tests/test-l1-parallel.sh && test -f tests/test-task-id-counter.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-task-parsing-fidelity.sh test-l1-immutable-import.sh test-scope-check.sh test-duplicate-guard.sh test-l1-parallel.sh test-task-id-counter.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "gate-report.json",
+        "audit-verification.json",
+        "evidence-manifest.json:regression-gate"
+      ],
+      "rationale": "The host binds six passing tests to committed head 642b26f585a379c2de0b4639244ddecd791b185b. All ten changed-file hashes match the manifest. No tests were rerun by this auditor. The earlier worker wrapper failure was infrastructure-related, not a product failure."
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "bash tests/test-task-parsing-fidelity.sh; bash tests/test-l1-immutable-import.sh",
+      "evidenceRefs": [
+        "evidence-manifest.json:packet-command-1",
+        "evidence-manifest.json:packet-command-2",
+        "reaudit-diff-attempt-2.patch"
+      ],
+      "rationale": "Recorded red evidence reproduces both defects; focused green evidence passes their regressions. Quoted root-level owned and forbidden paths survive parsing and enforcement. Canonical dependsOn values reject spaced-header internal dependencies before allocation, and transformed dependencies must equal their validated originals. The importer regression verifies no publication, allocation or canonical mutation."
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "env -i PATH=\"$PATH\" HOME=\"$HOME\" TMPDIR=\"${TMPDIR:-/tmp}\" bash -c 'set -e; for test_name in test-task-parsing-fidelity.sh test-l1-immutable-import.sh test-scope-check.sh test-duplicate-guard.sh test-l1-parallel.sh test-task-id-counter.sh test-dynamic-dispatch.sh; do bash \"tests/$test_name\"; done'",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "evidence-manifest.json:packet-command-3",
+        "packet.json"
+      ],
+      "rationale": "The recorded clean-environment regression includes dynamic dispatch and reports all seven tests successful. Reviewed fixtures cover real driver rendering, immutable generation import, simultaneous remapping, external dependency preservation and preparation/rewrite/publication rollback."
+    }
+  ],
+  "commandsRun": [
+    "Read evidence-manifest.json and audit-verdict.v1 schema",
+    "Search applicable ancestor AGENTS.md files",
+    "git status --short",
+    "git branch --show-current",
+    "git log --oneline -6",
+    "git diff --name-only dbe1335e3e4c811fd60909a7e25160df6ad8fa5d HEAD",
+    "git rev-list --left-right --count codex/brain-integration...HEAD",
+    "git log --oneline HEAD..codex/brain-integration",
+    "git diff --stat dbe1335e3e4c811fd60909a7e25160df6ad8fa5d codex/brain-integration",
+    "git diff --check dbe1335e HEAD",
+    "Read bounded reaudit-diff-attempt-2.patch chunks using evidence-show.sh",
+    "Read audit-verification.json and gate-report.json using evidence-show.sh",
+    "Inspect changed source, focused tests and parallel fixture references using sed, rg and git diff",
+    "Verify HEAD and all manifest source hashes using python3 -c",
+    "Initial Python heredoc hash check failed because the sandbox denied shell temporary-file creation; retried successfully with python3 -c",
+    "Attempt bounded audit.json retrieval using evidence-show.sh; artifact was missing"
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "findingsStatus": {
+    "f-46b77223e710": "resolved",
+    "f-4aedc69f3358": "resolved",
+    "f-7faa13fe0325": "resolved",
+    "f-873f06f7ec02": "resolved"
+  },
+  "rationale": "All four re-audit targets are resolved by the implementation and regression evidence. Changes remain within owned files, the worktree is clean, and no forbidden-file edits or additional foundation violations were identified. Target drift comprises five non-overlapping orchestration documentation/state commits. Existing full-task prompt preservation remains intact. Acceptance relies on the authoritative host-bound gate evidence, classified exactly as not-rerun-evidence-verified. The missing prior audit artifact does not prevent review because its findings ledger was supplied authoritatively."
+}

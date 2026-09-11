@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-11T10:26:20Z — TASK-1109 — integrate
+
+- Run: `ORIGIN-20260911T102419Z-66813`
+- Branch: `codex/brain-rescue/TASK-1109-retained-parser`
+- Authority: origin
+- Rationale: merged codex/brain-rescue/TASK-1109-retained-parser (642b26f585a379c2de0b4639244ddecd791b185b) into codex/brain-integration as 9a1c4f9c830648da207aa3ba3b4104e015224e20; gate green; acceptance=accepted
+
 ### 2026-09-11T10:24:13Z — TASK-1109 — accept
 
 - Run: `RUN-20260911T100201Z-1925`
