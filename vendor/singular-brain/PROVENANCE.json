@@ -1,0 +1,9 @@
+{
+  "name": "singular-brain",
+  "version": "0.2.0",
+  "sourceRevision": "e05f259be5cabda2bb8caa241f23cc1f48e9f059",
+  "sourceSnapshot": ".singular-state/upstream/singular-brain-0.2.0",
+  "license": null,
+  "licenseNote": "The supplied upstream snapshot contains no LICENSE, COPYING, or NOTICE file; no license is asserted by this vendor record.",
+  "inventory": "SHA256SUMS"
+}

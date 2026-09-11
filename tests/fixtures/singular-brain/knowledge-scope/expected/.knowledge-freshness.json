@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "scope": "knowledge",
+  "entries": {
+    "handoffs/session-2026-07-05.md": {
+      "meta": "sha256:4f99ca207ec8b3106149e4d04b170e4b38ee8dfa7687e7295705d4b57beae912",
+      "body": "sha256:0068fac2f58ef43fb3635e3c39e98bc6cb98bdf1dda9875ffb8a7fb04eb5d50b"
+    },
+    "notes/decision-log.md": {
+      "meta": "sha256:0ad2ef477d0ec9f6dfd8f39b5e245e3252ffeb87f5cb1ea492922fa11fcebaa6",
+      "body": "sha256:255a56a36c44c5b8ae31f6444780f47941e408de3f77031dccda58e64eb23758"
+    },
+    "skills/example-skill/SKILL.md": {
+      "meta": "sha256:caf6b8e6ba508c7ae46967d4268a17554a3836f1b9d5439a7f96bcc544671d81",
+      "body": "sha256:f28826bcd877c6b763663b1c819672c31dbaff16ef39ca2b375639db2f0711eb"
+    }
+  }
+}

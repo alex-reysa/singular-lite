@@ -29,6 +29,7 @@ import time
 from typing import Any, Iterable
 
 import provider_spec
+import brain_manifest
 from capability_policy import strict_provider_arg_violation
 from provider_resolver import (
     ConfigResolutionError,
@@ -371,6 +372,89 @@ class Doctor:
                 ),
                 details={"path": str(config_path), "source": resolution.source},
             )
+
+    def brain_checks(self) -> None:
+        """Validate the opt-in producer without generating or blessing outputs."""
+        if not self.repo or not self.config_resolution or not self.config:
+            return
+        selected = self.config_resolution.path
+        try:
+            brain_env = dict(self.runtime_env)
+            brain_env["SINGULAR_JSON_CONFIG_FILE"] = str(selected)
+            config_path, _ = brain_manifest.resolve_brain_config(
+                explicit=None,
+                repo_root=self.repo,
+                cwd=Path.cwd(),
+                env=brain_env,
+            )
+        except brain_manifest.BrainUnconfigured:
+            self.add(
+                "brain.configuration",
+                "skip",
+                "brain manifest producer is unconfigured (brainConfig absent); Node.js is optional",
+                required_for=("brain-manifest",),
+            )
+            return
+        except brain_manifest.BrainConfigurationError as exc:
+            self.add(
+                "brain.configuration",
+                "fail",
+                f"configured brain manifest input is invalid: {exc}",
+                required_for=("brain-manifest",),
+                remediation="Repair brainConfig in the selected singular JSON configuration.",
+            )
+            return
+        if not config_path.is_file():
+            self.add(
+                "brain.configuration",
+                "fail",
+                f"configured brain manifest configuration is missing: {config_path}",
+                required_for=("brain-manifest",),
+                remediation=f"Create {config_path} or update brainConfig in {selected}.",
+            )
+            return
+        cli, vendor_error = brain_manifest.verify_vendor(self.engine)
+        if vendor_error:
+            self.add(
+                "brain.runtime",
+                "fail",
+                vendor_error,
+                required_for=("brain-manifest",),
+                remediation="Reinstall the selected singular engine from its verified release payload.",
+            )
+            return
+        node, node_error = brain_manifest.node_diagnostic(self.runtime_env)
+        if node_error:
+            self.add(
+                "brain.node",
+                "fail",
+                node_error,
+                required_for=("brain-manifest",),
+                remediation="Install a usable Node.js runtime and ensure node is on PATH.",
+            )
+            return
+        assert cli is not None and node is not None
+        result = command(
+            [node, str(cli), "print-config", "--config", str(config_path)],
+            cwd=self.repo,
+            env=self.runtime_env,
+        )
+        if result.returncode != 0:
+            self.add(
+                "brain.configuration",
+                "fail",
+                f"configured brain manifest configuration is invalid: {first_line(result.stderr or result.stdout)}",
+                required_for=("brain-manifest",),
+                remediation=f"Repair {config_path}; doctor did not generate or bless any output.",
+            )
+            return
+        self.add(
+            "brain.configuration",
+            "pass",
+            f"brain manifest producer is configured: {config_path}",
+            required_for=("brain-manifest",),
+            details={"config": str(config_path), "runtime": str(cli), "node": node},
+        )
 
     def basic_checks(self) -> None:
         bash_major = int(self.bash_version.split(".", 1)[0] or "0")
@@ -3332,6 +3416,7 @@ singular_json_config_to_env "$2"
         self.pin_checks()
         self.schema_checks()
         self.effective_environment()
+        self.brain_checks()
         self.config_source_conflict()
         self.host_hygiene_checks()
         self.repo_hygiene_checks()

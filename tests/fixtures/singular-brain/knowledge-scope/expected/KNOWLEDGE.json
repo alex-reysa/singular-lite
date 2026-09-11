@@ -1,0 +1,62 @@
+{
+  "schema": "singular-brain.manifest.v1",
+  "scope": "knowledge",
+  "title": "Fixture Knowledge Registry",
+  "entries": [
+    {
+      "path": "handoffs/session-2026-07-05.md",
+      "section": "handoffs",
+      "adapter": "markdown-doc",
+      "tier": 1,
+      "title": "Session Handoff 2026-07-05",
+      "type": "report",
+      "status": "canonical",
+      "updated": "2026-07-05",
+      "description": "Current session checkpoint — what shipped and what is next.",
+      "loadWhen": [
+        "resuming work after a break",
+        "checking the latest project state"
+      ],
+      "freshness": {
+        "state": "clean",
+        "meta": "sha256:4f99ca207ec8b3106149e4d04b170e4b38ee8dfa7687e7295705d4b57beae912",
+        "body": "sha256:0068fac2f58ef43fb3635e3c39e98bc6cb98bdf1dda9875ffb8a7fb04eb5d50b"
+      }
+    },
+    {
+      "path": "notes/decision-log.md",
+      "section": "notes",
+      "adapter": "markdown-doc",
+      "tier": 1,
+      "title": "Decision Log",
+      "type": "report",
+      "status": "canonical",
+      "updated": "2026-07-04",
+      "description": "Running log of durable decisions and their rationale.",
+      "loadWhen": [
+        "revisiting a past decision",
+        "understanding why an approach was chosen"
+      ],
+      "freshness": {
+        "state": "clean",
+        "meta": "sha256:0ad2ef477d0ec9f6dfd8f39b5e245e3252ffeb87f5cb1ea492922fa11fcebaa6",
+        "body": "sha256:255a56a36c44c5b8ae31f6444780f47941e408de3f77031dccda58e64eb23758"
+      }
+    },
+    {
+      "path": "skills/example-skill/SKILL.md",
+      "section": "skills",
+      "adapter": "claude-skill",
+      "tier": 1,
+      "title": "example-skill",
+      "type": "skill",
+      "status": "vendored",
+      "description": "Guides an example workflow end to end — folded block scalar so the parser must reassemble multiple wrapped lines into one description string, and a nested metadata map below that the lenient parser must skip without error.",
+      "freshness": {
+        "state": "clean",
+        "meta": "sha256:caf6b8e6ba508c7ae46967d4268a17554a3836f1b9d5439a7f96bcc544671d81",
+        "body": "sha256:f28826bcd877c6b763663b1c819672c31dbaff16ef39ca2b375639db2f0711eb"
+      }
+    }
+  ]
+}

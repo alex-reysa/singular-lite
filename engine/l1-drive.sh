@@ -1319,7 +1319,8 @@ prepare_worker_prompt() {
 # content is tainted / model-authored, not host-verified. Called ONCE at
 # attempt-open (outside the infra-retry try loop) so try>0 reuse the same
 # $active_prompt (idempotent). Mirrors assumptions_inject_fix / the fix-hints
-# append. Non-fatal: on any error nothing is injected and the attempt proceeds.
+# append. Legacy composition stays fail-soft; configured brain validation errors
+# propagate so the affected worker cannot run without its requested context.
 rehydrate_inject_packet() {
   local active_prompt="$1"
   [[ "${worker_strategy:-}" == "rehydrate" ]] || return 0
@@ -1350,19 +1351,20 @@ rehydrate_inject_packet() {
     done < <(singular_ctx_rehydrate_sources "$run_dir" ${decision_source_extra:+"$decision_source_extra"} 2>/dev/null)
     packet="$(singular_ctx_rehydrate_packet ${specs[@]+"${specs[@]}"} 2>/dev/null)" || return 0
   fi
-  [[ -n "$packet" ]] || return 0
-  {
-    echo ""
-    echo "---"
-    echo ""
-    echo "## Injected durable context (rehydrated from a refused-resume lineage)"
-    echo ""
-    echo "> Reference only, NOT authoritative. This is durable context rehydrated"
-    echo "> from a prior (tainted, model-authored) session's artifacts, not"
-    echo "> host-verified evidence. Do not pass its content off as authoritative."
-    echo ""
-    printf '%s\n' "$packet"
-  } >> "$active_prompt" 2>/dev/null || true
+  if [[ -n "$packet" ]]; then
+    {
+      echo ""
+      echo "---"
+      echo ""
+      echo "## Injected durable context (rehydrated from a refused-resume lineage)"
+      echo ""
+      echo "> Reference only, NOT authoritative. This is durable context rehydrated"
+      echo "> from a prior (tainted, model-authored) session's artifacts, not"
+      echo "> host-verified evidence. Do not pass its content off as authoritative."
+      echo ""
+      printf '%s\n' "$packet"
+    } >> "$active_prompt" 2>/dev/null || true
+  fi
 
   # Authored-knowledge augmentation (node rehydrate-path; OPTIONAL, NOT part of
   # requiredCompletion). AFTER the durable packet, ALSO append the eligible
@@ -1382,7 +1384,7 @@ rehydrate_inject_packet() {
   # (engine/ctx-rehydrate-event.sh) passes the IDENTICAL set so the injected and
   # recorded authored entries stay consistent. Minimal delegation: the set is
   # computed and passed expanded; no selection/render logic is inlined here.
-  # Non-fatal: on any error nothing is appended.
+  # Legacy failures remain non-fatal; strict brain descriptor failures propagate.
   #
   # NODE dimension (TASK-0066 -> TASK-0067): resolve the run's executable DAG node
   # via the pure read-only resolver singular_ctx_rehydrate_authored_node "$task_id"
@@ -1401,7 +1403,7 @@ rehydrate_inject_packet() {
     [[ -n "$trigger" ]] && authored_triggers+=("$trigger")
   done < <(singular_ctx_rehydrate_authored_triggers implementer implement "$node" "$task_id" 2>/dev/null)
   local authored
-  authored="$(singular_ctx_rehydrate_authored_config_render ${authored_triggers[@]+"${authored_triggers[@]}"} 2>/dev/null)" || authored=""
+  authored="$(singular_ctx_rehydrate_authored_config_render ${authored_triggers[@]+"${authored_triggers[@]}"})" || return $?
   [[ -n "$authored" ]] || return 0
   {
     echo ""
@@ -1491,6 +1493,23 @@ run_worker_phase() {
     "$task_id" "$run_id" "$l2_runner_basename" "$worker_prompt_sha" "$worktree" "$worktree_head" 2>/dev/null || echo "fresh decide-error")"
   worker_strategy="${worker_decision%% *}"
   worker_strategy_reason="${worker_decision#* }"
+
+  # A strict brain descriptor is itself rehydratable authored context. If a
+  # would-be resume was refused after all durable artifacts were quarantined,
+  # the generic router conservatively reports fresh because its durable-only
+  # manifest is empty. Keep that refusal on the existing rehydrate boundary so
+  # the configured descriptor is validated, rendered, and recorded before the
+  # affected worker runs. Feature-off, absent config, legacy strings, no-session,
+  # and routing errors retain their prior decisions.
+  if [[ "$worker_strategy" == "fresh" && "${SINGULAR_REHYDRATE:-0}" == "1" ]]; then
+    case "$worker_strategy_reason" in
+      session-lease|window-pressure|diff-volume)
+        if singular_ctx_rehydrate_authored_brain_configured; then
+          worker_strategy="rehydrate"
+        fi
+        ;;
+    esac
+  fi
   if [[ "$worker_strategy" == "resume" ]]; then
     worker_resume_id="$worker_strategy_reason"; worker_strategy_reason="resume"
     singular_append_event "context.strategy_selected" "session resume strategy selected" \
@@ -1507,8 +1526,15 @@ run_worker_phase() {
     # class-tagged extra so the recorded manifest carries the SAME decision record
     # (id + content hash) the packet-injection hook injects — both reference the
     # identical drive-start `decision_source_extra`, so they agree by construction.
+    local rehydrate_event_data
+    if ! rehydrate_event_data="$(singular_ctx_rehydrate_event_data implementer "$task_id" "$run_id" "$n" "$worker_strategy_reason" "$run_dir" ${decision_source_extra:+"$decision_source_extra"})"; then
+      echo "configured brain context validation failed before worker invocation" >&2
+      attempt_failure="configured-context"
+      attempt_ctx="${SINGULAR_JSON_CONFIG_FILE:-$active_prompt}"
+      return 1
+    fi
     singular_append_event "context.strategy_selected" "rehydrate strategy selected" \
-      "$(singular_ctx_rehydrate_event_data implementer "$task_id" "$run_id" "$n" "$worker_strategy_reason" "$run_dir" ${decision_source_extra:+"$decision_source_extra"})" || true
+      "$rehydrate_event_data" || true
   else
     singular_append_event "context.strategy_selected" "fresh-run strategy selected" \
       "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"role\":\"implementer\",\"attempt\":$n,\"strategy\":\"fresh\",\"reason\":\"$worker_strategy_reason\"}" || true
@@ -1518,7 +1544,12 @@ run_worker_phase() {
   # On a `rehydrate` decision, append the assembled durable-context packet to the
   # already-rendered active prompt ONCE, before the (fresh) worker try loop. No-op
   # for resume/fresh, so with SINGULAR_REHYDRATE unset $active_prompt is unchanged.
-  rehydrate_inject_packet "$active_prompt"
+  if ! rehydrate_inject_packet "$active_prompt"; then
+    echo "configured brain context rendering failed before worker invocation" >&2
+    attempt_failure="configured-context"
+    attempt_ctx="${SINGULAR_JSON_CONFIG_FILE:-$active_prompt}"
+    return 1
+  fi
 
   local worker_resume_failed="no"
   for ((worker_try=0; worker_try<=worker_infra_max; worker_try++)); do

@@ -1,0 +1,15 @@
+{
+  "upstream": "singular-brain",
+  "version": "0.2.0",
+  "commit": "e05f259be5cabda2bb8caa241f23cc1f48e9f059",
+  "fixture": "tests/fixtures/knowledge-scope",
+  "files": {
+    "corpus/handoffs/generated-summary.md": "sha256:8f36b0022093ae19f97fa2130948e41808da4bcac831b856227ed24bfff1ae06",
+    "corpus/handoffs/session-2026-07-05.md": "sha256:5df8d31054780660f5b9a4f859376f335d8e5d2521a67425a90e41ae839543be",
+    "corpus/notes/decision-log.md": "sha256:06c6956d853f8307596ca9a38abace571d62821c569575957a5bca2a209e0153",
+    "corpus/skills/example-skill/SKILL.md": "sha256:b973cf4c8a89baba3c19d1024f5822deecbe9338088e56d9309a19e680df6d26",
+    "expected/.knowledge-freshness.json": "sha256:d5fa13e7fcde498d14bcafc6b914e49341d9a0c6d74cf33d4c77370434244f08",
+    "expected/KNOWLEDGE.json": "sha256:45ea5a419beed4fbc6fd04c4d1d1fdde3ffdaeee2f133191fd5323c433304423",
+    "singular-brain.config.json": "sha256:563f039e8c53968a1e5ba3eb2e26f26f87af23ebf920d06fae157f8a5055eac0"
+  }
+}

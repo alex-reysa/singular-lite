@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "scopes": [
+    {
+      "name": "knowledge",
+      "base": ".",
+      "output": "docs/KNOWLEDGE.md",
+      "jsonOutput": "docs/KNOWLEDGE.json",
+      "title": "Fixture Knowledge Registry",
+      "rootLabel": "`.` (repo root)",
+      "staleHint": "regen knowledge fixture",
+      "header": [
+        "<!-- GENERATED — DO NOT EDIT. -->",
+        "",
+        "Routing manifest over durable knowledge outside the docs canon."
+      ],
+      "tokenWarnThreshold": 8000,
+      "exhaustive": false,
+      "freshness": { "enabled": true, "sidecar": "docs/.knowledge-freshness.json" },
+      "folders": [
+        {
+          "dir": "notes",
+          "title": "Notes",
+          "character": "durable",
+          "purpose": "Durable working notes",
+          "scan": "flat"
+        },
+        {
+          "dir": "handoffs",
+          "title": "Handoffs",
+          "character": "durable",
+          "purpose": "Session checkpoints",
+          "scan": "flat",
+          "excludeLocal": ["/generated-summary\\.md$"]
+        },
+        {
+          "dir": "skills",
+          "title": "Agent skills",
+          "character": "vendored",
+          "purpose": "Vendored skill packs; routing from SKILL.md name/description",
+          "scan": "recursive",
+          "include": "(^|/)SKILL\\.md$",
+          "adapter": "claude-skill"
+        }
+      ],
+      "exclude": [],
+      "tables": []
+    }
+  ]
+}
