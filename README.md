@@ -398,7 +398,7 @@ live and warns when a dependent feature is enabled without its dependency.
 | `SINGULAR_CTX_ARTIFACT_SCAN` | `0` | Secret scan over durable artifacts; hits quarantine (`.quarantined`) and drop out of all prompt assembly. |
 | `SINGULAR_PAIRED_AUDIT_PCT` | `0` | Sampled post-acceptance paired fresh audits (bias measurement + independence spine). |
 | `SINGULAR_REHYDRATE` | `0` | Inject deterministic durable-artifact packets on refused-resume lineage steps. Opt-in until the per-section truncation issue below is fixed. |
-| `SINGULAR_CTX_MANIFEST` | `0` | Authored-knowledge manifest ingestion into rehydration packets (`contextManifest` config field; fixture contract). |
+| `SINGULAR_CTX_MANIFEST` | `0` | Authored-knowledge ingestion into rehydration packets (`contextManifest`: legacy string manifest or strict `singular-brain.manifest.v1` descriptor). |
 | `SINGULAR_CTX_GRAPH` | `0` | Context-graph projector/sync/query + subgraph-selected rehydration. |
 | `SINGULAR_CTX_EXPERIMENT` | `0` | Experiment aggregators, delta, renderers, and `singular experiment-report`. |
 | `SINGULAR_CTX_ARMSTATE` | `0` | Per-run knob-state provenance recording for arm-integrity audits. |
@@ -408,6 +408,65 @@ Rehydration orders node selection contradictions-first, but the per-section cap
 (`SINGULAR_CONTEXT_SECTION_MAX_CHARS`, default 4000) truncates *within* a section
 content-blind — the line that mattered can be cut from a section chosen precisely
 because it mattered. That is fixed before rehydrate is promoted, not after.
+
+### Singular-brain manifests
+
+The optional producer is the complete singular-brain 0.2.0 engine pinned in
+`vendor/singular-brain`. Configure its JSON path relative to the effective
+Singular JSON configuration, then use:
+
+```bash
+singular manifest gen --scope knowledge
+singular manifest check --scope knowledge
+singular manifest lint --scope knowledge
+singular manifest bless --scope knowledge path/to/reviewed.md
+```
+
+`--config PATH` overrides `brainConfig` and resolves from the invocation
+directory. Otherwise `brainConfig` resolves relative to the selected Singular
+JSON file, including a file selected with `SINGULAR_JSON_CONFIG_FILE`. Brain is
+opt-in: when `brainConfig` is absent, doctor reports a skip and Node.js remains
+optional. `check`, `lint`, and doctor are read-only. Regeneration preserves the
+freshness sidecar's prior review hashes; body drift stays
+`description_unverified` until an explicit `bless`.
+
+For ingestion, `contextManifest` can be an explicit descriptor:
+
+```json
+{
+  "contextManifest": {
+    "format": "singular-brain.manifest.v1",
+    "manifest": "generated/KNOWLEDGE.json",
+    "sourceId": "project-knowledge",
+    "expectedScope": "knowledge",
+    "sourceRoot": "knowledge-corpus",
+    "select": ["decisions/runtime.md", "skills/release/SKILL.md"]
+  }
+}
+```
+
+All six fields are required and unknown fields are rejected. `manifest` and
+`sourceRoot` resolve relative to the effective Singular JSON file, never the
+process cwd. Artifact and selection paths must be canonical POSIX-relative
+paths. The consumer contains resolved sources beneath `sourceRoot`, rejects
+escaping or colliding symlinks and duplicate identities, and excludes missing,
+quarantined, stale, superseded, or otherwise unreviewed sources. Selection is
+explicit: natural-language `loadWhen` prose is retained as metadata and is not
+interpreted as role tokens.
+
+Normalization keeps the manifest hash, live full-source hash, and last-reviewed
+metadata/body hashes distinct. It is deterministic and read-only:
+
+```bash
+python3 engine/brain_documents.py normalize --config /absolute/path/to/singular.config.json
+```
+
+The output contract is `singular.context.brain-documents.v1`, described by
+`schemas/brain-documents.v1.schema.json`. A string-valued `contextManifest`
+remains the explicit legacy compatibility path with exact historical trigger
+matching and fail-soft behavior; an object descriptor never falls back to it.
+With `SINGULAR_CTX_MANIFEST` disabled or the field absent, no brain sources are
+read.
 
 **Note on overrides.** `singular.config.json`’s `env{}` block is applied over the
 process environment, so in a repo that pins a knob there, `VAR=0 singular …` will

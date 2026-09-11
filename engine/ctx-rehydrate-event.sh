@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # ctx-rehydrate-event.sh — pure, read-only strategy-event payload builder (stage
 # S5-routing, node `rehydrate-path`, layer engine_runtime). Sourced exactly once
-# by the context-evolution loader block in lib.sh (it matches the ctx-*.sh glob).
-# This file DEFINES a new function only and is present-but-uncalled by every
-# existing engine/CLI/driver path, so with it sourced the engine stays
-# byte-identical to prior behavior.
+# by the context-evolution loader block in lib.sh (it matches the ctx-*.sh glob),
+# and called by the rehydrate strategy path before worker invocation.
 #
 #   singular_ctx_rehydrate_event_data \
 #     <role> <task-id> <run-id> <attempt> <reason> <run_dir> [extra-id=path ...]
@@ -36,11 +34,8 @@
 #
 # Pure and READ-ONLY: it reads artifact bytes (transitively, to hash them) but
 # never writes, renames, or deletes anything, and appends NO events itself (it
-# PRODUCES the data string; the later l1-drive.sh wire-in calls
-# singular_append_event). It confers NO independence: `rehydrate` remains tainted
-# per singular_ctx_route_strategy_tainted. The routing wire-in that records this
-# payload at the context.strategy_selected site, and the l1-drive.sh packet
-# injection hook, are SEPARATE later slices and are OUT OF SCOPE here.
+# produces the data string; l1-drive.sh records it). It confers NO independence:
+# `rehydrate` remains tainted per singular_ctx_route_strategy_tainted.
 
 # singular_ctx_rehydrate_event_data <role> <task-id> <run-id> <attempt> <reason> <run_dir> [extra-id=path ...]
 singular_ctx_rehydrate_event_data() {
@@ -113,7 +108,10 @@ singular_ctx_rehydrate_event_data() {
     [[ -n "$trigger" ]] && authored_triggers+=("$trigger")
   done < <(singular_ctx_rehydrate_authored_triggers implementer implement "$node" "$task_id" 2>/dev/null)
   local authored
-  authored="$(singular_ctx_rehydrate_authored_config_manifest ${authored_triggers[@]+"${authored_triggers[@]}"} 2>/dev/null)" || authored=""
+  # Legacy inputs remain fail-soft in the configuration adapter. A configured
+  # brain descriptor is strict: preserve its diagnostic and nonzero status so
+  # l1-drive can stop before invoking the affected worker.
+  authored="$(singular_ctx_rehydrate_authored_config_manifest ${authored_triggers[@]+"${authored_triggers[@]}"})" || return $?
 
   # Embed the metadata scalars and the NESTED manifest object into a single
   # compact JSON object. Pure: reads its argv, writes only stdout.
@@ -140,7 +138,8 @@ except json.JSONDecodeError:
 # never as authoritative. The gate returns empty when OFF/unconfigured, so the
 # key is added ONLY when there is a well-formed authored manifest to record —
 # preserving OFF-parity (byte-identical to the durable-only payload). A malformed
-# blob is skipped (fail-soft) rather than recorded as a {"raw":…} fallback.
+# legacy blob is skipped (fail-soft). Strict brain validation has already failed
+# this function before this projection is reached.
 if authored_raw.strip() and isinstance(manifest, dict):
     try:
         authored = json.loads(authored_raw)

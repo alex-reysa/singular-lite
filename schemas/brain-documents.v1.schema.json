@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://singular.local/schemas/brain-documents.v1.schema.json",
+  "title": "Singular normalized brain documents v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "format", "sourceId", "scope", "manifestPath", "declaredSourceRoot", "resolvedSourceRoot", "manifestSha256", "selection", "documents"],
+  "properties": {
+    "schema": {"const": "singular.context.brain-documents.v1"},
+    "format": {"const": "singular-brain.manifest.v1"},
+    "sourceId": {"type": "string", "minLength": 1},
+    "scope": {"type": "string", "minLength": 1},
+    "manifestPath": {"type": "string", "minLength": 1},
+    "declaredSourceRoot": {"type": "string", "minLength": 1},
+    "resolvedSourceRoot": {"type": "string", "minLength": 1},
+    "manifestSha256": {"$ref": "#/$defs/hash"},
+    "selection": {"type": "array", "items": {"$ref": "#/$defs/selection"}},
+    "documents": {"type": "array", "items": {"$ref": "#/$defs/document"}}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nullableHash": {"oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "nullableString": {"type": ["string", "null"]},
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requestedPath", "artifactId", "included", "exclusionReasons"],
+      "properties": {
+        "requestedPath": {"type": "string", "minLength": 1},
+        "artifactId": {"$ref": "#/$defs/nullableString"},
+        "included": {"type": "boolean"},
+        "exclusionReasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "document": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceId", "scope", "artifactId", "artifactPath", "canonicalPath", "declaredSourcePath", "resolvedSourcePath", "adapter", "tier", "section", "title", "description", "loadWhen", "statusHint", "review", "lifecycle", "integrity", "provenance", "selected", "eligible", "included", "exclusionReasons"],
+      "properties": {
+        "sourceId": {"type": "string", "minLength": 1}, "scope": {"type": "string", "minLength": 1},
+        "artifactId": {"type": "string", "minLength": 1}, "artifactPath": {"type": "string", "minLength": 1},
+        "canonicalPath": {"type": "string", "minLength": 1}, "declaredSourcePath": {"type": "string", "minLength": 1},
+        "resolvedSourcePath": {"$ref": "#/$defs/nullableString"}, "adapter": {"enum": ["markdown-doc", "claude-skill"]},
+        "tier": {"enum": [1, 2]}, "section": {"type": "string", "minLength": 1}, "title": {"type": "string", "minLength": 1},
+        "description": {"$ref": "#/$defs/nullableString"}, "loadWhen": {"type": "array", "items": {"type": "string"}},
+        "statusHint": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+        "review": {"$ref": "#/$defs/review"}, "lifecycle": {"$ref": "#/$defs/lifecycle"},
+        "integrity": {"type": "object", "additionalProperties": false, "required": ["liveSourceSha256"], "properties": {"liveSourceSha256": {"$ref": "#/$defs/nullableHash"}}},
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "selected": {"type": "boolean"}, "eligible": {"type": "boolean"}, "included": {"type": "boolean"},
+        "exclusionReasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "metaHash", "bodyHash", "liveMetaHash", "liveBodyHash", "metaMatches", "bodyMatches"],
+      "properties": {
+        "state": {"type": "string"}, "metaHash": {"$ref": "#/$defs/nullableHash"}, "bodyHash": {"$ref": "#/$defs/nullableHash"},
+        "liveMetaHash": {"$ref": "#/$defs/nullableHash"}, "liveBodyHash": {"$ref": "#/$defs/nullableHash"},
+        "metaMatches": {"type": ["boolean", "null"]}, "bodyMatches": {"type": ["boolean", "null"]}
+      }
+    },
+    "lifecycle": {
+      "type": "object", "additionalProperties": false, "required": ["state", "manifestStatus", "sourceStatus"],
+      "properties": {"state": {"enum": ["current", "superseded", "unknown"]}, "manifestStatus": {"$ref": "#/$defs/nullableString"}, "sourceStatus": {"$ref": "#/$defs/nullableString"}}
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifestPath", "manifestSha256", "sourceLocation", "approval", "authoritative", "hostVerified"],
+      "properties": {
+        "manifestPath": {"type": "string", "minLength": 1}, "manifestSha256": {"$ref": "#/$defs/hash"}, "sourceLocation": {"type": "string", "minLength": 1},
+        "approval": {"const": "unknown"}, "authoritative": {"const": false}, "hostVerified": {"const": false}
+      }
+    }
+  }
+}

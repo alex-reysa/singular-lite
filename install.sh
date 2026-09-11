@@ -57,7 +57,7 @@ rm -rf "$DEST"/* 2>/dev/null || true
 # and a supervisor created, then SINGULAR_TEST_SOURCE_UNSUPPORTED from run.sh's
 # own preflight. The suite runs from an engine CHECKOUT; `singular test` refuses
 # up front anywhere else. (The chmod below tolerates the absent dir.)
-for item in engine schemas promoters templates plugin singular-ext cli migrations VERSION SCHEMA_VERSION CHANGELOG.md; do
+for item in engine schemas promoters templates plugin singular-ext cli migrations vendor VERSION SCHEMA_VERSION CHANGELOG.md; do
   copy "$item"
 done
 

@@ -169,7 +169,7 @@ def source_fingerprint(engine_home: str) -> str:
     # drivers: changing a planner/auditor prompt during a campaign must be
     # detected.  Runtime caches and compiled bytecode are deliberately excluded
     # so merely importing a Python helper cannot create false campaign drift.
-    for relative in ("engine", "schemas", "singular-ext", "templates"):
+    for relative in ("engine", "schemas", "singular-ext", "templates", "vendor"):
         directory = root / relative
         if directory.is_dir():
             candidates.extend(path for path in directory.rglob("*") if shipped_source(path))
@@ -186,6 +186,25 @@ def source_fingerprint(engine_home: str) -> str:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(block)
     return digest.hexdigest()
+
+
+def configured_brain_identity(config_json: str) -> dict[str, Any]:
+    """Fingerprint the declared producer config, not its generated outputs."""
+    config_path = Path(config_json) if config_json else None
+    if config_path is None or not config_path.is_file():
+        return {"configured": False, **file_fingerprint("")}
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"configured": False, **file_fingerprint("")}
+    raw = data.get("brainConfig") if isinstance(data, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return {"configured": False, **file_fingerprint("")}
+    selected = Path(raw).expanduser()
+    if not selected.is_absolute():
+        selected = config_path.resolve().parent / selected
+    selected = selected.resolve()
+    return {"configured": True, **file_fingerprint(str(selected))}
 
 
 def model_identity() -> dict[str, dict[str, Any]]:
@@ -265,6 +284,7 @@ def current(args: argparse.Namespace) -> dict[str, Any]:
             "shell": file_fingerprint(args.config_shell),
             # Hash only: local config may contain secrets and is never copied.
             "local": file_fingerprint(args.config_local),
+            "brain": configured_brain_identity(args.config_json),
             "resolvedSettings": resolved_settings_identity(),
         },
         "activePolicy": active_policy_identity(args.active_policy),
