@@ -567,25 +567,45 @@ PY
   >"$tmp/regate-failed-no-authority.out" 2>&1 || true
 [[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_before_replay" ]] \
   || fail "completed infrastructure-failed regate reran without authority"
-# Even a relevant target-head invalidation cannot bypass an exhausted domain.
-git -C "$repo" commit --allow-empty -qm advance-target-for-invalidation
+# A changed target is a relevant invalidation. With one slot left, the ordinary
+# no-authority attempt runs once, records a distinct non-recovery failure, and
+# charges the infrastructure domain from 2 to 3.
+git -C "$repo" commit --allow-empty -qm advance-target-with-capacity
+"${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" FORCE_GATE_INFRA=1 \
+  bash "$ROOT/engine/integrate.sh" --task TASK-1201 --run-id RUN-INFRA-CHANGED \
+  >"$tmp/infra-changed.out" 2>&1 || true
+gate_runs_after_changed="$(wc -l <"$tmp/gate-runs" | tr -d ' ')"
+[[ "$gate_runs_after_changed" == "$((gate_runs_before_replay + 1))" ]] \
+  || fail "within-cap changed infrastructure input did not run exactly once"
 python3 - "$real_state/leases/TASK-1201.json" <<'PY'
 import json, sys
-p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["infrastructure"]=2
-json.dump(d, open(p,"w"))
+d=json.load(open(sys.argv[1])); failures=d["acceptedCandidate"]["failures"]
+assert d["failureBudgets"]["infrastructure"] == 3, d
+assert len(failures) == 3, failures
+assert failures[-1]["domain"] == "infrastructure", failures[-1]
+assert failures[-1]["recoveryAuthorizationId"] == "", failures[-1]
+assert failures[-1]["recoveryAction"] == "", failures[-1]
 PY
+"${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" FORCE_GATE_INFRA=1 \
+  bash "$ROOT/engine/integrate.sh" --task TASK-1201 --run-id RUN-INFRA-CHANGED-REPLAY \
+  >"$tmp/infra-changed-replay.out" 2>&1 || true
+[[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_after_changed" ]] \
+  || fail "recorded changed-input infrastructure failure reran unchanged"
+# A second target invalidation cannot bypass the now-exhausted domain.
+git -C "$repo" commit --allow-empty -qm advance-target-after-exhaustion
 "${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" FORCE_GATE_INFRA=1 \
   bash "$ROOT/engine/integrate.sh" --task TASK-1201 --run-id RUN-INFRA-EXHAUSTED \
   >"$tmp/infra-exhausted.out" 2>&1 || true
-[[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_before_replay" ]] \
+[[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_after_changed" ]] \
   || fail "exhausted infrastructure domain reran after invalidation"
 grep -q 'infrastructure recovery budget is exhausted' "$tmp/infra-exhausted.out" \
   || fail "exhausted infrastructure retry lacked its durable reason"
 python3 - "$real_state/leases/TASK-1201.json" <<'PY'
 import json, sys
-p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["infrastructure"]=3
+p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["infrastructure"]=4
 json.dump(d, open(p,"w"))
 PY
+gate_runs_before_green="$gate_runs_after_changed"
 regate_retry_failure="$(python3 - "$real_state/leases/TASK-1201.json" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1]))["acceptedCandidate"]["failures"][-1]["failureId"])
@@ -605,7 +625,7 @@ if "${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" \
     >"$tmp/regate-crash.out" 2>&1; then
   fail "deterministic recovery-entrypoint interrupt did not stop integration"
 fi
-[[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_before_replay" ]] \
+[[ "$(wc -l <"$tmp/gate-runs" | tr -d ' ')" == "$gate_runs_before_green" ]] \
   || fail "interrupted recovery ran the gate before its durable checkpoint"
 "${real_env[@]}" GATE_RUN_COUNTER="$tmp/gate-runs" \
   SINGULAR_RECOVERY_AUTHORIZATION_ID="$regate_retry_auth" \

@@ -7,12 +7,14 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
 from typing import Any
 
 import infra_patterns
+from task_parser import parse_task
 
 
 PRODUCT_PATTERNS = (
@@ -139,12 +141,22 @@ REQUEST_FIELDS = {
 }
 
 
-def trusted_gate_command(task_contract: pathlib.Path) -> str:
-    text = task_contract.read_text(encoding="utf-8")
-    match = re.search(r"^Gate command:\s*`([^`]+)`\s*$", text, re.MULTILINE)
-    if not match or not match.group(1).strip():
-        raise ValueError("trusted task contract has no Gate command")
-    return match.group(1).strip()
+def trusted_gate_command(
+    task_contract: pathlib.Path, policy_contract: pathlib.Path
+) -> str:
+    command = str(parse_task(task_contract).get("gateCommand") or "").strip()
+    if command:
+        return command
+    try:
+        policy = json.loads(policy_contract.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"verification policy contract is malformed: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise ValueError("verification policy contract is not an object")
+    command = str(policy.get("gateCommand") or "").strip()
+    if not command:
+        raise ValueError("trusted task/policy contract has no Gate command")
+    return command
 
 
 def task_contract_semantic_bytes(task_contract: pathlib.Path) -> bytes:
@@ -155,14 +167,27 @@ def task_contract_semantic_bytes(task_contract: pathlib.Path) -> bytes:
     ).encode("utf-8")
 
 
-def command_is_trusted_gate(source_command: str, trusted_command: str) -> bool:
+def command_is_trusted_gate(
+    source_command: str, trusted_command: str, trusted_shell: str = ""
+) -> bool:
     if source_command == trusted_command:
         return True
     prefix, separator, inner = source_command.partition(" -c ")
+    trusted_shell_path = pathlib.Path(trusted_shell) if trusted_shell else None
+    configured_shell = bool(
+        trusted_shell_path
+        and trusted_shell_path.is_absolute()
+        and trusted_shell_path.is_file()
+        and os.access(trusted_shell_path, os.X_OK)
+        and prefix == trusted_shell
+    )
     return bool(
         separator
         and inner == trusted_command
-        and re.fullmatch(r"(?:[^\s]*/)?bash(?:[0-9.]*)?", prefix)
+        and (
+            configured_shell
+            or re.fullmatch(r"(?:[^\s]*/)?bash(?:[0-9.]*)?", prefix)
+        )
     )
 
 
@@ -212,7 +237,7 @@ def load_verification_request(
         raise ValueError("verification task contract path mismatch")
     if pathlib.Path(str(request.get("policyContractPath"))).resolve() != policy_contract.resolve():
         raise ValueError("verification policy contract path mismatch")
-    command = trusted_gate_command(task_contract)
+    command = trusted_gate_command(task_contract, policy_contract)
     if request.get("commandIdentity") != sha_bytes(command.encode("utf-8")):
         raise ValueError("trusted verification command identity changed")
     if request.get("requestIdentity") != request_binding(request):
@@ -229,7 +254,7 @@ def command_create_verification_request(args: argparse.Namespace) -> int:
         raise ValueError("verification request attempt must be positive")
     task_contract = pathlib.Path(args.task_contract).resolve()
     policy_contract = pathlib.Path(args.policy_contract).resolve()
-    command = trusted_gate_command(task_contract)
+    command = trusted_gate_command(task_contract, policy_contract)
     head_sha = valid_head(args.head_sha)
     tree_sha = valid_head(args.tree_sha)
     if head_sha != args.head_sha.strip() or tree_sha != args.tree_sha.strip():
@@ -328,7 +353,9 @@ def command_bind_verification_result(args: argparse.Namespace) -> int:
             evidence_source_command.encode("utf-8")
         ):
             raise ValueError("verification evidence source command mismatch")
-        if not command_is_trusted_gate(evidence_source_command, command):
+        if not command_is_trusted_gate(
+            evidence_source_command, command, args.trusted_shell
+        ):
             raise ValueError("verification evidence source is not the trusted gate command")
         report["evidenceSourceCommandIdentity"] = report["commandSha256"]
     elif report.get("commandSha256") != sha_bytes(command.encode("utf-8")):
@@ -356,7 +383,9 @@ def command_verify_verification_result(args: argparse.Namespace) -> int:
         raise ValueError(f"verification result unreadable: {exc}") from exc
     evidence_only = bool(raw_report.get("evidenceOnly"))
     expected_command = str(raw_report.get("command", "")) if evidence_only else command
-    if evidence_only and not command_is_trusted_gate(expected_command, command):
+    if evidence_only and not command_is_trusted_gate(
+        expected_command, command, args.trusted_shell
+    ):
         raise ValueError("verification evidence source is not the trusted gate command")
     report, reason = load_verified_evidence(
         report_path, request["headSha"], expected_command,
@@ -675,6 +704,9 @@ def build_parser() -> argparse.ArgumentParser:
     for flag in ("request", "report", "task_contract", "policy_contract"):
         bind_result.add_argument("--" + flag.replace("_", "-"), required=True)
     bind_result.add_argument("--evidence-source-command", default="")
+    bind_result.add_argument(
+        "--trusted-shell", default=os.environ.get("SINGULAR_BASH_BIN", "")
+    )
     bind_result.set_defaults(handler=command_bind_verification_result)
 
     verify_result = commands.add_parser("verify-verification-result")
@@ -687,6 +719,9 @@ def build_parser() -> argparse.ArgumentParser:
         verify_result.add_argument("--" + flag.replace("_", "-"), default="")
     verify_result.add_argument("--expected-attempt", type=int)
     verify_result.add_argument("--current-task-contract", default="")
+    verify_result.add_argument(
+        "--trusted-shell", default=os.environ.get("SINGULAR_BASH_BIN", "")
+    )
     verify_result.add_argument("--require-pass", action="store_true")
     verify_result.set_defaults(handler=command_verify_verification_result)
     return parser

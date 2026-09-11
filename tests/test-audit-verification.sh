@@ -303,6 +303,37 @@ env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   "${verification_args[@]}" >/dev/null
 [[ "$(outcome)" == "not-rerun-evidence-verified" ]]
 
+# A custom wrapper is trusted only when it is the exact host-selected Bash
+# identity. Merely putting an arbitrary executable before `-c` does not grant
+# worker evidence authority.
+pinned_shell="$tmp/pinned-shell"
+ln -s "$(command -v bash)" "$pinned_shell"
+python3 "$ROOT/engine/gate-report.py" create \
+  --output "$run_dir/pinned-worker-gate.json" --task-id TASK-0001 \
+  --run-id RUN-AUDIT --head-sha "$head_sha" \
+  --command "$pinned_shell -c true" --exit-code 0 \
+  --log "$run_dir/worker-gate.log" --phase worker \
+  --workspace-kind worker --integrity-status verified >/dev/null
+prepare_verification true
+if env "${base_env[@]}" SINGULAR_BASH_BIN= \
+    "$ROOT/engine/audit-verify.sh" --run-dir "$run_dir" \
+    --task-id TASK-0001 --source-worktree "$repo" --head-sha "$head_sha" \
+    --gate-command true --worker-gate-command "$pinned_shell -c true" \
+    --worker-gate-report "$run_dir/pinned-worker-gate.json" --evidence-only \
+    --attempt "$verification_sequence" "${verification_args[@]}" \
+    >/dev/null 2>&1; then
+  echo "arbitrary evidence wrapper was accepted without host selection" >&2
+  exit 1
+fi
+prepare_verification true
+env "${base_env[@]}" SINGULAR_BASH_BIN="$pinned_shell" \
+  "$ROOT/engine/audit-verify.sh" --run-dir "$run_dir" \
+  --task-id TASK-0001 --source-worktree "$repo" --head-sha "$head_sha" \
+  --gate-command true --worker-gate-command "$pinned_shell -c true" \
+  --worker-gate-report "$run_dir/pinned-worker-gate.json" --evidence-only \
+  --attempt "$verification_sequence" "${verification_args[@]}" >/dev/null
+[[ "$(outcome)" == "not-rerun-evidence-verified" ]]
+
 # A successful-looking report is not eligible for evidence-only substitution
 # unless the producing gate verified source integrity.
 python3 "$ROOT/engine/gate-report.py" create \

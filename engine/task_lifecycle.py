@@ -730,7 +730,8 @@ def candidate_failed(args: argparse.Namespace) -> None:
             failure_key, sort_keys=True, separators=(",", ":")
         ))
         if (
-            isinstance(authority, dict)
+            recovery_context
+            and isinstance(authority, dict)
             and authority.get("state") == "failed"
             and authority.get("executionFailureId") != failure_id
         ):

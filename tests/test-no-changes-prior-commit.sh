@@ -44,7 +44,6 @@ Area: widget
 Target branch: `target`
 Worker branch: `agent/widget/TASK-0001-generic`
 Test policy: `strict_test_first`
-Gate command: `bash strict-gate.sh`
 Dispatch mode: canonical
 Depends on: []
 

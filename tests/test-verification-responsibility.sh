@@ -229,6 +229,50 @@ git -C "$repo" add .
 git -C "$repo" commit -qm fixture
 head_sha="$(git -C "$repo" rev-parse HEAD)"
 tree_sha="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
+
+# The host may supply the released config-level default when a task omits its
+# gate. That effective command is captured in the hashed policy, while the
+# request remains identity-only and cannot inject a replacement command.
+default_task="$repo/.singular-state/runs/RUN-HOST/default-task.md"
+default_policy="$repo/.singular-state/runs/RUN-HOST/default-policy.json"
+default_request="$repo/.singular-state/runs/RUN-HOST/default-request.json"
+printf '# TASK-1107: default gate fixture\n\nStatus: ready\nTest policy: strict_test_first\n' \
+  >"$default_task"
+printf '%s\n' '{"campaign":"legacy","gateCommand":"true","policy":"default"}' \
+  >"$default_policy"
+python3 "$ROOT/engine/gate-report.py" create-verification-request \
+  --output "$default_request" --task-id TASK-1107 --run-id RUN-DEFAULT \
+  --attempt 1 --head-sha "$head_sha" --tree-sha "$tree_sha" \
+  --campaign legacy --task-contract "$default_task" \
+  --policy-contract "$default_policy" --suite-id task-contract-gate >/dev/null
+[[ "$(python3 "$ROOT/engine/gate-report.py" resolve-verification-request \
+  --request "$default_request" --task-contract "$default_task" \
+  --policy-contract "$default_policy" --expected-task TASK-1107 \
+  --expected-run RUN-DEFAULT --expected-head "$head_sha" \
+  --expected-tree "$tree_sha" --expected-attempt 1 \
+  --expected-suite task-contract-gate --expected-campaign legacy)" == true ]] \
+  || fail "host config default was not retained as the trusted gate"
+python3 - "$default_request" <<'PY'
+import json, sys
+path = sys.argv[1]
+request = json.load(open(path, encoding="utf-8"))
+request["command"] = "touch /tmp/request-command-must-not-run"
+json.dump(request, open(path, "w", encoding="utf-8"))
+PY
+if python3 "$ROOT/engine/gate-report.py" resolve-verification-request \
+    --request "$default_request" --task-contract "$default_task" \
+    --policy-contract "$default_policy" >/dev/null 2>&1; then
+  fail "default-gate verification request injected a replacement command"
+fi
+
+# Canonical task parsing also retains the released unquoted header form.
+printf '# TASK-1107: bare gate fixture\n\nGate command: true\n' >"$default_task"
+printf '%s\n' '{"campaign":"legacy","policy":"bare"}' >"$default_policy"
+python3 "$ROOT/engine/gate-report.py" create-verification-request \
+  --output "$default_request" --task-id TASK-1107 --run-id RUN-BARE \
+  --attempt 1 --head-sha "$head_sha" --tree-sha "$tree_sha" \
+  --campaign legacy --task-contract "$default_task" \
+  --policy-contract "$default_policy" --suite-id task-contract-gate >/dev/null
 request="$repo/.singular-state/runs/RUN-HOST/verification-request-2.json"
 bound_task_contract="$repo/.singular-state/runs/RUN-HOST/verification-task-contract-2.md"
 cp "$repo/docs/orchestration/tasks/TASK-1107.md" "$bound_task_contract"

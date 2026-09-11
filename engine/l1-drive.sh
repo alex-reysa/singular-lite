@@ -2187,13 +2187,17 @@ PY
   local verification_contract_rc=0
   cp "$task_file" "$verification_task_contract" || verification_contract_rc=$?
   if [[ "$verification_contract_rc" -eq 0 ]]; then
-    python3 - "$verification_policy" "$l1_campaign_binding" <<'PY' \
+    python3 - "$verification_policy" "$l1_campaign_binding" "$gate_cmd" <<'PY' \
       || verification_contract_rc=$?
 import json, os, sys
-path, campaign = sys.argv[1:3]
+path, campaign, gate_command = sys.argv[1:4]
 temporary = path + ".tmp"
 with open(temporary, "w", encoding="utf-8") as handle:
-    json.dump({"campaign": campaign, "policy": campaign}, handle, sort_keys=True)
+    json.dump({
+        "campaign": campaign,
+        "gateCommand": gate_command,
+        "policy": campaign,
+    }, handle, sort_keys=True)
     handle.write("\n")
 os.replace(temporary, path)
 PY
