@@ -1,0 +1,29 @@
+{
+  "command": "bash tests/run.sh test-brain-ingestion-e2e.sh",
+  "commandSha256": "59c550e5467d1a91d4dc1628fdb82ac4a169b03d22eea2d5d45ae84a4b9562c5",
+  "durationMs": 0,
+  "evidenceBindingSha256": "e93c9b8a223cb3cf3a8d38310a96744ab21c4c4ff6541f8264f709f1380a7f3b",
+  "evidenceOnly": false,
+  "expectedFailures": [],
+  "failureSignals": [],
+  "headSha": "b4dc11ee426135c0f876364ee53207ee69bf832a",
+  "infrastructureSignals": [],
+  "logBytes": 63,
+  "logPath": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/docs/orchestration/gates/evidence/brain-package.regression.txt",
+  "logRef": "docs/orchestration/gates/evidence/brain-package.regression.txt",
+  "logSha256": "cf52b7fc253b588d1713ebb66dfc4ea7262b4a845bf5706783c826ec42d0e53f",
+  "outcome": "passed",
+  "phase": "integration",
+  "rawExitCode": 0,
+  "recordedAt": "2026-09-11T10:02:51Z",
+  "resolvedExpectedFailures": [],
+  "runId": "ORIGIN-20260911T100246Z-10135",
+  "schema": "singular.orchestration.gate-report.v0",
+  "sourceIntegrity": {
+    "changedPaths": [],
+    "status": "not-checked"
+  },
+  "taskId": "TASK-1101",
+  "unexpectedFailures": [],
+  "workspaceKind": "integration"
+}
