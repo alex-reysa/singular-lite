@@ -6972,7 +6972,7 @@ singular_l1_import_staged() {
     # batch never burns ids).
 	    local ok=1 real v_id v_status v_area v_owned v_mode v_deps
 	    local duplicate_json="" duplicate_event_json=""
-	    local -a src=() ids=() temps=()
+	    local -a src=() ids=() temps=() dependencies=()
     for cand in "${cands[@]}"; do
       v_id="$(singular_task_field "$cand" taskId 2>/dev/null || echo '')"
       v_status="$(singular_task_field "$cand" status 2>/dev/null || echo '')"
@@ -6988,7 +6988,7 @@ singular_l1_import_staged() {
 	      if duplicate_json="$(singular_find_duplicate_task_signature "$cand" "$node" 2>/dev/null)"; then
 	        ok=2; break
 	      fi
-	      src+=("$cand"); temps+=("$v_id")
+	      src+=("$cand"); temps+=("$v_id"); dependencies+=("$v_deps")
 	    done
 	    # Duplicate temporary identities make a mapping ambiguous. Internal
 	    # dependencies remain prohibited by planner policy; only external task
@@ -6997,24 +6997,23 @@ singular_l1_import_staged() {
 	      local mapping_validation
 	      mapping_validation="$(python3 - \
 	        "$(printf '%s\n' "${temps[@]}" | python3 -c 'import json,sys; print(json.dumps([x.strip() for x in sys.stdin if x.strip()]))')" \
-	        "$(printf '%s\n' "${src[@]}" | python3 -c 'import json,sys; print(json.dumps([x.strip() for x in sys.stdin if x.strip()]))')" <<'PY'
+	        "$(printf '%s\n' "${dependencies[@]}" | python3 -c 'import json,sys; print(json.dumps([json.loads(x) for x in sys.stdin if x.strip()]))')" <<'PY'
 import json
-import re
 import sys
 
 temps = json.loads(sys.argv[1])
-paths = json.loads(sys.argv[2])
+dependencies = json.loads(sys.argv[2])
 if len(set(temps)) != len(temps):
     print("duplicate-temporary-id")
     raise SystemExit(1)
 temporary = set(temps)
-for path in paths:
-    text = open(path, encoding="utf-8").read().splitlines()
-    for line in text:
-        if line.lower().startswith("depends on:"):
-            if temporary.intersection(re.findall(r"TASK-[0-9]{4,}", line)):
-                print("internal-dependency")
-                raise SystemExit(1)
+if len(dependencies) != len(temps):
+    print("dependency-cardinality")
+    raise SystemExit(1)
+for task_dependencies in dependencies:
+    if temporary.intersection(task_dependencies):
+        print("internal-dependency")
+        raise SystemExit(1)
 print("valid")
 PY
 )" || ok=0
@@ -7075,9 +7074,11 @@ PY
 	        v_area="$(singular_task_field "${private_src[$j]}" area 2>/dev/null || echo '')"
 	        v_owned="$(singular_task_field "${private_src[$j]}" ownedFiles 2>/dev/null || echo '[]')"
 	        v_mode="$(singular_task_field "${private_src[$j]}" dispatchMode 2>/dev/null || echo '')"
+	        v_deps="$(singular_task_field "${private_src[$j]}" dependsOn 2>/dev/null || echo '[]')"
 	        if [[ "$v_id" != "${ids[$j]}" || "$v_status" != "ready" \
 	            || "$v_area" != "$node_area" || "$v_owned" == "[]" \
-	            || "$v_mode" != "canonical" ]]; then
+	            || "$v_mode" != "canonical" \
+	            || "$v_deps" != "${dependencies[$j]}" ]]; then
 	          ok=0
 	        fi
 	      fi

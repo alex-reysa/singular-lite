@@ -45,11 +45,13 @@ Preserve task data.
 Owned files:
 
 - `engine/path with spaces.py` — implementation and fixtures
+- `Release Notes.md` — quoted root-level path
 - engine/plain.py
 
 Forbidden files:
 
 - `private/no touch.md` — immutable source
+- `Do Not Touch.md` — quoted root-level restriction
 - Any file outside the owned scope.
 
 ## Acceptance Criteria
@@ -68,8 +70,8 @@ parsed="$(run_lib "singular_task_json '$task'")" || fail "valid annotated task d
 python3 - "$parsed" <<'PY' || fail "parsed task fields lost fidelity"
 import json, sys
 d = json.loads(sys.argv[1])
-assert d["ownedFiles"] == ["engine/path with spaces.py", "engine/plain.py"], d["ownedFiles"]
-assert d["forbiddenFiles"] == ["private/no touch.md"], d["forbiddenFiles"]
+assert d["ownedFiles"] == ["engine/path with spaces.py", "Release Notes.md", "engine/plain.py"], d["ownedFiles"]
+assert d["forbiddenFiles"] == ["private/no touch.md", "Do Not Touch.md"], d["forbiddenFiles"]
 assert len(d["acceptanceCriteria"]) == 2, d["acceptanceCriteria"]
 assert "Continuation paragraph with literal [TASK-ID] and $(printf inert)." in d["acceptanceCriteria"][0]
 assert "- Nested obligation with `literal code`." in d["acceptanceCriteria"][0]
@@ -81,7 +83,7 @@ python3 - "$index" <<'PY' || fail "node index scope differs from task JSON"
 import json, sys
 d = [item for item in json.loads(sys.argv[1]) if item["taskId"] == "TASK-4242"]
 assert len(d) == 1, d
-assert d[0]["ownedFiles"] == ["engine/path with spaces.py", "engine/plain.py"], d
+assert d[0]["ownedFiles"] == ["Release Notes.md", "engine/path with spaces.py", "engine/plain.py"], d
 PY
 
 run_lib "singular_task_preflight '$parsed' true target 1" >/dev/null \
@@ -131,6 +133,16 @@ scope_out="$(
 )" && fail "space-bearing forbidden path was not enforced"
 assert_contains "$scope_out" "private/no touch.md" "scope check lost forbidden path with spaces"
 rm -f "$repo/private/no touch.md"
+printf 'changed\n' >"$repo/Do Not Touch.md"
+root_scope_out="$(
+  SINGULAR_ROOT="$repo" SINGULAR_JSON_CONFIG_FILE="$repo/no-config.json" \
+    SINGULAR_CONFIG_FILE="$repo/no-config.sh" SINGULAR_LOCAL_CONFIG_FILE="$repo/no-local.sh" \
+    bash "$ENGINE_HOME/engine/scope-check.sh" --worktree "$repo" \
+      --allow-prefix 'Do Not Touch.md' --forbid-prefix 'Do Not Touch.md' 2>&1
+)" && fail "root-level forbidden path with spaces was not enforced"
+assert_contains "$root_scope_out" "Do Not Touch.md" \
+  "scope check lost root-level forbidden path with spaces"
+rm -f "$repo/Do Not Touch.md"
 driver_out="$(
   SINGULAR_ROOT="$repo" \
   SINGULAR_ORCH_DIR="$repo/docs/orchestration" \

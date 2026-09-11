@@ -46,6 +46,7 @@ fixture() {
 
 write_candidate() {
   local path="$1" id="$2" other="$3"
+  local depends_header="${4:-Depends on:}" depends="${5:-[TASK-9000]}"
   cat >"$path" <<EOF
 # $id: Immutable candidate
 
@@ -57,7 +58,7 @@ Worker branch: \`worker/$id\`
 Test policy: \`strict_test_first\`
 Gate command: \`true\`
 Dispatch mode: canonical
-Depends on: [TASK-9000]
+$depends_header $depends
 
 ## Objective
 
@@ -77,8 +78,10 @@ EOF
 
 publish_generation() {
   local replacement="$stage/replacement"
+  local depends_header="${1:-Depends on:}" depends="${2:-[TASK-9000]}"
   mkdir -p "$replacement"
-  write_candidate "$stage/TASK-0002.candidate.md" TASK-0002 TASK-0001
+  write_candidate "$stage/TASK-0002.candidate.md" TASK-0002 TASK-0001 \
+    "$depends_header" "$depends"
   write_candidate "$stage/TASK-0001.candidate.md" TASK-0001 TASK-0002
   cp "$stage"/*.candidate.md "$replacement/"
   singular_task_batch_replace_stage "$replacement" "$stage" || fail "generation publish failed"
@@ -121,6 +124,16 @@ assert_contains "$(cat "$SINGULAR_TASKS_DIR/TASK-0003.md")" \
   "whole-batch mapping cascaded or missed a sibling reference"
 assert_contains "$(cat "$SINGULAR_TASKS_DIR/TASK-0002.md")" 'Depends on: [TASK-9000]' \
   "external dependency changed"
+assert_canonical_unchanged
+
+fixture internal-dependency-spacing
+publish_generation 'Depends on :' '[TASK-0002]'
+out="$(singular_l1_import_staged RUN-import node 2>&1)" \
+  || fail "internal-dependency rejection aborted importer: $out"
+assert_eq "$(find "$SINGULAR_TASKS_DIR" -maxdepth 1 -name 'TASK-*.md' | wc -l | tr -d ' ')" "0" \
+  "whitespace-before-colon internal dependency was published"
+assert_eq "$(cat "$SINGULAR_STATE_DIR/task-id-counter" 2>/dev/null || echo 0)" "0" \
+  "internal dependency rejection burned task ids"
 assert_canonical_unchanged
 
 for failure in prepare rewrite:2 publish:2; do

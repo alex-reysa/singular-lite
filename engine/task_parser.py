@@ -21,6 +21,20 @@ class TaskParseError(ValueError):
     """A task contract cannot be interpreted without widening its authority."""
 
 
+def is_legacy_forbidden_prose(value: str) -> bool:
+    """Recognize retained catch-all policy sentences, not quoted path syntax."""
+
+    normalized = " ".join(value.lower().split())
+    return normalized.startswith(
+        (
+            "any file outside ",
+            "any files outside ",
+            "all files outside ",
+            "anything outside ",
+        )
+    )
+
+
 def validate_scope_path(value: str) -> str:
     path = value.strip()
     if not path:
@@ -62,12 +76,11 @@ def parse_scope_item(raw: str, kind: str) -> str | None:
         # the ownership interpretation ambiguous even though one span is quoted.
         if PATH_TOKEN_RE.search(before) or PATH_TOKEN_RE.search(after):
             raise TaskParseError("scope entry contains an ambiguous path outside backticks")
-        if any(char.isspace() for char in path) and "/" not in path:
-            if kind == "forbidden":
-                # A few legacy task templates wrapped their human-only catch-all
-                # sentence in ticks. It is still prose, not a root-level path.
-                return None
-            raise TaskParseError("quoted scope entry is prose rather than a path")
+        if kind == "forbidden" and is_legacy_forbidden_prose(path):
+            # A few legacy task templates wrapped their human-only catch-all
+            # sentence in ticks. Quoting otherwise explicitly marks a path,
+            # including a root-level path containing spaces.
+            return None
         return validate_scope_path(path)
 
     if any(char.isspace() for char in item):
