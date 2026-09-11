@@ -40,6 +40,45 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Older host callers did not persist a request before asking this entrypoint to
+# validate already-produced worker evidence.  Preserve that read-only interface
+# only when there is no repository task contract to consult: synthesize and
+# persist the same request/contract artifacts here, before consuming evidence.
+# This does not authorize command execution; the source command is still bound
+# to the verified worker report.  Canonical tasks must supply their trusted
+# task/policy contracts and request explicitly.
+canonical_task_contract="${SINGULAR_TASKS_DIR:-$SINGULAR_ROOT/docs/orchestration/tasks}/$task_id.md"
+if [[ "$evidence_only" == "yes" && -z "$verification_request" \
+    && ! -f "$canonical_task_contract" ]]; then
+  [[ -n "$run_dir" && -d "$run_dir" && -d "$source_worktree" \
+      && "$head_sha" =~ ^[0-9a-fA-F]{40,64}$ && -n "$gate_command" ]] || {
+    echo "audit-verify: legacy evidence binding has incomplete host identity" >&2
+    exit 2
+  }
+  [[ "$gate_command" != *$'\n'* && "$gate_command" != *'`'* ]] || {
+    echo "audit-verify: legacy evidence command cannot be represented safely" >&2
+    exit 2
+  }
+  legacy_tree="$(git -C "$source_worktree" rev-parse "$head_sha^{tree}" 2>/dev/null)" || {
+    echo "audit-verify: legacy evidence commit/tree identity is unavailable" >&2
+    exit 2
+  }
+  verification_request="$run_dir/verification-request.legacy-host.json"
+  verification_task_contract="$run_dir/verification-task.legacy-host.md"
+  verification_policy_contract="$run_dir/verification-policy.legacy-host.json"
+  printf '# Host evidence contract\n\nGate command: `%s`\n' "$gate_command" \
+    >"$verification_task_contract"
+  printf '{"campaign":"legacy-host-evidence","policy":"evidence-validation-only"}\n' \
+    >"$verification_policy_contract"
+  python3 "$SCRIPT_DIR/gate-report.py" create-verification-request \
+    --output "$verification_request" --task-id "$task_id" \
+    --run-id "${run_dir##*/}" --attempt "$attempt" --head-sha "$head_sha" \
+    --tree-sha "$legacy_tree" --campaign legacy-host-evidence \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" \
+    --suite-id legacy-host-evidence >/dev/null
+fi
+
 if [[ -n "$verification_request" ]]; then
   [[ -n "$verification_task_contract" && -n "$verification_policy_contract" ]] || {
     echo "audit-verify: verification request requires trusted task and policy contracts" >&2
@@ -65,11 +104,24 @@ fi
 
 output="$run_dir/audit-verification.json"
 if [[ "$evidence_only" == "yes" ]]; then
+  [[ -n "$verification_request" ]] || {
+    echo "audit-verify: evidence-only verification requires an identity-bound request" >&2
+    exit 2
+  }
   "$SCRIPT_DIR/gate-report.py" copy-evidence \
     --report "$worker_gate_report" \
     --output "$output" \
     --expected-head "$head_sha" \
     --expected-command "$worker_gate_command"
+  "$SCRIPT_DIR/gate-report.py" bind-verification-result \
+    --request "$verification_request" --report "$output" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" \
+    --evidence-source-command "$worker_gate_command"
+  "$SCRIPT_DIR/gate-report.py" verify-verification-result \
+    --request "$verification_request" --report "$output" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract"
   printf '%s\n' "$output"
   exit 0
 fi
@@ -438,6 +490,10 @@ else
 fi
 if [[ -n "$verification_request" ]]; then
   "$SCRIPT_DIR/gate-report.py" bind-verification-result \
+    --request "$verification_request" --report "$output" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" || report_rc=20
+  "$SCRIPT_DIR/gate-report.py" verify-verification-result \
     --request "$verification_request" --report "$output" \
     --task-contract "$verification_task_contract" \
     --policy-contract "$verification_policy_contract" || report_rc=20

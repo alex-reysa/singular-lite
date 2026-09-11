@@ -54,6 +54,71 @@ def failure_identity(failure: dict[str, Any]) -> str:
     return sha256_text("legacy:" + legacy_key) if legacy_key else ""
 
 
+def validate_candidate_artifacts(candidate: dict[str, Any]) -> None:
+    """Re-read the acceptance authorities instead of trusting cached hashes."""
+    packet_path = Path(str(candidate.get("packetPath", "")))
+    if not packet_path.is_file() or sha256(packet_path) != candidate.get("packetSha256"):
+        raise LifecycleError("recovery predecessor packet is missing or changed")
+    packet = read_object(packet_path)
+    for field in ("taskId", "runId", "branch", "headSha"):
+        if str(packet.get(field, "")) != str(candidate.get(field, "")):
+            raise LifecycleError(f"recovery predecessor packet {field} mismatch")
+    if packet.get("status") != "accepted":
+        raise LifecycleError("recovery predecessor packet is not accepted")
+
+    if candidate.get("acceptanceMode") == "accepted":
+        audit_path = Path(str(candidate.get("auditPath", "")))
+        if not audit_path.is_file() or sha256(audit_path) != candidate.get("auditSha256"):
+            raise LifecycleError("recovery predecessor audit is missing or changed")
+        audit = read_object(audit_path)
+        for field in ("taskId", "runId", "branch"):
+            if str(audit.get(field, "")) != str(candidate.get(field, "")):
+                raise LifecycleError(f"recovery predecessor audit {field} mismatch")
+        if audit.get("verdict") != "accepted":
+            raise LifecycleError("recovery predecessor audit is not accepted")
+
+    task_path = Path(str(candidate.get("taskContractPath", "")))
+    if not task_path.is_file() or sha256(task_path) != candidate.get("taskContractSha256"):
+        raise LifecycleError("recovery task contract is missing or changed")
+
+
+def recovery_predecessor(lease: dict[str, Any], authority: dict[str, Any]) -> dict[str, Any]:
+    candidates = []
+    current = lease.get("acceptedCandidate")
+    if isinstance(current, dict):
+        candidates.append(current)
+    candidates.extend(item for item in lease.get("candidateHistory", []) if isinstance(item, dict))
+    for candidate in candidates:
+        if all(
+            str(candidate.get(field, "")) == str(authority.get(authority_field, ""))
+            for field, authority_field in (
+                ("taskId", "taskId"), ("runId", "predecessorRunId"),
+                ("headSha", "predecessorHeadSha"), ("treeSha", "predecessorTreeSha"),
+                ("campaignBinding", "campaignBinding"),
+            )
+        ):
+            return candidate
+    raise LifecycleError("recovery predecessor identity is no longer retained")
+
+
+def validate_recovery_authorization(lease: dict[str, Any], authority: dict[str, Any]) -> dict[str, Any]:
+    authority_path = Path(str(authority.get("authorityPath", "")))
+    if not authority_path.is_file() or sha256(authority_path) != authority.get("authoritySha256"):
+        raise LifecycleError("recovery authority evidence is missing or changed")
+    task_path = Path(str(authority.get("taskContractPath", "")))
+    if not task_path.is_file() or sha256(task_path) != authority.get("taskContractSha256"):
+        raise LifecycleError("recovery task contract is missing or changed")
+    if authority.get("policyIdentity") != authority.get("campaignBinding"):
+        raise LifecycleError("recovery policy identity is stale")
+    predecessor = recovery_predecessor(lease, authority)
+    validate_candidate_artifacts(predecessor)
+    if authority.get("predecessorPacketSha256") != predecessor.get("packetSha256"):
+        raise LifecycleError("recovery predecessor packet binding changed")
+    if authority.get("predecessorAuditSha256") != predecessor.get("auditSha256"):
+        raise LifecycleError("recovery predecessor audit binding changed")
+    return predecessor
+
+
 def read_object(path: Path, *, missing: bool = False) -> dict[str, Any]:
     if missing and not path.exists():
         return {}
@@ -107,6 +172,27 @@ def reserve(args: argparse.Namespace) -> None:
         if lease.get("taskId") not in (None, "", args.task):
             raise LifecycleError("lease task identity mismatch")
         candidate = lease.get("acceptedCandidate")
+        recovery = lease.get("recoveryAuthorization")
+        repair = (
+            recovery if isinstance(recovery, dict)
+            and recovery.get("action") == "repair"
+            and recovery.get("state") in {"issued", "claimed"}
+            else None
+        )
+        if repair is not None:
+            validate_recovery_authorization(lease, repair)
+            exact = (
+                args.run == repair.get("successorRunId")
+                and args.branch == repair.get("successorBranch")
+                and str(Path(args.worktree)) == str(Path(str(repair.get("successorWorktree"))))
+            )
+            scheduler_override = str(args.owner).startswith("reconcile:")
+            if not exact and not scheduler_override:
+                raise LifecycleError("reservation does not match the authorized repair successor")
+            if scheduler_override:
+                args.run = str(repair["successorRunId"])
+                args.branch = str(repair["successorBranch"])
+                args.worktree = str(repair["successorWorktree"])
         if isinstance(candidate, dict) and candidate.get("state") != "integrated":
             raise LifecycleError("durable accepted candidate requires integration recovery, not redispatch")
         imported_dir = Path(args.imported_dir)
@@ -116,6 +202,11 @@ def reserve(args: argparse.Namespace) -> None:
                     continue
                 packet = read_object(packet_path)
                 if packet.get("taskId") == args.task and packet.get("status") == "accepted":
+                    if repair is not None and (
+                        packet.get("runId") == repair.get("predecessorRunId")
+                        and packet.get("headSha") == repair.get("predecessorHeadSha")
+                    ):
+                        continue
                     raise LifecycleError(
                         f"accepted packet {packet_path.name} requires integration, not redispatch"
                     )
@@ -359,8 +450,9 @@ def retain_candidate(args: argparse.Namespace) -> None:
             return
         recovery = lease.get("recoveryAuthorization")
         if isinstance(recovery, dict) and recovery.get("action") == "repair":
-            if recovery.get("state") != "issued":
+            if recovery.get("state") not in {"issued", "claimed"}:
                 raise LifecycleError("repair authorization is not active")
+            validate_recovery_authorization(lease, recovery)
             for field, observed in (
                 ("successorRunId", args.run),
                 ("successorBranch", args.branch),
@@ -369,8 +461,8 @@ def retain_candidate(args: argparse.Namespace) -> None:
                     raise LifecycleError(f"repair candidate {field} mismatch")
             if args.acceptance_mode != "accepted" or audit_path is None:
                 raise LifecycleError("changed repair candidate requires a fresh accepted audit")
-            recovery["state"] = "consumed"
-            recovery["consumedAt"] = now()
+            recovery["state"] = "audit-accepted"
+            recovery["auditAcceptedAt"] = now()
             recovery["successorHeadSha"] = args.head
             recovery["successorTreeSha"] = args.tree
             recovery["successorAuditSha256"] = sha256(audit_path)
@@ -456,8 +548,6 @@ def candidate_failed(args: argparse.Namespace) -> None:
         )
         if existing is not None:
             was_unaccounted = not existing.get("failureId")
-            existing["failureId"] = failure_id
-            existing["domain"] = domain
             immutable = {
                 "failureClass": args.failure_class,
                 "targetHead": args.target_head,
@@ -466,6 +556,8 @@ def candidate_failed(args: argparse.Namespace) -> None:
             }
             if any(existing.get(name) != value for name, value in immutable.items()):
                 raise LifecycleError("failure identity replay changed its binding")
+            existing["failureId"] = failure_id
+            existing["domain"] = domain
         else:
             was_unaccounted = True
             failures.append({
@@ -535,7 +627,11 @@ def authorize_recovery(args: argparse.Namespace) -> None:
             if str(candidate.get(field, "")) != str(authority.get(authority_field, "")):
                 raise LifecycleError(f"recovery predecessor {field} mismatch")
         if candidate.get("taskContractSha256") != task_sha:
-            raise LifecycleError("recovery task contract changed")
+            raise LifecycleError(
+                "recovery task contract changed "
+                f"({task_path}: expected {candidate.get('taskContractSha256')}, observed {task_sha})"
+            )
+        validate_candidate_artifacts(candidate)
         failure = next(
             (item for item in candidate.get("failures", [])
              if isinstance(item, dict) and failure_identity(item) == authority.get("failureId")),
@@ -557,6 +653,24 @@ def authorize_recovery(args: argparse.Namespace) -> None:
             for name in ("product", "infrastructure", "regate"):
                 budgets[name] = int(budgets.get(name, 0) or 0)
             budgets[historical_domain] += 1
+        failure_domain = str(failure.get("domain", ""))
+        eligible_domains = {"product"} if action == "repair" else {"product", "regate"}
+        if failure_domain not in eligible_domains:
+            raise LifecycleError(
+                f"{action} recovery cannot consume a {failure_domain or 'missing'} failure"
+            )
+        budgets = lease.setdefault("failureBudgets", {})
+        for name in ("product", "infrastructure", "regate"):
+            budgets[name] = int(budgets.get(name, 0) or 0)
+        limits = lease.setdefault("failureLimits", {
+            "product": int(lease.get("maxRetries", 3) or 0),
+            "infrastructure": int(os.environ.get("SINGULAR_INFRASTRUCTURE_RECOVERY_MAX", "3")),
+            "regate": int(os.environ.get("SINGULAR_REGATE_MAX", "3")),
+        })
+        budget_domain = "product" if action == "repair" else "regate"
+        limit = int(limits.get(budget_domain, 0) or 0)
+        if budgets[budget_domain] > limit:
+            raise LifecycleError(f"{budget_domain} recovery budget is exhausted")
         existing = lease.get("recoveryAuthorization")
         history_authorizations = lease.setdefault("recoveryAuthorizations", [])
         all_authorizations = [
@@ -565,7 +679,9 @@ def authorize_recovery(args: argparse.Namespace) -> None:
         ]
         if any(item.get("authoritySha256") == authority_sha for item in all_authorizations):
             raise LifecycleError("recovery authority replay was already recorded")
-        if isinstance(existing, dict) and existing.get("state") == "issued":
+        if isinstance(existing, dict) and existing.get("state") in {
+            "issued", "claimed", "audit-accepted", "gate-passed",
+        }:
             raise LifecycleError("recovery authorization is already active")
         if isinstance(existing, dict):
             history_authorizations.append(copy.deepcopy(existing))
@@ -625,20 +741,38 @@ def claim_recovery(args: argparse.Namespace) -> None:
             raise LifecycleError("missing recovery authorization")
         if authority.get("authorizationId") != args.authorization_id:
             raise LifecycleError("recovery authorization identity mismatch")
-        if authority.get("state") != "issued":
-            raise LifecycleError("recovery authorization was already consumed")
         if authority.get("action") != args.recovery_action or authority.get("successorRunId") != args.run:
             raise LifecycleError("recovery authorization action/run mismatch")
         if authority.get("campaignBinding") != args.campaign:
             raise LifecycleError("recovery authorization campaign mismatch")
+        predecessor = validate_recovery_authorization(lease, authority)
+        claim_binding = {
+            "authorizationId": args.authorization_id,
+            "action": args.recovery_action,
+            "runId": args.run,
+            "headSha": args.head,
+            "treeSha": args.tree,
+            "campaignBinding": args.campaign,
+        }
+        claim_id = sha256_text(json.dumps(claim_binding, sort_keys=True, separators=(",", ":")))
+        if authority.get("state") == "claimed":
+            if authority.get("claimId") != claim_id:
+                raise LifecycleError("recovery authorization claim replay changed identity")
+            print(authority["authorizationId"])
+            return
+        if authority.get("state") != "issued":
+            raise LifecycleError("recovery authorization was already published")
         if args.recovery_action == "regate":
             candidate = lease.get("acceptedCandidate")
             if not isinstance(candidate, dict):
                 raise LifecycleError("unchanged regate lost its candidate")
             if (candidate.get("headSha"), candidate.get("treeSha")) != (args.head, args.tree):
                 raise LifecycleError("unchanged regate candidate identity changed")
-        authority["state"] = "consumed"
-        authority["consumedAt"] = now()
+        elif (predecessor.get("headSha"), predecessor.get("treeSha")) != (args.head, args.tree):
+            raise LifecycleError("repair predecessor identity changed")
+        authority["state"] = "claimed"
+        authority["claimId"] = claim_id
+        authority["claimedAt"] = now()
         lease["updatedAt"] = now()
         print(authority["authorizationId"])
 
@@ -683,6 +817,11 @@ def candidate_tested(args: argparse.Namespace) -> None:
         lease["status"] = "accepted"
         lease["nextAction"] = candidate["nextAction"]
         lease["updatedAt"] = now()
+        authority = lease.get("recoveryAuthorization")
+        if isinstance(authority, dict) and authority.get("state") in {"claimed", "audit-accepted"}:
+            authority["state"] = "gate-passed"
+            authority["gateProofId"] = proof_id
+            authority["gatePassedAt"] = now()
     print(proof_id)
 
 
@@ -756,6 +895,11 @@ def candidate_integrated(args: argparse.Namespace) -> None:
         if not isinstance(proof, dict) or proof.get("proofId") != args.proof_id:
             raise LifecycleError("candidate integration proof changed before publication")
         candidate.update({"state": "integrated", "mergeCommit": args.merge, "integratedAt": now()})
+        authority = lease.get("recoveryAuthorization")
+        if isinstance(authority, dict) and authority.get("state") in {"claimed", "audit-accepted", "gate-passed"}:
+            authority["state"] = "published"
+            authority["publishedAt"] = now()
+            authority["mergeCommit"] = args.merge
         lease["status"] = "integrated"
         lease["nextAction"] = "none"
         lease["updatedAt"] = now()

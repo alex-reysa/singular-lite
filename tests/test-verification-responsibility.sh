@@ -29,13 +29,44 @@ case " $* " in
 esac
 SH
 chmod +x "$fixture/tests/test-supported.sh" "$fixture/bin/git"
+rc=0
 out="$(PATH="$fixture/bin:$PATH" SINGULAR_FOCUSED_HOST_REQUIRED=1 \
-  bash "$fixture/tests/run.sh" test-supported.sh 2>&1)" \
-  || fail "focused supported body did not execute under registry denial: $out"
+  SINGULAR_GATE_REPORT_FILE="$tmp/host-required-observation.json" \
+  bash "$fixture/tests/run.sh" test-supported.sh 2>&1)" || rc=$?
+[[ "$rc" == 2 ]] \
+  || fail "incomplete focused verification was reported successful (rc=$rc): $out"
 [[ "$out" == *"HOST_REQUIRED git-registry-write unrun"* ]] \
   || fail "registry denial was not reported as host_required/unrun"
 [[ "$out" == *"body-ran"* || "$out" == *"PASS  test-supported.sh"* ]] \
   || fail "focused body did not run"
+python3 - "$tmp/host-required-observation.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["failures"] == []
+assert d["hostRequired"] == [
+    {"check": "git-registry-write", "status": "unrun"},
+]
+PY
+
+# Both report adapters must preserve the incomplete aggregate. In particular,
+# an exit-zero compatibility producer cannot turn the explicit unrun marker
+# into successful evidence merely because the supported focused body passed.
+printf 'HOST_REQUIRED git-registry-write unrun\n' >"$tmp/host-required.log"
+rc=0
+python3 "$ROOT/engine/gate-report.py" create \
+  --output "$tmp/host-required-report.json" --task-id TASK-1107 \
+  --run-id RUN-HOST-REQUIRED --head-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --command 'bash tests/run.sh test-supported.sh' --exit-code 0 \
+  --log "$tmp/host-required.log" --integrity-status verified \
+  >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 20 ]] \
+  || fail "HOST_REQUIRED compatibility report was accepted (rc=$rc)"
+python3 - "$tmp/host-required-report.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["outcome"] == "inconclusive-infrastructure", d
+assert "host-required:git-registry-write:unrun" in d["infrastructureSignals"], d
+PY
 
 # A real body failure remains a failure even when the host-only probe is also
 # unavailable.
@@ -95,6 +126,15 @@ python3 "$ROOT/engine/gate-report.py" create-verification-request \
   --head-sha "$head_sha" --tree-sha "$tree_sha" --campaign campaign:test \
   --task-contract "$repo/docs/orchestration/tasks/TASK-1107.md" \
   --policy-contract "$repo/policy.json" --suite-id focused >/dev/null
+if python3 "$ROOT/engine/gate-report.py" create-verification-request \
+    --output "$tmp/malformed-request.json" --task-id TASK-1107 \
+    --run-id RUN-MALFORMED --attempt 2 --head-sha not-a-commit \
+    --tree-sha "$tree_sha" --campaign campaign:test \
+    --task-contract "$repo/docs/orchestration/tasks/TASK-1107.md" \
+    --policy-contract "$repo/policy.json" --suite-id focused \
+    >/dev/null 2>&1; then
+  fail "malformed candidate identity was normalized into a verification request"
+fi
 python3 - "$request" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -112,6 +152,27 @@ export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
 result="$repo/.singular-state/runs/RUN-HOST/gate-report.json"
 python3 "$ROOT/engine/gate-report.py" verify-verification-result \
   --request "$request" --report "$result" \
+  --task-contract "$repo/docs/orchestration/tasks/TASK-1107.md" \
+  --policy-contract "$repo/policy.json" >/dev/null
+
+# Every audit-verification consumption path requires and verifies the same
+# request/result identity, including evidence-only substitution.
+if "$ROOT/engine/audit-verify.sh" --run-dir "$repo/.singular-state/runs/RUN-HOST" \
+    --task-id TASK-1107 --source-worktree "$repo" --head-sha "$head_sha" \
+    --gate-command 'bash trusted-gate.sh' --worker-gate-report "$result" \
+    --worker-gate-command 'bash trusted-gate.sh' --evidence-only \
+    >/dev/null 2>&1; then
+  fail "evidence-only audit verification bypassed the request binding"
+fi
+"$ROOT/engine/audit-verify.sh" --run-dir "$repo/.singular-state/runs/RUN-HOST" \
+  --task-id TASK-1107 --source-worktree "$repo" --head-sha "$head_sha" \
+  --gate-command 'bash trusted-gate.sh' --worker-gate-report "$result" \
+  --worker-gate-command 'bash trusted-gate.sh' --evidence-only \
+  --verification-request "$request" \
+  --task-contract "$repo/docs/orchestration/tasks/TASK-1107.md" \
+  --policy-contract "$repo/policy.json" >/dev/null
+python3 "$ROOT/engine/gate-report.py" verify-verification-result \
+  --request "$request" --report "$repo/.singular-state/runs/RUN-HOST/audit-verification.json" \
   --task-contract "$repo/docs/orchestration/tasks/TASK-1107.md" \
   --policy-contract "$repo/policy.json" >/dev/null
 

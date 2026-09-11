@@ -134,9 +134,47 @@ print(json.dumps({"taskId": sys.argv[1], "reasons": [l.strip() for l in sys.stdi
 fi
 
 run_id="$(singular_worker_run_id)"
+authorized_repair_worktree=""
+authorized_repair=()
+lease_path="$(singular_lease_path "$task_id")"
+if [[ -f "$lease_path" ]]; then
+  mapfile -t authorized_repair < <(python3 - "$lease_path" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    lease = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+authority = lease.get("recoveryAuthorization")
+if not isinstance(authority, dict) or authority.get("action") != "repair":
+    raise SystemExit(0)
+if authority.get("state") not in {"issued", "claimed"}:
+    raise SystemExit(0)
+for key in (
+    "authorizationId", "successorRunId", "successorBranch", "successorWorktree",
+    "predecessorHeadSha", "predecessorTreeSha", "campaignBinding",
+):
+    print(authority.get(key, ""))
+PY
+  )
+  if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
+    [[ "$reset" != "yes" ]] || {
+      echo "l1-drive: --reset is forbidden for an authorized repair" >&2
+      exit 2
+    }
+    [[ "${authorized_repair[6]}" == "$l1_campaign_binding" ]] || {
+      echo "l1-drive: authorized repair campaign is stale" >&2
+      exit 2
+    }
+    run_id="${authorized_repair[1]}"
+    worker_branch="${authorized_repair[2]}"
+    authorized_repair_worktree="${authorized_repair[3]}"
+    branch_base="${authorized_repair[4]}"
+    packet_base_ref="${authorized_repair[4]}"
+  fi
+fi
 run_dir="$(singular_run_dir "$run_id")"
 mkdir -p "$run_dir"
-worktree="$SINGULAR_WORKTREES_DIR/$task_id"
+worktree="${authorized_repair_worktree:-$SINGULAR_WORKTREES_DIR/$task_id}"
 # Product repair and infrastructure recovery are intentionally separate budget
 # domains.  `Risk tier:` is optional task metadata, so existing task files are
 # ordinary-risk by default.  An operator may override it for one dispatch with
@@ -490,6 +528,16 @@ if [[ "$dry_run" == "yes" ]]; then
   l1_status terminal completed "Dry-run context assembly completed" true \
     "No action required" "dry-run"
   exit 0
+fi
+
+# Selection is read-only for dry runs. A real launch claims and revalidates the
+# host authority before touching a branch, worktree, lease compatibility fields,
+# or provider process. Repeating the exact claim after a crash is idempotent.
+if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
+  python3 "$SCRIPT_DIR/task_lifecycle.py" claim-recovery \
+    --lease "$lease_path" --authorization-id "${authorized_repair[0]}" \
+    --action repair --head "${authorized_repair[4]}" --tree "${authorized_repair[5]}" \
+    --campaign "$l1_campaign_binding" --run "${authorized_repair[1]}" >/dev/null || exit 2
 fi
 
 # ---- Outcome tracking + EXIT trap ----
@@ -2126,9 +2174,8 @@ PY
   local verification_request="$run_dir/verification-request-${n}.json"
   local verification_policy="$run_dir/verification-policy-${n}.json"
   local verification_tree=""
-  if [[ "$audit_verify_run" == "yes" ]]; then
-    verification_tree="$(git -C "$worktree" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
-    python3 - "$verification_policy" "$l1_campaign_binding" <<'PY'
+  verification_tree="$(git -C "$worktree" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
+  python3 - "$verification_policy" "$l1_campaign_binding" <<'PY'
 import json, os, sys
 path, campaign = sys.argv[1:3]
 temporary = path + ".tmp"
@@ -2137,8 +2184,8 @@ with open(temporary, "w", encoding="utf-8") as handle:
     handle.write("\n")
 os.replace(temporary, path)
 PY
-    if [[ ! "$verification_tree" =~ ^[0-9a-fA-F]{40,64}$ ]] \
-        || ! "$SCRIPT_DIR/gate-report.py" create-verification-request \
+  if [[ ! "$verification_tree" =~ ^[0-9a-fA-F]{40,64}$ ]] \
+      || ! "$SCRIPT_DIR/gate-report.py" create-verification-request \
           --output "$verification_request" --task-id "$task_id" --run-id "$run_id" \
           --attempt "$n" --head-sha "$head_sha" --tree-sha "$verification_tree" \
           --campaign "$l1_campaign_binding" --task-contract "$task_file" \
@@ -2151,8 +2198,7 @@ PY
       append_audit_evidence
       attempt_failure="audit-infra"
       attempt_ctx="$run_dir/verification-request-${n}.err"
-      return 1
-    fi
+    return 1
   fi
 
   # Re-run the committed gate in a disposable writable worktree. Cache and log
@@ -2232,6 +2278,8 @@ PY
       --head-sha "$head_sha" --gate-command "$gate_cmd" \
       --worker-gate-report "$run_dir/gate-report.json" \
       --worker-gate-command "$(singular_bash_bin) -c $gate_cmd" --evidence-only \
+      --verification-request "$verification_request" \
+      --task-contract "$task_file" --policy-contract "$verification_policy" \
       >"$run_dir/audit-verification-evidence-only.log" 2>&1 || verification_rc=$?
     verification_outcome="$(singular_json_field "$run_dir/audit-verification.json" outcome 2>/dev/null || true)"
     if [[ "$verification_rc" -eq 0 && "$verification_outcome" == "not-rerun-evidence-verified" ]]; then

@@ -46,6 +46,7 @@ jobs="${SINGULAR_TEST_JOBS:-1}"
 . "$TESTS_DIR/../engine/git-preflight.sh" || exit 2
 preflight_out=""
 preflight_rc=0
+host_required_check=""
 preflight_out="$(singular_git_source_preflight "$TESTS_DIR/.." 2>&1)" || preflight_rc=$?
 if [[ "$preflight_rc" -ne 0 ]]; then
   # A basename-filtered run is worker-focused. Its bodies may create their own
@@ -56,9 +57,10 @@ if [[ "$preflight_rc" -ne 0 ]]; then
   if [[ "$#" -gt 0 && ( "$preflight_rc" -eq 2 || "$preflight_rc" -eq 3 ) ]]; then
     printf '%s\n' "$preflight_out" >&2
     case "$preflight_rc" in
-      2) echo "HOST_REQUIRED git-registry-write unrun" >&2 ;;
-      3) echo "HOST_REQUIRED temporary-workspace unrun" >&2 ;;
+      2) host_required_check="git-registry-write" ;;
+      3) host_required_check="temporary-workspace" ;;
     esac
+    echo "HOST_REQUIRED $host_required_check unrun" >&2
   else
     printf '%s\n' "$preflight_out" >&2
     exit 1
@@ -230,12 +232,12 @@ echo ""
 echo "SUMMARY: $pass passed, $fail failed"
 [[ -n "$failed" ]] && echo "FAILED:$failed"
 if [[ -n "$gate_report_file" ]]; then
-  python3 - "$gate_report_file" "$failed" <<'PY'
+  python3 - "$gate_report_file" "$failed" "$host_required_check" <<'PY'
 import json
 import os
 import sys
 
-path, failed = sys.argv[1:3]
+path, failed, host_required = sys.argv[1:4]
 failures = [
     {"signature": f"engine-regression:{name}", "title": name}
     for name in failed.split()
@@ -244,6 +246,10 @@ record = {
     "schema": "singular.orchestration.gate-observation.v0",
     "failures": failures,
 }
+if host_required:
+    record["hostRequired"] = [{"check": host_required, "status": "unrun"}]
+    record["infrastructureFailure"] = True
+    record["infrastructureReason"] = f"host-required:{host_required}:unrun"
 temporary = path + ".tmp"
 parent = os.path.dirname(path)
 if parent:
@@ -254,4 +260,5 @@ with open(temporary, "w", encoding="utf-8") as handle:
 os.replace(temporary, path)
 PY
 fi
-[[ "$fail" -eq 0 ]]
+[[ "$fail" -eq 0 ]] || exit 1
+[[ -z "$host_required_check" ]] || exit 2

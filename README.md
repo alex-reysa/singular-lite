@@ -94,14 +94,15 @@ Failed accepted candidates are retained. A host can authorize either a repair
 in a distinct run/branch/worktree or one unchanged-code regate with:
 
 ```bash
-singular recover-candidate TASK-1234 --action repair \
+singular recover candidate TASK-1234 --action repair \
   --successor-run RUN-NEW --successor-branch agent/core/TASK-1234-repair \
   --successor-worktree /absolute/path/to/new-worktree --failure-id FAILURE-ID
 ```
 
 The generated authority binds the predecessor packet/audit/contract,
 commit/tree, campaign/policy, eligible failure and successor action. It is
-single-use. Repair candidates always need a fresh accepted audit even when the
+claim-once and crash-resumable only for the exact same successor identity.
+Repair candidates always need a fresh accepted audit even when the
 tree is unchanged; regate keeps the exact candidate and prints the bound
 `singular integrate --run-id ...` next action. `singular health --json` exposes
 retained candidates with dependencies, reason/domain, owner, budgets and the

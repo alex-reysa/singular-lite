@@ -5287,6 +5287,7 @@ max_retries = int(os.environ.get("SINGULAR_MAX_RETRIES", "3"))
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 created = now
 retry_count = 0
+previous = {}
 product_pass_started = False
 product_pass_started_at = ""
 product_pass_started_run_id = ""
@@ -5303,10 +5304,10 @@ def parse_array(raw, fallback=None):
 if os.path.exists(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
-            prev = json.load(f)
-        created = prev.get("createdAt", now)
-        retry_count = int(prev.get("retryCount", 0))
-        previous_marker = prev.get("productPassStarted")
+            previous = json.load(f)
+        created = previous.get("createdAt", now)
+        retry_count = int(previous.get("retryCount", 0))
+        previous_marker = previous.get("productPassStarted")
         if isinstance(previous_marker, bool):
             product_pass_started = previous_marker
         else:
@@ -5315,16 +5316,16 @@ if os.path.exists(path):
             # explicit operator budget reset was `ready` with retryCount zero.
             # Every other legacy lease remains conservatively "started" so an
             # upgrade cannot mint a new initial product pass.
-            previous_status = str(prev.get("status", ""))
+            previous_status = str(previous.get("status", ""))
             product_pass_started = not (
                 retry_count == 0 and previous_status in {"planned", "ready"}
             )
-        product_pass_started_at = str(prev.get("productPassStartedAt", "") or "")
-        product_pass_started_run_id = str(prev.get("productPassStartedRunId", "") or "")
+        product_pass_started_at = str(previous.get("productPassStartedAt", "") or "")
+        product_pass_started_run_id = str(previous.get("productPassStartedRunId", "") or "")
         if not base_sha:
-            base_sha = prev.get("baseSha", "")
+            base_sha = previous.get("baseSha", "")
         if not batch_id:
-            batch_id = prev.get("batchId", "")
+            batch_id = previous.get("batchId", "")
     except Exception:
         pass
 owned_files = parse_array(owned_raw, scope.split())
@@ -5348,6 +5349,17 @@ data = {
     "createdAt": created,
     "updatedAt": now,
 }
+# Lifecycle authority and historical accounting survive compatibility lease
+# updates. They are validated by task_lifecycle.py; this writer may carry them
+# forward but never invent or rewrite them.
+for key in (
+    "acceptedCandidate", "candidateHistory", "recoveryAuthorization",
+    "recoveryAuthorizations", "failureBudgets", "failureLimits",
+    "reservationOwner", "reservationGeneration", "reservationRunId",
+    "reservationDeadlineAt", "lastReservationOwner", "lastReservationGeneration",
+):
+    if key in previous:
+        data[key] = previous[key]
 if product_pass_started_at:
     data["productPassStartedAt"] = product_pass_started_at
 if product_pass_started_run_id:

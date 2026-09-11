@@ -253,10 +253,13 @@ PY
     rm -f "$authority_file" 2>/dev/null || true
     return 2
   fi
-  authorization_id="$(python3 "$SCRIPT_DIR/task_lifecycle.py" authorize-recovery \
+  if ! authorization_id="$(python3 "$SCRIPT_DIR/task_lifecycle.py" authorize-recovery \
     --lease "$lease" --authority "$authority_file" --task-contract "$task_file" \
     --expected-task "$task_id" --expected-campaign "$campaign" \
-    --expected-policy "$campaign")" || return 2
+    --expected-policy "$campaign")"; then
+    rm -f "$authority_file" 2>/dev/null || true
+    return 2
+  fi
   "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "authorize-$action" \
     --rationale "recovery authorization $authorization_id for $failure_id -> $successor_run" \
     --run "$run_id" --branch "$successor_branch" --authority origin >/dev/null || true
@@ -676,7 +679,29 @@ if leases.is_dir():
         try:
             match = re.search(r"^Depends on:\s*\[(.*?)\]", task_path.read_text(encoding="utf-8"), re.M)
             if match:
-                dependencies = re.findall(r"TASK-[0-9]+", match.group(1))
+                declared = re.findall(r"TASK-[0-9]+", match.group(1))
+                for dependency in declared:
+                    dependency_status = ""
+                    dependency_task = tasks / (dependency + ".md")
+                    try:
+                        status_match = re.search(
+                            r"^Status:\s*([A-Za-z0-9_-]+)",
+                            dependency_task.read_text(encoding="utf-8"), re.M,
+                        )
+                        dependency_status = status_match.group(1).lower() if status_match else ""
+                    except OSError:
+                        pass
+                    dependency_lease = leases / (dependency + ".json")
+                    try:
+                        lease_status = json.loads(
+                            dependency_lease.read_text(encoding="utf-8")
+                        ).get("status")
+                        if lease_status:
+                            dependency_status = str(lease_status).lower()
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                    if dependency_status != "integrated":
+                        dependencies.append(dependency)
         except OSError:
             pass
         candidates.append({

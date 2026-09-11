@@ -82,11 +82,21 @@ def classify(
 ) -> tuple[str, list[str], list[str]]:
     product = [name for name, pattern in PRODUCT_PATTERNS if pattern.search(text)]
     infrastructure = [name for name, pattern in INFRA_PATTERNS if pattern.search(text)]
+    infrastructure.extend(
+        "host-required:" + match.group(1) + ":unrun"
+        for match in re.finditer(r"(?:^|\n)HOST_REQUIRED\s+(\S+)\s+unrun(?:\n|$)", text)
+    )
     infrastructure.extend(error for error in setup_errors if error)
     if integrity_status == "violation":
         infrastructure.append("source-integrity-violation")
         return "inconclusive-infrastructure", product, sorted(set(infrastructure))
     if setup_errors:
+        return "inconclusive-infrastructure", product, sorted(set(infrastructure))
+    # An explicit HOST_REQUIRED marker is a statement that the aggregate is
+    # incomplete, even when every body that could run exited zero. Keep that
+    # result unavailable to evidence consumers instead of letting the process
+    # exit status erase the host-owned pending check.
+    if any(item.startswith("host-required:") for item in infrastructure):
         return "inconclusive-infrastructure", product, sorted(set(infrastructure))
     if exit_code == 0:
         return "passed", product, sorted(set(infrastructure))
@@ -195,13 +205,17 @@ def command_create_verification_request(args: argparse.Namespace) -> int:
     task_contract = pathlib.Path(args.task_contract).resolve()
     policy_contract = pathlib.Path(args.policy_contract).resolve()
     command = trusted_gate_command(task_contract)
+    head_sha = valid_head(args.head_sha)
+    tree_sha = valid_head(args.tree_sha)
+    if head_sha != args.head_sha.strip() or tree_sha != args.tree_sha.strip():
+        raise ValueError("verification request requires exact lowercase commit/tree identities")
     request: dict[str, Any] = {
         "schema": "singular.orchestration.verification-request.v0",
         "taskId": args.task_id,
         "runId": args.run_id,
         "attempt": args.attempt,
-        "headSha": valid_head(args.head_sha),
-        "treeSha": valid_head(args.tree_sha),
+        "headSha": head_sha,
+        "treeSha": tree_sha,
         "campaignBinding": args.campaign,
         "taskContractPath": str(task_contract),
         "taskContractSha256": sha_bytes(task_contract.read_bytes()),
@@ -235,6 +249,8 @@ def result_binding(report: dict[str, Any]) -> str:
         "commandSha256": report.get("commandSha256"), "outcome": report.get("outcome"),
         "rawExitCode": report.get("rawExitCode"), "logSha256": report.get("logSha256"),
         "evidenceBindingSha256": report.get("evidenceBindingSha256"),
+        "evidenceSourceCommandIdentity": report.get("evidenceSourceCommandIdentity"),
+        "evidenceSourceOutcome": report.get("evidenceSourceOutcome"),
     }
     return sha_bytes(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
@@ -249,7 +265,16 @@ def command_bind_verification_result(args: argparse.Namespace) -> int:
         raise ValueError("verification result task mismatch")
     if report.get("headSha") != request.get("headSha"):
         raise ValueError("verification result head mismatch")
-    if report.get("commandSha256") != sha_bytes(command.encode("utf-8")):
+    evidence_source_command = str(args.evidence_source_command or "")
+    if evidence_source_command:
+        if not report.get("evidenceOnly") or report.get("outcome") != "not-rerun-evidence-verified":
+            raise ValueError("verification evidence substitution is not evidence-only")
+        if report.get("command") != evidence_source_command or report.get("commandSha256") != sha_bytes(
+            evidence_source_command.encode("utf-8")
+        ):
+            raise ValueError("verification evidence source command mismatch")
+        report["evidenceSourceCommandIdentity"] = report["commandSha256"]
+    elif report.get("commandSha256") != sha_bytes(command.encode("utf-8")):
         raise ValueError("verification result command mismatch")
     report["verificationRequest"] = {
         key: request[key] for key in (
@@ -267,7 +292,16 @@ def command_verify_verification_result(args: argparse.Namespace) -> int:
     request, command = load_verification_request(
         pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
     )
-    report, reason = load_verified_evidence(pathlib.Path(args.report), request["headSha"], command)
+    report_path = pathlib.Path(args.report)
+    try:
+        raw_report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"verification result unreadable: {exc}") from exc
+    evidence_only = bool(raw_report.get("evidenceOnly"))
+    expected_command = str(raw_report.get("command", "")) if evidence_only else command
+    report, reason = load_verified_evidence(
+        report_path, request["headSha"], expected_command, allow_evidence_only=evidence_only
+    )
     if report is None:
         raise ValueError(reason)
     expected = {
@@ -279,6 +313,8 @@ def command_verify_verification_result(args: argparse.Namespace) -> int:
     }
     if report.get("verificationRequest") != expected:
         raise ValueError("verification result request binding mismatch")
+    if evidence_only and report.get("evidenceSourceCommandIdentity") != report.get("commandSha256"):
+        raise ValueError("verification evidence source command binding mismatch")
     if report.get("verificationResultBindingSha256") != result_binding(report):
         raise ValueError("verification result binding mismatch")
     return 0
@@ -333,7 +369,8 @@ def command_create(args: argparse.Namespace) -> int:
 
 
 def load_verified_evidence(
-    report_path: pathlib.Path, expected_head: str, expected_command: str
+    report_path: pathlib.Path, expected_head: str, expected_command: str,
+    *, allow_evidence_only: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -363,7 +400,10 @@ def load_verified_evidence(
         return None, "gate report command mismatch"
     if report.get("commandSha256") != sha_bytes(expected_command.encode("utf-8")):
         return None, "gate report command hash mismatch"
-    if report.get("outcome") not in {"passed", "passed-with-acknowledged-baseline"}:
+    successful_outcomes = {"passed", "passed-with-acknowledged-baseline"}
+    if allow_evidence_only:
+        successful_outcomes.add("not-rerun-evidence-verified")
+    if report.get("outcome") not in successful_outcomes:
         return None, "gate report is not successful evidence"
     raw_exit_code = report.get("rawExitCode")
     if not isinstance(raw_exit_code, int) or isinstance(raw_exit_code, bool):
@@ -374,13 +414,16 @@ def load_verified_evidence(
         return None, "gate report failure lists are invalid"
     if unexpected:
         return None, "successful gate report contains unexpected failures"
-    if report.get("outcome") == "passed" and raw_exit_code != 0:
+    source_outcome = report.get("evidenceSourceOutcome") if report.get("outcome") == "not-rerun-evidence-verified" else report.get("outcome")
+    if source_outcome == "passed" and raw_exit_code != 0:
         return None, "passed gate report has a nonzero exit code"
     if (
-        report.get("outcome") == "passed-with-acknowledged-baseline"
+        source_outcome == "passed-with-acknowledged-baseline"
         and not expected
     ):
         return None, "acknowledged gate report contains no expected failures"
+    if source_outcome not in {"passed", "passed-with-acknowledged-baseline"}:
+        return None, "evidence-only report has an invalid source outcome"
     source_integrity = report.get("sourceIntegrity")
     if (
         not isinstance(source_integrity, dict)
@@ -410,7 +453,7 @@ def load_verified_evidence(
     baseline_sha = report.get("baselineSha256")
     if bool(baseline_ref) != bool(baseline_sha):
         return None, "gate report baseline binding is incomplete"
-    if report.get("outcome") == "passed-with-acknowledged-baseline" and not baseline_ref:
+    if source_outcome == "passed-with-acknowledged-baseline" and not baseline_ref:
         return None, "acknowledged gate report is missing its baseline binding"
     if baseline_ref:
         baseline_path = pathlib.Path(str(baseline_ref))
@@ -467,6 +510,7 @@ def command_copy_evidence(args: argparse.Namespace) -> int:
         print(reason, file=sys.stderr)
         return 4
     report = dict(report)
+    report["evidenceSourceOutcome"] = report["outcome"]
     report["outcome"] = "not-rerun-evidence-verified"
     report["phase"] = "audit-verification"
     report["workspaceKind"] = "evidence-only"
@@ -551,6 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
     bind_result = commands.add_parser("bind-verification-result")
     for flag in ("request", "report", "task_contract", "policy_contract"):
         bind_result.add_argument("--" + flag.replace("_", "-"), required=True)
+    bind_result.add_argument("--evidence-source-command", default="")
     bind_result.set_defaults(handler=command_bind_verification_result)
 
     verify_result = commands.add_parser("verify-verification-result")
