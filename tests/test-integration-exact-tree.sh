@@ -211,11 +211,35 @@ printf '%s\n' '.singular-state/' '.singular-cache/' '.singular-evidence/' '.work
 git -C "$repo" add .
 git -C "$repo" commit -qm fixture
 
+make_bound_verification() {
+  local fixture_run="$1" fixture_task="$2" fixture_head="$3"
+  local fixture_tree run_path request_path task_snapshot policy_path
+  fixture_tree="$(git -C "$repo" rev-parse "$fixture_head^{tree}")"
+  run_path="$repo/.singular-state/runs/$fixture_run"
+  request_path="$run_path/verification-request-1.json"
+  task_snapshot="$run_path/verification-task-contract-1.md"
+  policy_path="$run_path/verification-policy-1.json"
+  mkdir -p "$run_path"
+  cp "$repo/docs/orchestration/tasks/$fixture_task.md" "$task_snapshot"
+  printf '%s\n' '{"campaign":"legacy","policy":"legacy"}' >"$policy_path"
+  python3 "$ENGINE_HOME/engine/gate-report.py" create-verification-request \
+    --output "$request_path" --task-id "$fixture_task" --run-id "$fixture_run" \
+    --attempt 1 --head-sha "$fixture_head" --tree-sha "$fixture_tree" \
+    --campaign legacy --task-contract "$task_snapshot" \
+    --policy-contract "$policy_path" --suite-id task-contract-gate >/dev/null
+  (cd "$repo" && "$ENGINE_HOME/engine/gate-check.sh" "$fixture_run" \
+    --task-id "$fixture_task" --verification-request "$request_path" \
+    --task-contract "$task_snapshot" \
+    --policy-contract "$policy_path" --attempt 1) >/dev/null
+  mv "$run_path/gate-report.json" "$run_path/audit-verification.json"
+}
+
 git -C "$repo" checkout -q -b agent/core/TASK-0401-exact-tree
 printf 'merged-and-tested\n' >"$repo/app.txt"
 git -C "$repo" add app.txt
 git -C "$repo" commit -qm feature
 feature_head="$(git -C "$repo" rev-parse HEAD)"
+make_bound_verification RUN-EXACT TASK-0401 "$feature_head"
 git -C "$repo" checkout -q target
 
 packet="$repo/docs/orchestration/packets/imported/TASK-0401/RUN-EXACT.json"
@@ -236,21 +260,22 @@ cat >"$packet" <<JSON
   "changedFiles": ["app.txt"],
   "commands": [{"cmd": "bash integration-gate.sh", "exitCode": 0}],
   "tests": [{"name": "exact-tree", "phase": "regression", "status": "passed"}],
-  "evidence": [{"kind": "test", "ref": "exact-tree"}],
+  "evidence": [{"kind": "test", "ref": "exact-tree"}, {"kind": "audit-verification", "ref": "runs/RUN-EXACT/audit-verification.json"}],
   "blockers": [],
   "nextAction": "integrate",
   "createdAt": "2026-08-30T00:00:00Z"
 }
 JSON
-cat >"${packet%.json}.audit.json" <<'JSON'
+cat >"${packet%.json}.audit.json" <<JSON
 {
-  "schema": "singular.orchestration.audit-verdict.v0",
+  "schema": "singular.orchestration.audit-verdict.v1",
   "taskId": "TASK-0401",
   "runId": "RUN-EXACT",
   "branch": "agent/core/TASK-0401-exact-tree",
   "verdict": "accepted",
-  "evidenceReviewed": ["exact-tree"],
-  "commandsRun": ["bash integration-gate.sh"],
+  "evidenceReviewed": ["exact-tree", "audit-verification.json", "reviewed-head-sha:$feature_head"],
+  "verificationResults": [{"status":"passed","command":"bash integration-gate.sh","exitCode":0,"evidenceRefs":["audit-verification.json"],"rationale":"host-bound fixture gate"}],
+  "commandsRun": [],
   "findings": [],
   "requiredFixes": [],
   "rationale": "fixture accepted"
@@ -322,6 +347,26 @@ grep -q '^Status: accepted$' "$repo/docs/orchestration/tasks/TASK-0401.md" \
 [[ "$(cat "$repo/app.txt")" == "poison-lock-fail-main-worktree" ]] \
   || fail "campaign lock timeout destroyed a concurrent worktree edit"
 git -C "$repo" restore --worktree -- app.txt
+# The completed finalization failure is durable. An ordinary retry with the
+# same target/policy/gate inputs must stop before merge staging or gate launch.
+finalize_replay_out="$tmp/integrate-lock-fail-replay.out"
+env \
+  SINGULAR_ROOT="$repo" \
+  SINGULAR_STATE_DIR="$repo/.singular-state" \
+  SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
+  SINGULAR_AUTO_PROMOTE_GATES=0 \
+  SINGULAR_PUSH=0 \
+  bash "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0401 --run-id RUN-LOCK-FAIL-REPLAY >"$finalize_replay_out" 2>&1 \
+  || fail "unchanged finalization failure replay did not stop cleanly"
+grep -q 'unchanged failed integration' "$finalize_replay_out" \
+  || fail "unchanged finalization failure was not suppressed"
+[[ "$(git -C "$repo" rev-parse HEAD)" == "$target_parent" ]] \
+  || fail "suppressed finalization replay advanced target HEAD"
+# A new target head is a relevant integration invalidation. Capacity remains,
+# so the following exact-tree attempt may proceed under the ordinary path.
+git -C "$repo" commit --allow-empty -qm invalidate-finalization-input
+target_parent="$(git -C "$repo" rev-parse HEAD)"
 
 # The mutation happens only after integrate's clean-worktree preflight and
 # merge staging. An old in-place gate reads "poison-main-worktree" and fails;
@@ -442,13 +487,14 @@ printf 'manual candidate\n' >"$repo/manual.txt"
 git -C "$repo" add manual.txt
 git -C "$repo" commit -qm manual-candidate
 manual_head="$(git -C "$repo" rev-parse HEAD)"
+make_bound_verification RUN-UNVERIFIED TASK-0402 "$manual_head"
 git -C "$repo" checkout -q target
 packet2="$repo/docs/orchestration/packets/imported/TASK-0402/RUN-UNVERIFIED.json"
 cat >"$packet2" <<JSON
-{"runId":"RUN-UNVERIFIED","taskId":"TASK-0402","status":"accepted","branch":"agent/core/TASK-0402-unverified","headSha":"$manual_head","evidence":[]}
+{"runId":"RUN-UNVERIFIED","taskId":"TASK-0402","status":"accepted","branch":"agent/core/TASK-0402-unverified","headSha":"$manual_head","evidence":[{"kind":"audit-verification","ref":"runs/RUN-UNVERIFIED/audit-verification.json"}]}
 JSON
-cat >"${packet2%.json}.audit.json" <<'JSON'
-{"taskId":"TASK-0402","runId":"RUN-UNVERIFIED","branch":"agent/core/TASK-0402-unverified","verdict":"accepted","evidenceReviewed":[]}
+cat >"${packet2%.json}.audit.json" <<JSON
+{"schema":"singular.orchestration.audit-verdict.v1","taskId":"TASK-0402","runId":"RUN-UNVERIFIED","branch":"agent/core/TASK-0402-unverified","verdict":"accepted","evidenceReviewed":["audit-verification.json","reviewed-head-sha:$manual_head"],"verificationResults":[{"status":"passed","command":"bash integration-gate.sh","exitCode":0,"evidenceRefs":["audit-verification.json"],"rationale":"host-bound fixture gate"}],"commandsRun":[],"findings":[],"requiredFixes":[],"rationale":"fixture accepted"}
 JSON
 git -C "$repo" add docs/orchestration/packets/imported/TASK-0402
 git -C "$repo" commit -qm packet-0402
@@ -465,7 +511,7 @@ env \
     --task TASK-0402 --run-id RUN-RED >"$red_out" 2>&1 \
   || red_rc=$?
 [[ "$red_rc" -ne 0 ]] || fail "red integration fixture unexpectedly succeeded"
-grep -q 'FAILED TASK-0402: post-merge gate red' "$red_out" \
+grep -q 'FAILED TASK-0402: post-merge gate failed-product' "$red_out" \
   || fail "fixture did not record a red candidate: $(cat "$red_out")"
 git -C "$repo" merge --no-ff -qm 'manual unverified merge' "$manual_head"
 manual_merge="$(git -C "$repo" rev-parse HEAD)"

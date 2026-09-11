@@ -18,11 +18,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 source "$SCRIPT_DIR/lifecycle.sh"
 
+# `singular recover candidate ...` is the public route to the locked host ops
+# surface. Keep scan/prune behavior here; candidate authorization is delegated
+# before any recovery scan state is created.
+if [[ "${1:-}" == "candidate" ]]; then
+  shift
+  exec "$SCRIPT_DIR/ops.sh" recover-candidate "$@"
+fi
+
 mode="scan"
 case "${1:-}" in
   --scan|"") mode="scan" ;;
   --prune) mode="prune" ;;
-  *) echo "usage: $0 [--scan|--prune]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--scan|--prune|candidate TASK-XXXX ...]" >&2; exit 2 ;;
 esac
 
 singular_ensure_state_dirs

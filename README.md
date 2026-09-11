@@ -78,6 +78,53 @@ classification the auditor must echo is a host fact — a mismatching echo is
 rewritten to the host value (`l1.audit_verification_normalized`) rather than
 paid for with another auditor pass.
 
+Host verification is identity-bound. A worker-side request names the task,
+attempt, exact commit/tree, campaign, policy contract and suite; it does not
+contain an executable command. `gate-check.sh` and `audit-verify.sh` resolve the
+command from the trusted task contract, reject packet-command fields, and bind
+the result to the request plus the full log hash. Contract/policy drift,
+malformed requests, changed candidates and missing/tampered logs fail closed.
+When a focused test run has readable history but the checkout's shared Git
+worktree registry (or the temporary probe workspace) is unavailable, the
+harness prints `HOST_REQUIRED ... unrun` and still executes the focused body.
+The unfiltered canonical suite remains host-required, and a genuine body
+failure remains a failure.
+
+Failed accepted candidates are retained. A host can authorize either a repair
+in a distinct run/branch/worktree or one unchanged-code regate with:
+
+```bash
+singular recover candidate TASK-1234 --action repair \
+  --successor-run RUN-NEW --successor-branch agent/core/TASK-1234-repair \
+  --successor-worktree /absolute/path/to/new-worktree --failure-id FAILURE-ID
+```
+
+The generated authority binds the predecessor packet/audit/contract,
+commit/tree, campaign/policy, eligible failure and successor action. It is
+claim-once and crash-resumable only for the exact same successor identity while
+execution is incomplete. A completed failed execution closes that claim and a
+new host authorization must bind the resulting failure before another launch.
+Recovery limits are checked both when authority is issued and when execution is
+claimed, so a stale issued record cannot bypass a changed or exhausted ceiling.
+Ordinary integration retries use the same limits: an unchanged recorded
+failure is suppressed regardless of whether it came from product behavior,
+host infrastructure, report validation, setup or finalization. A relevant
+input change permits another ordinary attempt only while that failure domain
+still has capacity.
+Repair candidates always need a fresh accepted audit even when the
+tree is unchanged; regate keeps the exact candidate and prints the bound
+`singular integrate --run-id ...` next action. `singular health --json` exposes
+retained candidates with dependencies, reason/domain, owner, budgets and the
+permitted next action. Product, infrastructure and regate failures are counted
+once by durable failure identity in separate counters. The identity includes an
+active recovery action and successor attempt, and integration consumes the gate
+report's product/infrastructure outcome instead of charging every red exit as a
+product failure. Supported accepted audit schemas and waiver acceptance also
+revalidate their exact host verification request, result and policy through the
+canonical gate-report validator before retention or recovery. Accepted audit
+authority is bound to exactly one reviewed-head marker for the candidate commit,
+so a new commit cannot reuse an earlier audit even when its tree is unchanged.
+
 ## Dispatch model
 
 **Detached dispatch is ON by default.** When `SINGULAR_DETACHED_DISPATCH=1` (the default),

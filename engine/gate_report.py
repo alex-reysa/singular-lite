@@ -120,6 +120,20 @@ def main() -> None:
         )
         observed = failures(observation.get("failures"), "observation.failures")
         infrastructure = bool(observation.get("infrastructureFailure"))
+        host_required = observation.get("hostRequired", [])
+        if not isinstance(host_required, list):
+            raise ValueError("observation.hostRequired must be an array")
+        for item in host_required:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"check", "status"}
+                or not isinstance(item.get("check"), str)
+                or not item["check"]
+                or item.get("status") != "unrun"
+            ):
+                raise ValueError("observation.hostRequired entries require check and status=unrun")
+        if host_required:
+            infrastructure = True
     elif args.require_observation:
         raise ValueError("strict gate observation missing")
     elif args.raw_exit_code != 0:

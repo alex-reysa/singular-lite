@@ -38,7 +38,8 @@ singular_git_preflight__run() {
 
 singular_git_source_preflight() {
   local dir="${1:-}"
-  local detail="" head="" actual="" parent="" probe="" tmo=""
+  local detail="" classification="" head="" actual="" parent="" probe="" tmo=""
+  local probe_err=""
 
   if command -v timeout >/dev/null 2>&1; then
     tmo="timeout"
@@ -48,28 +49,45 @@ singular_git_source_preflight() {
 
   if [[ -z "$dir" || ! -d "$dir" ]]; then
     detail="source directory does not exist: ${dir:-<empty>}"
+    classification="missing-source"
   elif ! command -v git >/dev/null 2>&1; then
     detail="git was not found on PATH"
+    classification="missing-source"
   elif [[ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null || true)" != "true" ]]; then
     detail="not a Git working tree: $dir"
+    classification="missing-history"
   elif ! git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' >/dev/null 2>&1; then
     detail="HEAD does not resolve to a commit (no history): $dir"
+    classification="missing-history"
   else
     head="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
     parent="$(mktemp -d "${TMPDIR:-/tmp}/singular-git-preflight.XXXXXX" 2>/dev/null || true)"
     if [[ -z "$parent" || ! -d "$parent" ]]; then
       detail="could not create a temporary directory for the disposable-worktree probe"
+      classification="temporary-workspace"
     else
       probe="$parent/wt"
-      if singular_git_preflight__run "$tmo" git -C "$dir" worktree add --detach "$probe" HEAD >/dev/null 2>&1; then
+      probe_err="$parent/worktree-add.err"
+      if singular_git_preflight__run "$tmo" git -C "$dir" worktree add --detach "$probe" HEAD \
+          >/dev/null 2>"$probe_err"; then
         actual="$(git -C "$probe" rev-parse HEAD 2>/dev/null || true)"
         if ! singular_git_preflight__run "$tmo" git -C "$dir" worktree remove --force "$probe" >/dev/null 2>&1; then
           detail="disposable worktree could not be removed again: $probe"
+          classification="registry-permission"
         elif [[ -z "$actual" || "$actual" != "$head" ]]; then
           detail="disposable worktree HEAD mismatch (expected ${head:-<none>}, got ${actual:-<none>})"
+          classification="temporary-workspace"
         fi
       else
-        detail="disposable worktrees cannot be created from $dir"
+        # The repository and HEAD probes above succeeded. Failure at `worktree
+        # add` is therefore a shared Git-registry capability issue, not an
+        # archive/missing-history diagnosis. Keep one scrubbed stderr line so
+        # an operator can distinguish permissions, locks and filesystem setup.
+        detail="disposable worktree registry is unavailable for $dir"
+        classification="registry-permission"
+        if [[ -s "$probe_err" ]]; then
+          detail="$detail: $(sed -n '1{s/[[:cntrl:]]//g;s/\/Users\/[^ /]*/<user>/g;p;}' "$probe_err")"
+        fi
       fi
       rm -rf "$parent" 2>/dev/null || true
     fi
@@ -77,13 +95,22 @@ singular_git_source_preflight() {
 
   if [[ -n "$detail" ]]; then
     {
-      echo "SINGULAR_TEST_SOURCE_UNSUPPORTED"
-      echo "The full regression suite cannot run from a Git archive because it requires"
-      echo "history and disposable worktrees."
-      echo "Recovery: run from a clean Git clone."
+      if [[ "$classification" == "registry-permission" || "$classification" == "temporary-workspace" ]]; then
+        echo "SINGULAR_TEST_HOST_REQUIRED"
+      else
+        echo "SINGULAR_TEST_SOURCE_UNSUPPORTED"
+        echo "The full regression suite cannot run from a Git archive because it requires"
+        echo "history and disposable worktrees."
+        echo "Recovery: run from a clean Git clone."
+      fi
+      echo "classification=${classification:-missing-source}"
       echo "  detail: $detail"
     } >&2
-    return 1
+    case "$classification" in
+      registry-permission) return 2 ;;
+      temporary-workspace) return 3 ;;
+      *) return 1 ;;
+    esac
   fi
   return 0
 }

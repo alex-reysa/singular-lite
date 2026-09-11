@@ -158,20 +158,10 @@ JSON
 
 write_missing_branch_fixture() {
   local repo="$1" packet_dir="$1/docs/orchestration/packets/imported/TASK-0001"
-  # Keep the accepted commit object available while deleting its branch. Using
-  # target HEAD here makes the candidate an ancestor and exercises restart
-  # proof handling instead of the missing-ref recovery path.
-  git -C "$repo" checkout -q -b agent/missing/TASK-0001
-  printf 'accepted candidate\n' >"$repo/README.md"
-  git -C "$repo" add README.md
-  git -C "$repo" -c user.name=test -c user.email=test@example.local \
-    commit -q -m accepted-candidate
-  local head
-  head="$(git -C "$repo" rev-parse HEAD)"
-  git -C "$repo" checkout -q target
-  git -C "$repo" branch -D agent/missing/TASK-0001 >/dev/null
-
-  mkdir -p "$repo/docs/orchestration/tasks" "$packet_dir" "$repo/.singular-state/leases"
+  local run_dir="$1/.singular-state/runs/RUN-MISSING"
+  local head tree
+  mkdir -p "$repo/docs/orchestration/tasks" "$packet_dir" \
+    "$repo/.singular-state/leases" "$run_dir"
   cat >"$repo/docs/orchestration/decisions.md" <<'EOF'
 # Decisions
 
@@ -207,6 +197,47 @@ Forbidden files:
 
 - Pass.
 EOF
+  git -C "$repo" add docs/orchestration/decisions.md docs/orchestration/tasks/TASK-0001.md
+  git -C "$repo" -c user.name=test -c user.email=test@example.local \
+    commit -q -m fixture-contract
+  # Keep the accepted commit object available while deleting its branch. Using
+  # target HEAD here makes the candidate an ancestor and exercises restart
+  # proof handling instead of the missing-ref recovery path.
+  git -C "$repo" checkout -q -b agent/missing/TASK-0001
+  printf 'accepted candidate\n' >"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c user.name=test -c user.email=test@example.local \
+    commit -q -m accepted-candidate
+  head="$(git -C "$repo" rev-parse HEAD)"
+  tree="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
+  cp "$repo/docs/orchestration/tasks/TASK-0001.md" \
+    "$run_dir/verification-task-contract-1.md"
+  printf '%s\n' '{"campaign":"legacy","policy":"legacy"}' \
+    >"$run_dir/verification-policy-1.json"
+  python3 "$SCRIPT_DIR/gate-report.py" create-verification-request \
+    --output "$run_dir/verification-request-1.json" --task-id TASK-0001 \
+    --run-id RUN-MISSING --attempt 1 --head-sha "$head" --tree-sha "$tree" \
+    --campaign legacy --task-contract "$run_dir/verification-task-contract-1.md" \
+    --policy-contract "$run_dir/verification-policy-1.json" \
+    --suite-id task-contract-gate >/dev/null
+  (cd "$repo" && env \
+    SINGULAR_ROOT="$repo" \
+    SINGULAR_ORCH_DIR="$repo/docs/orchestration" \
+    SINGULAR_STATE_DIR="$repo/.singular-state" \
+    SINGULAR_RUNS_DIR="$repo/.singular-state/runs" \
+    SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_TARGET_BRANCH=target \
+    SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
+    SINGULAR_JSON_CONFIG_FILE=/dev/null \
+    SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
+    bash "$SCRIPT_DIR/gate-check.sh" RUN-MISSING --task-id TASK-0001 \
+      --verification-request "$run_dir/verification-request-1.json" \
+      --task-contract "$run_dir/verification-task-contract-1.md" \
+      --policy-contract "$run_dir/verification-policy-1.json" --attempt 1) >/dev/null
+  mv "$run_dir/gate-report.json" "$run_dir/audit-verification.json"
+  git -C "$repo" checkout -q target
+  git -C "$repo" branch -D agent/missing/TASK-0001 >/dev/null
+
   python3 - "$packet_dir/RUN-MISSING.json" "$head" <<'PY'
 import json
 import sys
@@ -227,7 +258,7 @@ packet = {
     "changedFiles": ["README.md"],
     "commands": [],
     "tests": [],
-    "evidence": [],
+    "evidence": [{"kind": "audit-verification", "ref": "runs/RUN-MISSING/audit-verification.json"}],
     "blockers": [],
     "nextAction": "integrate",
     "createdAt": "2026-01-01T00:00:00Z",
@@ -236,16 +267,27 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(packet, f, indent=2)
     f.write("\n")
 PY
-  python3 - "$packet_dir/RUN-MISSING.audit.json" <<'PY'
+  python3 - "$packet_dir/RUN-MISSING.audit.json" "$head" <<'PY'
 import json
 import sys
+head = sys.argv[2]
 audit = {
-    "schema": "singular.orchestration.audit-verdict.v0",
+    "schema": "singular.orchestration.audit-verdict.v1",
     "taskId": "TASK-0001",
     "runId": "RUN-MISSING",
     "branch": "agent/missing/TASK-0001",
     "verdict": "accepted",
-    "evidenceReviewed": [],
+    "evidenceReviewed": [
+        "audit-verification.json",
+        "reviewed-head-sha:" + head,
+    ],
+    "verificationResults": [{
+        "status": "passed",
+        "command": "true",
+        "exitCode": 0,
+        "evidenceRefs": ["audit-verification.json"],
+        "rationale": "host-bound missing-branch fixture gate",
+    }],
     "commandsRun": [],
     "findings": [],
     "requiredFixes": [],
@@ -269,7 +311,8 @@ test_integrate_retains_and_suppresses_missing_branch_until_restored() {
   write_missing_branch_fixture "$repo"
 
   out="$(SINGULAR_ROOT="$repo" SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_STATE_DIR="$repo/.singular-state" \
-    SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_RUNS_DIR="$repo/.singular-state/runs" SINGULAR_LEASES_DIR="$repo/.singular-state/leases" \
+    SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true bash "$SCRIPT_DIR/integrate.sh" --run-id RUN-MISSING-INTEG 2>&1)"
   assert_contains "$out" "skip TASK-0001: branch missing" "first integrate reports missing branch"
   assert_eq "$(json_file_field "$repo/.singular-state/leases/TASK-0001.json" status)" "accepted" \
@@ -300,7 +343,8 @@ PY
     commit -q -m unrelated-target-progress
 
   out2="$(SINGULAR_ROOT="$repo" SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_STATE_DIR="$repo/.singular-state" \
-    SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_RUNS_DIR="$repo/.singular-state/runs" SINGULAR_LEASES_DIR="$repo/.singular-state/leases" \
+    SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true bash "$SCRIPT_DIR/integrate.sh" --run-id RUN-MISSING-INTEG2 2>&1)"
   assert_contains "$out2" "unchanged failed integration" "unchanged missing branch is suppressed"
   assert_not_contains "$out2" "branch missing (" "unchanged cycle does not republish missing-branch handling"
@@ -316,7 +360,8 @@ PY
   events="$(shasum -a 256 "$repo/.singular-state/events.ndjson" | awk '{print $1}')"
 
   out3="$(SINGULAR_ROOT="$repo" SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_STATE_DIR="$repo/.singular-state" \
-    SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_RUNS_DIR="$repo/.singular-state/runs" SINGULAR_LEASES_DIR="$repo/.singular-state/leases" \
+    SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true bash "$SCRIPT_DIR/integrate.sh" --task TASK-0001 --dry-run 2>&1)"
   assert_contains "$out3" "skip TASK-0001: branch missing" "dry-run reports current missing dependency"
   assert_eq "$(shasum -a 256 "$repo/.singular-state/leases/TASK-0001.json" | awk '{print $1}')" "$lease" \
@@ -329,7 +374,8 @@ PY
   head="$(json_file_field "$repo/.singular-state/leases/TASK-0001.json" acceptedCandidate.headSha)"
   git -C "$repo" branch agent/missing/TASK-0001 "$head"
   out4="$(SINGULAR_ROOT="$repo" SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_STATE_DIR="$repo/.singular-state" \
-    SINGULAR_LEASES_DIR="$repo/.singular-state/leases" SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_RUNS_DIR="$repo/.singular-state/runs" SINGULAR_LEASES_DIR="$repo/.singular-state/leases" \
+    SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target SINGULAR_DEFAULT_GATE_CMD=true SINGULAR_AUTO_PROMOTE_GATES=0 \
     bash "$SCRIPT_DIR/integrate.sh" --task TASK-0001 --run-id RUN-MISSING-RESTORED 2>&1)"
   assert_contains "$out4" "INTEGRATED TASK-0001" "restoring exact branch permits integration"

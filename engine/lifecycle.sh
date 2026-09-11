@@ -178,7 +178,8 @@ singular_lifecycle_reap_dispatches() {
 singular_lifecycle_retain_candidate() {
   local task_id="$1" packet="$2" audit="$3" task_file="$4" run="$5" branch="$6"
   local head="$7" tree="$8" campaign="$9" mode="${10}"
-  python3 "$SINGULAR_TASK_LIFECYCLE" retain-candidate \
+  SINGULAR_RUNS_DIR="$SINGULAR_RUNS_DIR" \
+    python3 "$SINGULAR_TASK_LIFECYCLE" retain-candidate \
     --lease "$(singular_lease_path "$task_id")" --packet "$packet" --audit "$audit" \
     --task-file "$task_file" --task "$task_id" --run "$run" --branch "$branch" \
     --head "$head" --tree "$tree" --campaign "$campaign" --acceptance-mode "$mode"

@@ -267,33 +267,11 @@ if [[ "$audit_present_before" == "yes" ]]; then
   SINGULAR_AUDIT_SCHEMA="$audit_schema_path" \
     singular_validate_audit_verdict "$import_audit_snapshot" "$task_id" "$run_id" \
     || { echo "audit schema validation failed before import" >&2; exit 2; }
-  python3 - "$import_audit_snapshot" "$task_id" "$run_id" "$branch" "$head_sha" <<'PY' || exit 2
-import json
-import sys
-
-path, task_id, run_id, branch, head_sha = sys.argv[1:6]
-with open(path, encoding="utf-8") as handle:
-    audit = json.load(handle)
-for field, expected in (("taskId", task_id), ("runId", run_id), ("branch", branch)):
-    if audit.get(field) != expected:
-        print(
-            f"audit {field} does not match packet: expected {expected!r}, got {audit.get(field)!r}",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-reviewed_heads = [
-    str(item)[len("reviewed-head-sha:"):]
-    for item in audit.get("evidenceReviewed", [])
-    if str(item).startswith("reviewed-head-sha:")
-]
-if reviewed_heads != [head_sha]:
-    print(
-        "audit must contain exactly one reviewed-head-sha marker matching "
-        f"the packet head ({head_sha})",
-        file=sys.stderr,
-    )
-    raise SystemExit(2)
-PY
+  python3 "$SCRIPT_DIR/audit-verdict-host-bind.py" \
+    --validate-identity --verdict "$import_audit_snapshot" \
+    --expected-task "$task_id" --expected-run "$run_id" \
+    --expected-branch "$branch" --expected-head "$head_sha" \
+    >/dev/null || exit 2
   audit_campaign_binding="$(python3 - "$import_audit_snapshot" <<'PY' 2>/dev/null || true
 import json
 import sys

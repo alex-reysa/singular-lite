@@ -637,13 +637,103 @@ singular_unbound_waivers_enabled() {
   [[ "${SINGULAR_CONFIG_SCHEMA_VERSION:-}" != "v2" ]]
 }
 
+# Validate the one host-owned request/result contract used by audit and
+# integration. Arguments after the four artifact paths are expected task, run,
+# commit, tree, and (optionally) the current mutable task record and current
+# campaign identity. The bound task snapshot remains immutable; only a lifecycle
+# Status: transition may differ in the current record.
+singular_validate_verification_binding() {
+  local request="$1" report="$2" task_contract="$3" policy_contract="$4"
+  local expected_task="$5" expected_run="$6" expected_head="$7" expected_tree="$8"
+  local current_task_contract="${9:-}"
+  local expected_campaign="${10:-}"
+  local expected_attempt="${11:-}"
+  local -a args=(
+    verify-verification-result
+    --request "$request" --report "$report"
+    --task-contract "$task_contract" --policy-contract "$policy_contract"
+    --expected-task "$expected_task" --expected-run "$expected_run"
+    --expected-head "$expected_head" --expected-tree "$expected_tree"
+    --expected-suite task-contract-gate
+    --require-pass
+  )
+  [[ -n "$current_task_contract" ]] \
+    && args+=(--current-task-contract "$current_task_contract")
+  [[ -n "$expected_campaign" ]] \
+    && args+=(--expected-campaign "$expected_campaign")
+  [[ -n "$expected_attempt" ]] \
+    && args+=(--expected-attempt "$expected_attempt")
+  python3 "$SINGULAR_LIB_DIR/gate-report.py" "${args[@]}"
+}
+
 singular_packet_acceptance_mode() {
   local packet="$1"
   local audit_record="$2"
-  local verdict=""
+  local verdict="" audit_schema="" run_id="" task_id="" branch="" head_sha="" attempt=""
+  local verification_report="" verification_request=""
+  local verification_task_contract="" verification_policy_contract=""
+  local current_task_contract="" tree_sha="" current_campaign_binding=""
+  local -a acceptance_identity=()
+
+  mapfile -t acceptance_identity < <(python3 - "$packet" <<'PY' 2>/dev/null
+import json
+import sys
+
+packet = json.load(open(sys.argv[1], encoding="utf-8"))
+run_id = packet.get("runId")
+task_id = packet.get("taskId")
+head = packet.get("headSha")
+branch = packet.get("branch")
+expected_ref = f"runs/{run_id}/audit-verification.json"
+if not all(isinstance(value, str) and value for value in (run_id, task_id, branch, head)):
+    raise SystemExit(2)
+if not any(
+    isinstance(item, dict)
+    and item.get("kind") == "audit-verification"
+    and item.get("ref") == expected_ref
+    for item in packet.get("evidence", [])
+):
+    raise SystemExit(2)
+print(run_id)
+print(task_id)
+print(branch)
+print(head)
+PY
+  )
+  [[ "${#acceptance_identity[@]}" -eq 4 ]] || return 1
+  run_id="${acceptance_identity[0]}"
+  task_id="${acceptance_identity[1]}"
+  branch="${acceptance_identity[2]}"
+  head_sha="${acceptance_identity[3]}"
+  verification_report="$SINGULAR_RUNS_DIR/$run_id/audit-verification.json"
+  attempt="$(singular_json_field "$verification_report" verificationRequest.attempt 2>/dev/null || true)"
+  [[ "$attempt" =~ ^[0-9]+$ ]] || return 1
+  verification_request="$SINGULAR_RUNS_DIR/$run_id/verification-request-$attempt.json"
+  verification_task_contract="$SINGULAR_RUNS_DIR/$run_id/verification-task-contract-$attempt.md"
+  verification_policy_contract="$SINGULAR_RUNS_DIR/$run_id/verification-policy-$attempt.json"
+  current_task_contract="$SINGULAR_TASKS_DIR/$task_id.md"
+  tree_sha="$(git -C "$SINGULAR_ROOT" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
+  [[ "$tree_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] || return 1
+  current_campaign_binding="$(singular_campaign_binding 2>/dev/null)" || return 1
+  singular_validate_verification_binding \
+    "$verification_request" "$verification_report" \
+    "$verification_task_contract" "$verification_policy_contract" \
+    "$task_id" "$run_id" "$head_sha" "$tree_sha" \
+    "$current_task_contract" "$current_campaign_binding" "$attempt" || return 1
+
   if [[ -f "$audit_record" ]]; then
+    audit_schema="$(singular_json_field "$audit_record" schema 2>/dev/null || true)"
+    case "$audit_schema" in
+      singular.orchestration.audit-verdict.v0|singular.orchestration.audit-verdict.v1) ;;
+      *) return 1 ;;
+    esac
     verdict="$(singular_json_field "$audit_record" verdict 2>/dev/null || true)"
     if [[ "$verdict" == "accepted" ]]; then
+      python3 "$SINGULAR_LIB_DIR/audit-verdict-host-bind.py" \
+        --validate-acceptance --verdict "$audit_record" \
+        --expected-task "$task_id" --expected-run "$run_id" \
+        --expected-branch "$branch" --expected-head "$head_sha" \
+        >/dev/null || return 1
       echo "accepted"
       return 0
     fi
@@ -5287,6 +5377,7 @@ max_retries = int(os.environ.get("SINGULAR_MAX_RETRIES", "3"))
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 created = now
 retry_count = 0
+previous = {}
 product_pass_started = False
 product_pass_started_at = ""
 product_pass_started_run_id = ""
@@ -5303,10 +5394,10 @@ def parse_array(raw, fallback=None):
 if os.path.exists(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
-            prev = json.load(f)
-        created = prev.get("createdAt", now)
-        retry_count = int(prev.get("retryCount", 0))
-        previous_marker = prev.get("productPassStarted")
+            previous = json.load(f)
+        created = previous.get("createdAt", now)
+        retry_count = int(previous.get("retryCount", 0))
+        previous_marker = previous.get("productPassStarted")
         if isinstance(previous_marker, bool):
             product_pass_started = previous_marker
         else:
@@ -5315,16 +5406,16 @@ if os.path.exists(path):
             # explicit operator budget reset was `ready` with retryCount zero.
             # Every other legacy lease remains conservatively "started" so an
             # upgrade cannot mint a new initial product pass.
-            previous_status = str(prev.get("status", ""))
+            previous_status = str(previous.get("status", ""))
             product_pass_started = not (
                 retry_count == 0 and previous_status in {"planned", "ready"}
             )
-        product_pass_started_at = str(prev.get("productPassStartedAt", "") or "")
-        product_pass_started_run_id = str(prev.get("productPassStartedRunId", "") or "")
+        product_pass_started_at = str(previous.get("productPassStartedAt", "") or "")
+        product_pass_started_run_id = str(previous.get("productPassStartedRunId", "") or "")
         if not base_sha:
-            base_sha = prev.get("baseSha", "")
+            base_sha = previous.get("baseSha", "")
         if not batch_id:
-            batch_id = prev.get("batchId", "")
+            batch_id = previous.get("batchId", "")
     except Exception:
         pass
 owned_files = parse_array(owned_raw, scope.split())
@@ -5348,6 +5439,17 @@ data = {
     "createdAt": created,
     "updatedAt": now,
 }
+# Lifecycle authority and historical accounting survive compatibility lease
+# updates. They are validated by task_lifecycle.py; this writer may carry them
+# forward but never invent or rewrite them.
+for key in (
+    "acceptedCandidate", "candidateHistory", "recoveryAuthorization",
+    "recoveryAuthorizations", "failureBudgets", "failureLimits",
+    "reservationOwner", "reservationGeneration", "reservationRunId",
+    "reservationDeadlineAt", "lastReservationOwner", "lastReservationGeneration",
+):
+    if key in previous:
+        data[key] = previous[key]
 if product_pass_started_at:
     data["productPassStartedAt"] = product_pass_started_at
 if product_pass_started_run_id:

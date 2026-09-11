@@ -10,15 +10,95 @@ shift || true
 task_id="${SINGULAR_GATE_TASK_ID:-TASK-0000}"
 phase="${SINGULAR_GATE_PHASE:-other}"
 workspace_kind="${SINGULAR_GATE_WORKSPACE_KIND:-worker}"
+verification_request=""
+verification_task_contract=""
+verification_policy_contract=""
+verification_attempt=""
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --task-id) task_id="${2:-}"; shift 2 ;;
     --phase) phase="${2:-}"; shift 2 ;;
     --workspace-kind) workspace_kind="${2:-}"; shift 2 ;;
+    --verification-request) verification_request="${2:-}"; shift 2 ;;
+    --task-contract) verification_task_contract="${2:-}"; shift 2 ;;
+    --policy-contract) verification_policy_contract="${2:-}"; shift 2 ;;
+    --attempt) verification_attempt="${2:-}"; shift 2 ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
+
+if [[ -n "$verification_task_contract" && -z "$verification_request" ]]; then
+  canonical_task_contract="$SINGULAR_TASKS_DIR/$task_id.md"
+  if ! python3 - "$verification_task_contract" "$canonical_task_contract" "$task_id" <<'PY'
+import pathlib
+import re
+import sys
+
+provided, canonical, task_id = map(str, sys.argv[1:4])
+provided_path = pathlib.Path(provided).resolve()
+canonical_path = pathlib.Path(canonical).resolve()
+if provided_path != canonical_path or not provided_path.is_file():
+    raise SystemExit("gate-check: task contract is not the canonical task record")
+text = provided_path.read_text(encoding="utf-8")
+match = re.search(r"^#\s+(TASK-[0-9]{4,})(?::|\s|$)", text, re.MULTILINE)
+if not match or match.group(1) != task_id:
+    raise SystemExit("gate-check: task contract identity mismatch")
+PY
+  then
+    exit 2
+  fi
+  export SINGULAR_TEST_TASK_CONTRACT="$verification_task_contract"
+  export SINGULAR_TEST_TASK_ID="$task_id"
+  export SINGULAR_TEST_TASKS_DIR="$SINGULAR_TASKS_DIR"
+fi
+
+trusted_gate_command=""
+verification_expected_head=""
+verification_expected_tree=""
+if [[ -n "$verification_request" ]]; then
+  [[ -n "$verification_task_contract" && -n "$verification_policy_contract" ]] || {
+    echo "gate-check: verification request requires trusted task and policy contracts" >&2
+    exit 2
+  }
+  [[ "$verification_attempt" =~ ^[1-9][0-9]*$ ]] || {
+    echo "gate-check: verification request requires a positive --attempt" >&2
+    exit 2
+  }
+  actual_request_head="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)"
+  actual_request_tree="$(git -C "$PWD" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+  [[ "$actual_request_head" =~ ^[0-9a-f]{40,64}$ \
+      && "$actual_request_tree" =~ ^[0-9a-f]{40,64}$ ]] || {
+    echo "gate-check: current candidate identity is unavailable" >&2
+    exit 2
+  }
+  verification_expected_head="$actual_request_head"
+  verification_expected_tree="$actual_request_tree"
+  verification_expected_campaign="$(singular_campaign_binding 2>/dev/null)" || {
+    echo "gate-check: current campaign identity is unavailable" >&2
+    exit 2
+  }
+  resolve_args=(
+    resolve-verification-request
+    --request "$verification_request"
+    --task-contract "$verification_task_contract"
+    --policy-contract "$verification_policy_contract"
+    --expected-task "$task_id"
+    --expected-run "$run_id"
+    --expected-head "$verification_expected_head"
+    --expected-tree "$verification_expected_tree"
+    --expected-attempt "$verification_attempt"
+    --expected-suite task-contract-gate
+    --expected-campaign "$verification_expected_campaign"
+  )
+  current_task_contract="$SINGULAR_TASKS_DIR/$task_id.md"
+  [[ -f "$current_task_contract" ]] \
+    && resolve_args+=(--current-task-contract "$current_task_contract")
+  trusted_gate_command="$(python3 "$SCRIPT_DIR/gate-report.py" "${resolve_args[@]}")" || exit 2
+  # Shell interpretation is host-owned and only applied to the command read
+  # from the trusted task contract. No packet/request command is accepted.
+  set -- "$(singular_bash_bin)" -c "$trusted_gate_command"
+fi
 
 if [[ $# -eq 0 ]]; then
   set -- make check
@@ -30,7 +110,11 @@ log="$run_dir/gate-check.log"
 observation="$run_dir/gate-observation.json"
 report="$run_dir/gate-report.json"
 summary="$run_dir/gate-check.json" # compatibility mirror
-command_text="$*"
+if [[ -n "$verification_request" ]]; then
+  command_text="$trusted_gate_command"
+else
+  command_text="$*"
+fi
 head_sha="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || printf '%040d' 0)"
 started_ms="$(python3 -c 'import time; print(time.time_ns() // 1000000)')"
 rm -f "$observation" "$report" "$summary"
@@ -234,6 +318,30 @@ if [[ "$normalize_rc" -ne 0 || ! -f "$report" ]]; then
   done
   "$SCRIPT_DIR/gate-report.py" "${fallback_args[@]}" || fallback_rc=$?
   outcome="inconclusive-infrastructure"
+fi
+
+if [[ -n "$verification_request" ]]; then
+  verification_final_head="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)"
+  verification_final_tree="$(git -C "$PWD" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+  if [[ "$verification_final_head" != "$verification_expected_head" \
+      || "$verification_final_tree" != "$verification_expected_tree" ]]; then
+    echo "gate-check: candidate changed during host verification" >&2
+    exit 20
+  fi
+  python3 "$SCRIPT_DIR/gate-report.py" bind-verification-result \
+    --request "$verification_request" --report "$report" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" || exit 20
+  python3 "$SCRIPT_DIR/gate-report.py" verify-verification-result \
+    --request "$verification_request" --report "$report" \
+    --task-contract "$verification_task_contract" \
+    --policy-contract "$verification_policy_contract" \
+    --expected-task "$task_id" --expected-run "$run_id" \
+    --expected-head "$verification_expected_head" \
+    --expected-tree "$verification_expected_tree" \
+    --expected-attempt "$verification_attempt" \
+    --expected-suite task-contract-gate \
+    --expected-campaign "$verification_expected_campaign" || exit 20
 fi
 
 cp "$report" "$summary"

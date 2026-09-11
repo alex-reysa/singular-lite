@@ -88,6 +88,13 @@ target_branch="$(tf targetBranch)"
 test_policy="$(tf testPolicy)"
 gate_cmd="$(tf gateCommand)"
 [[ -n "$gate_cmd" ]] || gate_cmd="$SINGULAR_DEFAULT_GATE_CMD"
+# tests/run.sh treats focused execution after a registry-write denial as
+# authorized only when L1 supplies the canonical task selected by the host.
+# These values also reach the implementer runner, whose direct test-first gate
+# invocation happens before the host repeats the gate through gate-check.sh.
+export SINGULAR_TEST_TASK_CONTRACT="$task_file"
+export SINGULAR_TEST_TASK_ID="$task_id"
+export SINGULAR_TEST_TASKS_DIR="$SINGULAR_TASKS_DIR"
 [[ -n "$target_branch" ]] || target_branch="$SINGULAR_TARGET_BRANCH"
 dispatch_batch_id="${SINGULAR_DISPATCH_BATCH_ID:-}"
 dispatch_base_sha="${SINGULAR_DISPATCH_BASE_SHA:-}"
@@ -134,9 +141,47 @@ print(json.dumps({"taskId": sys.argv[1], "reasons": [l.strip() for l in sys.stdi
 fi
 
 run_id="$(singular_worker_run_id)"
+authorized_repair_worktree=""
+authorized_repair=()
+lease_path="$(singular_lease_path "$task_id")"
+if [[ -f "$lease_path" ]]; then
+  mapfile -t authorized_repair < <(python3 - "$lease_path" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    lease = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+authority = lease.get("recoveryAuthorization")
+if not isinstance(authority, dict) or authority.get("action") != "repair":
+    raise SystemExit(0)
+if authority.get("state") not in {"issued", "claimed"}:
+    raise SystemExit(0)
+for key in (
+    "authorizationId", "successorRunId", "successorBranch", "successorWorktree",
+    "predecessorHeadSha", "predecessorTreeSha", "campaignBinding",
+):
+    print(authority.get(key, ""))
+PY
+  )
+  if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
+    [[ "$reset" != "yes" ]] || {
+      echo "l1-drive: --reset is forbidden for an authorized repair" >&2
+      exit 2
+    }
+    [[ "${authorized_repair[6]}" == "$l1_campaign_binding" ]] || {
+      echo "l1-drive: authorized repair campaign is stale" >&2
+      exit 2
+    }
+    run_id="${authorized_repair[1]}"
+    worker_branch="${authorized_repair[2]}"
+    authorized_repair_worktree="${authorized_repair[3]}"
+    branch_base="${authorized_repair[4]}"
+    packet_base_ref="${authorized_repair[4]}"
+  fi
+fi
 run_dir="$(singular_run_dir "$run_id")"
 mkdir -p "$run_dir"
-worktree="$SINGULAR_WORKTREES_DIR/$task_id"
+worktree="${authorized_repair_worktree:-$SINGULAR_WORKTREES_DIR/$task_id}"
 # Product repair and infrastructure recovery are intentionally separate budget
 # domains.  `Risk tier:` is optional task metadata, so existing task files are
 # ordinary-risk by default.  An operator may override it for one dispatch with
@@ -490,6 +535,16 @@ if [[ "$dry_run" == "yes" ]]; then
   l1_status terminal completed "Dry-run context assembly completed" true \
     "No action required" "dry-run"
   exit 0
+fi
+
+# Selection is read-only for dry runs. A real launch claims and revalidates the
+# host authority before touching a branch, worktree, lease compatibility fields,
+# or provider process. Repeating the exact claim after a crash is idempotent.
+if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
+  python3 "$SCRIPT_DIR/task_lifecycle.py" claim-recovery \
+    --lease "$lease_path" --authorization-id "${authorized_repair[0]}" \
+    --action repair --head "${authorized_repair[4]}" --tree "${authorized_repair[5]}" \
+    --campaign "$l1_campaign_binding" --run "${authorized_repair[1]}" >/dev/null || exit 2
 fi
 
 # ---- Outcome tracking + EXIT trap ----
@@ -1693,7 +1748,8 @@ run_worker_phase() {
   l1_status gating active "Running the worker regression gate for attempt $n" false \
     "Classify the gate and commit verified content" "" "gate-controller"
   singular_run_in_worktree_env "$worktree" "$SCRIPT_DIR/gate-check.sh" "$run_id" \
-    --task-id "$task_id" --phase worker --workspace-kind worker -- \
+    --task-id "$task_id" --phase worker --workspace-kind worker \
+    --task-contract "$task_file" -- \
     "$(singular_bash_bin)" -c "$gate_cmd" || gate_exit=$?
   local gate_outcome
   gate_outcome="$(singular_json_field "$run_dir/gate-report.json" outcome 2>/dev/null || true)"
@@ -2123,6 +2179,47 @@ PY
       "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"mode\":\"$audit_verify_mode\",\"reason\":\"${audit_verify_reason#skip:}\",\"riskTier\":\"$risk_tier\"}" || true
   fi
 
+  local verification_request="$run_dir/verification-request-${n}.json"
+  local verification_task_contract="$run_dir/verification-task-contract-${n}.md"
+  local verification_policy="$run_dir/verification-policy-${n}.json"
+  local verification_tree=""
+  verification_tree="$(git -C "$worktree" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
+  local verification_contract_rc=0
+  cp "$task_file" "$verification_task_contract" || verification_contract_rc=$?
+  if [[ "$verification_contract_rc" -eq 0 ]]; then
+    python3 - "$verification_policy" "$l1_campaign_binding" "$gate_cmd" <<'PY' \
+      || verification_contract_rc=$?
+import json, os, sys
+path, campaign, gate_command = sys.argv[1:4]
+temporary = path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump({
+        "campaign": campaign,
+        "gateCommand": gate_command,
+        "policy": campaign,
+    }, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PY
+  fi
+  if [[ "$verification_contract_rc" -ne 0 \
+      || ! "$verification_tree" =~ ^[0-9a-fA-F]{40,64}$ ]] \
+      || ! "$SCRIPT_DIR/gate-report.py" create-verification-request \
+          --output "$verification_request" --task-id "$task_id" --run-id "$run_id" \
+          --attempt "$n" --head-sha "$head_sha" --tree-sha "$verification_tree" \
+          --campaign "$l1_campaign_binding" --task-contract "$verification_task_contract" \
+          --policy-contract "$verification_policy" --suite-id "task-contract-gate" \
+          >"$run_dir/verification-request-${n}.out" \
+          2>"$run_dir/verification-request-${n}.err"; then
+      write_host_audit_verdict "inconclusive-infrastructure" "blocked" \
+        "The host could not bind verification to the trusted task/policy contract."
+      verdict="blocked"
+      append_audit_evidence
+      attempt_failure="audit-infra"
+      attempt_ctx="$run_dir/verification-request-${n}.err"
+    return 1
+  fi
+
   # Re-run the committed gate in a disposable writable worktree. Cache and log
   # writes are isolated there; the original audited worktree remains untouched.
   if [[ "$audit_verify_run" == "yes" ]]; then
@@ -2137,6 +2234,8 @@ PY
         --run-dir "$run_dir" --task-id "$task_id" --source-worktree "$worktree" \
         --head-sha "$head_sha" --gate-command "$gate_cmd" \
         --worker-gate-report "$run_dir/gate-report.json" \
+        --verification-request "$verification_request" \
+        --task-contract "$verification_task_contract" --policy-contract "$verification_policy" \
         --attempt "$n" --try "$verification_try" \
         >"$run_dir/audit-verification-driver.log" 2>&1 || verification_rc=$?
       verification_outcome="$(singular_json_field "$run_dir/audit-verification.json" outcome 2>/dev/null || true)"
@@ -2162,19 +2261,23 @@ PY
       fi
       case "$verification_outcome" in
         passed|passed-with-acknowledged-baseline|not-rerun-evidence-verified)
-          verification_ready="yes"
-          break
+          if [[ "$verification_rc" -eq 0 ]]; then
+            verification_ready="yes"
+            break
+          fi
           ;;
         failed-product)
-          write_host_audit_verdict "failed-product" "needs-fix" \
-            "The independently rerun gate failed with a product-test signal at the committed head."
-          verdict="needs-fix"
-          append_audit_evidence
-          singular_append_event "l1.audit_completed" "host audit verification found a product failure" \
-            "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"verdict\":\"needs-fix\",\"verification\":\"failed-product\"}"
-          attempt_failure="audit-needs-fix"
-          attempt_ctx="$run_dir/audit-verification.json"
-          return 1
+          if [[ "$verification_rc" -eq 10 ]]; then
+            write_host_audit_verdict "failed-product" "needs-fix" \
+              "The independently rerun gate failed with a product-test signal at the committed head."
+            verdict="needs-fix"
+            append_audit_evidence
+            singular_append_event "l1.audit_completed" "host audit verification found a product failure" \
+              "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"verdict\":\"needs-fix\",\"verification\":\"failed-product\"}"
+            attempt_failure="audit-needs-fix"
+            attempt_ctx="$run_dir/audit-verification.json"
+            return 1
+          fi
           ;;
         *)
           : # infrastructure/invalid report: bounded disposable retry
@@ -2198,6 +2301,9 @@ PY
       --head-sha "$head_sha" --gate-command "$gate_cmd" \
       --worker-gate-report "$run_dir/gate-report.json" \
       --worker-gate-command "$(singular_bash_bin) -c $gate_cmd" --evidence-only \
+      --verification-request "$verification_request" \
+      --task-contract "$verification_task_contract" --policy-contract "$verification_policy" \
+      --attempt "$n" \
       >"$run_dir/audit-verification-evidence-only.log" 2>&1 || verification_rc=$?
     verification_outcome="$(singular_json_field "$run_dir/audit-verification.json" outcome 2>/dev/null || true)"
     if [[ "$verification_rc" -eq 0 && "$verification_outcome" == "not-rerun-evidence-verified" ]]; then
@@ -2216,6 +2322,25 @@ PY
       attempt_ctx="$run_dir/audit-verification.json"
       return 1
     fi
+  fi
+
+  # The report outcome is only descriptive until the complete request/result
+  # binding validates. Reject a failed validator before any paid auditor sees
+  # the report, even when stale JSON still says "passed".
+  if ! singular_validate_verification_binding \
+      "$verification_request" "$run_dir/audit-verification.json" \
+      "$verification_task_contract" "$verification_policy" \
+      "$task_id" "$run_id" "$head_sha" "$verification_tree" "$task_file" \
+      "$l1_campaign_binding" "$n" \
+      >"$run_dir/verification-consumption-${n}.out" \
+      2>"$run_dir/verification-consumption-${n}.err"; then
+    write_host_audit_verdict "inconclusive-infrastructure" "blocked" \
+      "The host verification request/result binding was rejected before audit."
+    verdict="blocked"
+    append_audit_evidence
+    attempt_failure="audit-infra"
+    attempt_ctx="$run_dir/verification-consumption-${n}.err"
+    return 1
   fi
 
   # The host owns verification classification. In particular, successful

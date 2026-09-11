@@ -7,12 +7,14 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
 from typing import Any
 
 import infra_patterns
+from task_parser import parse_task
 
 
 PRODUCT_PATTERNS = (
@@ -82,18 +84,28 @@ def classify(
 ) -> tuple[str, list[str], list[str]]:
     product = [name for name, pattern in PRODUCT_PATTERNS if pattern.search(text)]
     infrastructure = [name for name, pattern in INFRA_PATTERNS if pattern.search(text)]
+    infrastructure.extend(
+        "host-required:" + match.group(1) + ":unrun"
+        for match in re.finditer(r"(?:^|\n)HOST_REQUIRED\s+(\S+)\s+unrun(?:\n|$)", text)
+    )
     infrastructure.extend(error for error in setup_errors if error)
     if integrity_status == "violation":
         infrastructure.append("source-integrity-violation")
         return "inconclusive-infrastructure", product, sorted(set(infrastructure))
     if setup_errors:
         return "inconclusive-infrastructure", product, sorted(set(infrastructure))
-    if exit_code == 0:
-        return "passed", product, sorted(set(infrastructure))
+    # An explicit HOST_REQUIRED marker is a statement that the aggregate is
+    # incomplete, even when every body that could run exited zero. Keep that
+    # result unavailable to evidence consumers instead of letting the process
+    # exit status erase the host-owned pending check.
     # A genuine assertion/build failure remains a product failure even if the
     # same log also contains an unrelated infrastructure warning.
-    if product:
+    if exit_code != 0 and product:
         return "failed-product", sorted(set(product)), sorted(set(infrastructure))
+    if any(item.startswith("host-required:") for item in infrastructure):
+        return "inconclusive-infrastructure", product, sorted(set(infrastructure))
+    if exit_code == 0:
+        return "passed", product, sorted(set(infrastructure))
     if infrastructure:
         return "inconclusive-infrastructure", [], sorted(set(infrastructure))
     # A bare terminal status is not product evidence. Timeouts, signals, missing
@@ -119,6 +131,287 @@ def atomic_json(path: pathlib.Path, data: dict[str, Any]) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+REQUEST_FIELDS = {
+    "schema", "taskId", "runId", "attempt", "headSha", "treeSha",
+    "campaignBinding", "taskContractPath", "taskContractSha256",
+    "policyContractPath", "policyContractSha256", "suiteId",
+    "commandIdentity", "requestIdentity", "createdAt",
+}
+
+
+def trusted_gate_command(
+    task_contract: pathlib.Path, policy_contract: pathlib.Path
+) -> str:
+    command = str(parse_task(task_contract).get("gateCommand") or "").strip()
+    if command:
+        return command
+    try:
+        policy = json.loads(policy_contract.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"verification policy contract is malformed: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise ValueError("verification policy contract is not an object")
+    command = str(policy.get("gateCommand") or "").strip()
+    if not command:
+        raise ValueError("trusted task/policy contract has no Gate command")
+    return command
+
+
+def task_contract_semantic_bytes(task_contract: pathlib.Path) -> bytes:
+    """Ignore only the lifecycle-owned Status header when comparing contracts."""
+    lines = task_contract.read_text(encoding="utf-8").splitlines(keepends=True)
+    return "".join(
+        line for line in lines if not re.match(r"^Status:\s*", line)
+    ).encode("utf-8")
+
+
+def command_is_trusted_gate(
+    source_command: str, trusted_command: str, trusted_shell: str = ""
+) -> bool:
+    if source_command == trusted_command:
+        return True
+    prefix, separator, inner = source_command.partition(" -c ")
+    trusted_shell_path = pathlib.Path(trusted_shell) if trusted_shell else None
+    configured_shell = bool(
+        trusted_shell_path
+        and trusted_shell_path.is_absolute()
+        and trusted_shell_path.is_file()
+        and os.access(trusted_shell_path, os.X_OK)
+        and prefix == trusted_shell
+    )
+    return bool(
+        separator
+        and inner == trusted_command
+        and (
+            configured_shell
+            or re.fullmatch(r"(?:[^\s]*/)?bash(?:[0-9.]*)?", prefix)
+        )
+    )
+
+
+def request_binding(request: dict[str, Any]) -> str:
+    return sha_bytes(json.dumps(
+        {key: request.get(key) for key in sorted(REQUEST_FIELDS - {"requestIdentity", "createdAt"})},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+
+
+def load_verification_request(
+    request_path: pathlib.Path,
+    task_contract: pathlib.Path,
+    policy_contract: pathlib.Path,
+) -> tuple[dict[str, Any], str]:
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    if not isinstance(request, dict):
+        raise ValueError("verification request is not an object")
+    unexpected = sorted(set(request) - REQUEST_FIELDS)
+    missing = sorted(REQUEST_FIELDS - set(request))
+    if unexpected:
+        raise ValueError("verification request contains unsupported fields: " + ", ".join(unexpected))
+    if missing:
+        raise ValueError("verification request missing: " + ", ".join(missing))
+    if request.get("schema") != "singular.orchestration.verification-request.v0":
+        raise ValueError("unsupported verification request schema")
+    if (
+        not isinstance(request.get("attempt"), int)
+        or isinstance(request.get("attempt"), bool)
+        or request.get("attempt") <= 0
+    ):
+        raise ValueError("verification request attempt is invalid")
+    if request.get("taskContractSha256") != sha_bytes(task_contract.read_bytes()):
+        raise ValueError("verification task contract changed")
+    if request.get("policyContractSha256") != sha_bytes(policy_contract.read_bytes()):
+        raise ValueError("verification policy contract changed")
+    try:
+        policy = json.loads(policy_contract.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"verification policy contract is malformed: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise ValueError("verification policy contract is not an object")
+    trusted_campaign = str(policy.get("campaign", ""))
+    if trusted_campaign and request.get("campaignBinding") != trusted_campaign:
+        raise ValueError("verification request campaign does not match trusted policy")
+    if pathlib.Path(str(request.get("taskContractPath"))).resolve() != task_contract.resolve():
+        raise ValueError("verification task contract path mismatch")
+    if pathlib.Path(str(request.get("policyContractPath"))).resolve() != policy_contract.resolve():
+        raise ValueError("verification policy contract path mismatch")
+    command = trusted_gate_command(task_contract, policy_contract)
+    if request.get("commandIdentity") != sha_bytes(command.encode("utf-8")):
+        raise ValueError("trusted verification command identity changed")
+    if request.get("requestIdentity") != request_binding(request):
+        raise ValueError("verification request binding mismatch")
+    if valid_head(str(request.get("headSha", ""))) != request.get("headSha"):
+        raise ValueError("verification request head is invalid")
+    if valid_head(str(request.get("treeSha", ""))) != request.get("treeSha"):
+        raise ValueError("verification request tree is invalid")
+    return request, command
+
+
+def command_create_verification_request(args: argparse.Namespace) -> int:
+    if args.attempt <= 0:
+        raise ValueError("verification request attempt must be positive")
+    task_contract = pathlib.Path(args.task_contract).resolve()
+    policy_contract = pathlib.Path(args.policy_contract).resolve()
+    command = trusted_gate_command(task_contract, policy_contract)
+    head_sha = valid_head(args.head_sha)
+    tree_sha = valid_head(args.tree_sha)
+    if head_sha != args.head_sha.strip() or tree_sha != args.tree_sha.strip():
+        raise ValueError("verification request requires exact lowercase commit/tree identities")
+    request: dict[str, Any] = {
+        "schema": "singular.orchestration.verification-request.v0",
+        "taskId": args.task_id,
+        "runId": args.run_id,
+        "attempt": args.attempt,
+        "headSha": head_sha,
+        "treeSha": tree_sha,
+        "campaignBinding": args.campaign,
+        "taskContractPath": str(task_contract),
+        "taskContractSha256": sha_bytes(task_contract.read_bytes()),
+        "policyContractPath": str(policy_contract),
+        "policyContractSha256": sha_bytes(policy_contract.read_bytes()),
+        "suiteId": args.suite_id,
+        "commandIdentity": sha_bytes(command.encode("utf-8")),
+        "createdAt": utc_now(),
+    }
+    request["requestIdentity"] = request_binding(request)
+    atomic_json(pathlib.Path(args.output), request)
+    print(request["requestIdentity"])
+    return 0
+
+
+def command_resolve_verification_request(args: argparse.Namespace) -> int:
+    request, command = load_verification_request(
+        pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
+    )
+    validate_expected_request(request, args, pathlib.Path(args.task_contract))
+    print(command)
+    return 0
+
+
+def validate_expected_request(
+    request: dict[str, Any], args: argparse.Namespace, bound_task_contract: pathlib.Path
+) -> None:
+    expected_values = {
+        "taskId": getattr(args, "expected_task", ""),
+        "runId": getattr(args, "expected_run", ""),
+        "headSha": getattr(args, "expected_head", ""),
+        "treeSha": getattr(args, "expected_tree", ""),
+        "suiteId": getattr(args, "expected_suite", ""),
+        "campaignBinding": getattr(args, "expected_campaign", ""),
+    }
+    for key, value in expected_values.items():
+        if value and request.get(key) != value:
+            raise ValueError(f"verification request {key} mismatch")
+    expected_attempt = getattr(args, "expected_attempt", None)
+    if expected_attempt is not None:
+        if expected_attempt <= 0:
+            raise ValueError("expected verification attempt must be positive")
+        if request.get("attempt") != expected_attempt:
+            raise ValueError("verification request attempt mismatch")
+    current_task_contract = getattr(args, "current_task_contract", "")
+    if current_task_contract:
+        current = pathlib.Path(current_task_contract).resolve()
+        bound = bound_task_contract.resolve()
+        if task_contract_semantic_bytes(current) != task_contract_semantic_bytes(bound):
+            raise ValueError("current verification task contract changed semantically")
+
+
+def result_binding(report: dict[str, Any]) -> str:
+    request = report.get("verificationRequest") or {}
+    bound = {
+        "requestIdentity": request.get("requestIdentity"),
+        "taskId": report.get("taskId"), "runId": report.get("runId"),
+        "headSha": report.get("headSha"),
+        "commandSha256": report.get("commandSha256"), "outcome": report.get("outcome"),
+        "rawExitCode": report.get("rawExitCode"), "logSha256": report.get("logSha256"),
+        "evidenceBindingSha256": report.get("evidenceBindingSha256"),
+        "evidenceSourceCommandIdentity": report.get("evidenceSourceCommandIdentity"),
+        "evidenceSourceOutcome": report.get("evidenceSourceOutcome"),
+    }
+    return sha_bytes(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def command_bind_verification_result(args: argparse.Namespace) -> int:
+    request, command = load_verification_request(
+        pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
+    )
+    path = pathlib.Path(args.report)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report.get("taskId") != request.get("taskId"):
+        raise ValueError("verification result task mismatch")
+    if report.get("runId") != request.get("runId"):
+        raise ValueError("verification result run mismatch")
+    if report.get("headSha") != request.get("headSha"):
+        raise ValueError("verification result head mismatch")
+    evidence_source_command = str(args.evidence_source_command or "")
+    if evidence_source_command:
+        if not report.get("evidenceOnly") or report.get("outcome") != "not-rerun-evidence-verified":
+            raise ValueError("verification evidence substitution is not evidence-only")
+        if report.get("command") != evidence_source_command or report.get("commandSha256") != sha_bytes(
+            evidence_source_command.encode("utf-8")
+        ):
+            raise ValueError("verification evidence source command mismatch")
+        if not command_is_trusted_gate(
+            evidence_source_command, command, args.trusted_shell
+        ):
+            raise ValueError("verification evidence source is not the trusted gate command")
+        report["evidenceSourceCommandIdentity"] = report["commandSha256"]
+    elif report.get("commandSha256") != sha_bytes(command.encode("utf-8")):
+        raise ValueError("verification result command mismatch")
+    report["verificationRequest"] = {
+        key: request[key] for key in (
+            "requestIdentity", "runId", "attempt", "headSha", "treeSha",
+            "campaignBinding", "taskContractSha256", "policyContractSha256",
+            "suiteId", "commandIdentity",
+        )
+    }
+    report["verificationResultBindingSha256"] = result_binding(report)
+    atomic_json(path, report)
+    return 0
+
+
+def command_verify_verification_result(args: argparse.Namespace) -> int:
+    request, command = load_verification_request(
+        pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
+    )
+    report_path = pathlib.Path(args.report)
+    try:
+        raw_report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"verification result unreadable: {exc}") from exc
+    evidence_only = bool(raw_report.get("evidenceOnly"))
+    expected_command = str(raw_report.get("command", "")) if evidence_only else command
+    if evidence_only and not command_is_trusted_gate(
+        expected_command, command, args.trusted_shell
+    ):
+        raise ValueError("verification evidence source is not the trusted gate command")
+    report, reason = load_verified_evidence(
+        report_path, request["headSha"], expected_command,
+        allow_evidence_only=evidence_only, require_success=args.require_pass,
+    )
+    if report is None:
+        raise ValueError(reason)
+    expected = {
+        key: request[key] for key in (
+            "requestIdentity", "runId", "attempt", "headSha", "treeSha",
+            "campaignBinding", "taskContractSha256", "policyContractSha256",
+            "suiteId", "commandIdentity",
+        )
+    }
+    if report.get("verificationRequest") != expected:
+        raise ValueError("verification result request binding mismatch")
+    if evidence_only and report.get("evidenceSourceCommandIdentity") != report.get("commandSha256"):
+        raise ValueError("verification evidence source command binding mismatch")
+    if report.get("verificationResultBindingSha256") != result_binding(report):
+        raise ValueError("verification result binding mismatch")
+    if report.get("taskId") != request.get("taskId"):
+        raise ValueError("verification result task mismatch")
+    if report.get("runId") != request.get("runId"):
+        raise ValueError("verification result run mismatch")
+    validate_expected_request(request, args, pathlib.Path(args.task_contract))
+    return 0
 
 
 def command_create(args: argparse.Namespace) -> int:
@@ -170,7 +463,8 @@ def command_create(args: argparse.Namespace) -> int:
 
 
 def load_verified_evidence(
-    report_path: pathlib.Path, expected_head: str, expected_command: str
+    report_path: pathlib.Path, expected_head: str, expected_command: str,
+    *, allow_evidence_only: bool = False, require_success: bool = True,
 ) -> tuple[dict[str, Any] | None, str]:
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -200,7 +494,15 @@ def load_verified_evidence(
         return None, "gate report command mismatch"
     if report.get("commandSha256") != sha_bytes(expected_command.encode("utf-8")):
         return None, "gate report command hash mismatch"
-    if report.get("outcome") not in {"passed", "passed-with-acknowledged-baseline"}:
+    successful_outcomes = {"passed", "passed-with-acknowledged-baseline"}
+    if allow_evidence_only:
+        successful_outcomes.add("not-rerun-evidence-verified")
+    supported_outcomes = successful_outcomes | {
+        "failed-product", "inconclusive-infrastructure"
+    }
+    if report.get("outcome") not in supported_outcomes:
+        return None, "gate report outcome is unsupported"
+    if require_success and report.get("outcome") not in successful_outcomes:
         return None, "gate report is not successful evidence"
     raw_exit_code = report.get("rawExitCode")
     if not isinstance(raw_exit_code, int) or isinstance(raw_exit_code, bool):
@@ -209,20 +511,26 @@ def load_verified_evidence(
     expected = report.get("expectedFailures", [])
     if not isinstance(unexpected, list) or not isinstance(expected, list):
         return None, "gate report failure lists are invalid"
-    if unexpected:
+    if report.get("outcome") in successful_outcomes and unexpected:
         return None, "successful gate report contains unexpected failures"
-    if report.get("outcome") == "passed" and raw_exit_code != 0:
+    source_outcome = report.get("evidenceSourceOutcome") if report.get("outcome") == "not-rerun-evidence-verified" else report.get("outcome")
+    if source_outcome == "passed" and raw_exit_code != 0:
         return None, "passed gate report has a nonzero exit code"
     if (
-        report.get("outcome") == "passed-with-acknowledged-baseline"
+        source_outcome == "passed-with-acknowledged-baseline"
         and not expected
     ):
         return None, "acknowledged gate report contains no expected failures"
+    if report.get("outcome") == "not-rerun-evidence-verified" and source_outcome not in {
+        "passed", "passed-with-acknowledged-baseline"
+    }:
+        return None, "evidence-only report has an invalid source outcome"
     source_integrity = report.get("sourceIntegrity")
-    if (
-        not isinstance(source_integrity, dict)
-        or source_integrity.get("status") != "verified"
-    ):
+    if not isinstance(source_integrity, dict) or source_integrity.get("status") not in {
+        "verified", "violation", "not-checked"
+    }:
+        return None, "gate report source integrity is invalid"
+    if report.get("outcome") in successful_outcomes and source_integrity.get("status") != "verified":
         return None, "successful gate report lacks verified source integrity"
     binding = report.get("evidenceBindingSha256")
     if binding != evidence_binding(report):
@@ -247,7 +555,7 @@ def load_verified_evidence(
     baseline_sha = report.get("baselineSha256")
     if bool(baseline_ref) != bool(baseline_sha):
         return None, "gate report baseline binding is incomplete"
-    if report.get("outcome") == "passed-with-acknowledged-baseline" and not baseline_ref:
+    if source_outcome == "passed-with-acknowledged-baseline" and not baseline_ref:
         return None, "acknowledged gate report is missing its baseline binding"
     if baseline_ref:
         baseline_path = pathlib.Path(str(baseline_ref))
@@ -304,6 +612,7 @@ def command_copy_evidence(args: argparse.Namespace) -> int:
         print(reason, file=sys.stderr)
         return 4
     report = dict(report)
+    report["evidenceSourceOutcome"] = report["outcome"]
     report["outcome"] = "not-rerun-evidence-verified"
     report["phase"] = "audit-verification"
     report["workspaceKind"] = "evidence-only"
@@ -372,6 +681,49 @@ def build_parser() -> argparse.ArgumentParser:
     copy_evidence.add_argument("--expected-head", required=True)
     copy_evidence.add_argument("--expected-command", required=True)
     copy_evidence.set_defaults(handler=command_copy_evidence)
+
+    request = commands.add_parser("create-verification-request")
+    for flag in ("output", "task_id", "run_id", "head_sha", "tree_sha", "campaign", "task_contract", "policy_contract", "suite_id"):
+        request.add_argument("--" + flag.replace("_", "-"), required=True)
+    request.add_argument("--attempt", type=int, required=True)
+    request.set_defaults(handler=command_create_verification_request)
+
+    resolve = commands.add_parser("resolve-verification-request")
+    for flag in ("request", "task_contract", "policy_contract"):
+        resolve.add_argument("--" + flag.replace("_", "-"), required=True)
+    for flag in (
+        "expected_task", "expected_run", "expected_head", "expected_tree",
+        "expected_suite", "expected_campaign",
+    ):
+        resolve.add_argument("--" + flag.replace("_", "-"), default="")
+    resolve.add_argument("--expected-attempt", type=int)
+    resolve.add_argument("--current-task-contract", default="")
+    resolve.set_defaults(handler=command_resolve_verification_request)
+
+    bind_result = commands.add_parser("bind-verification-result")
+    for flag in ("request", "report", "task_contract", "policy_contract"):
+        bind_result.add_argument("--" + flag.replace("_", "-"), required=True)
+    bind_result.add_argument("--evidence-source-command", default="")
+    bind_result.add_argument(
+        "--trusted-shell", default=os.environ.get("SINGULAR_BASH_BIN", "")
+    )
+    bind_result.set_defaults(handler=command_bind_verification_result)
+
+    verify_result = commands.add_parser("verify-verification-result")
+    for flag in ("request", "report", "task_contract", "policy_contract"):
+        verify_result.add_argument("--" + flag.replace("_", "-"), required=True)
+    for flag in (
+        "expected_task", "expected_run", "expected_head", "expected_tree",
+        "expected_suite", "expected_campaign",
+    ):
+        verify_result.add_argument("--" + flag.replace("_", "-"), default="")
+    verify_result.add_argument("--expected-attempt", type=int)
+    verify_result.add_argument("--current-task-contract", default="")
+    verify_result.add_argument(
+        "--trusted-shell", default=os.environ.get("SINGULAR_BASH_BIN", "")
+    )
+    verify_result.add_argument("--require-pass", action="store_true")
+    verify_result.set_defaults(handler=command_verify_verification_result)
     return parser
 
 

@@ -257,9 +257,14 @@ integration_decide() {
 integration_candidate_failed() {
   local task="$1" head="$2" tree="$3" campaign="$4" failure="$5" target_head="$6" next="$7"
   local failure_invalidation_key="${8:-$integration_invalidation_key}"
+  local failure_domain="${9:-}"
   [[ "${candidate_lifecycle_enabled:-no}" == "yes" ]] || return 0
-  singular_lifecycle_candidate_failed "$task" "$head" "$tree" "$campaign" \
-    "$failure" "$target_head" "$failure_invalidation_key" "$next" || {
+  local command=(python3 "$SCRIPT_DIR/task_lifecycle.py" candidate-failed
+    --lease "$(singular_lease_path "$task")" --head "$head" --tree "$tree"
+    --campaign "$campaign" --failure-class "$failure" --target-head "$target_head"
+    --invalidation-key "$failure_invalidation_key" --next-action "$next")
+  [[ -z "$failure_domain" ]] || command+=(--domain "$failure_domain")
+  "${command[@]}" || {
       echo "refuse: could not preserve accepted candidate state for $task" >&2
       return 1
     }
@@ -481,10 +486,32 @@ PY
       skipped=$((skipped + 1))
       continue
     fi
+    recovery_claimed="no"
+    if [[ -n "${SINGULAR_RECOVERY_AUTHORIZATION_ID:-}" ]]; then
+      if python3 "$SCRIPT_DIR/task_lifecycle.py" claim-recovery \
+          --lease "$(singular_lease_path "$task_id")" \
+          --authorization-id "$SINGULAR_RECOVERY_AUTHORIZATION_ID" --action regate \
+          --head "$head_sha" --tree "$candidate_tree" \
+          --campaign "$candidate_campaign_binding" --run "$run_id" >/dev/null; then
+        recovery_claimed="yes"
+        singular_append_event "integration.regate_authorized" \
+          "single-use unchanged candidate regate authority claimed" \
+          "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"headSha\":\"$head_sha\",\"authorizationId\":\"$SINGULAR_RECOVERY_AUTHORIZATION_ID\"}" || true
+        if [[ "${SINGULAR_TEST_INTERRUPT_AFTER_RECOVERY_CLAIM:-0}" == "1" ]]; then
+          kill -KILL "$$"
+        fi
+      else
+        echo "skip $task_id: recovery authorization is invalid, stale, or already consumed"
+        skipped=$((skipped + 1))
+        continue
+      fi
+    fi
     candidate_check_rc=0
-    candidate_check_out="$(singular_lifecycle_candidate_check "$task_id" "$head_sha" \
-      "$candidate_tree" "$candidate_campaign_binding" "$target_head" \
-      "$integration_invalidation_key" "$branch_invalidation_key" 2>&1)" || candidate_check_rc=$?
+    if [[ "$recovery_claimed" != "yes" ]]; then
+      candidate_check_out="$(singular_lifecycle_candidate_check "$task_id" "$head_sha" \
+        "$candidate_tree" "$candidate_campaign_binding" "$target_head" \
+        "$integration_invalidation_key" "$branch_invalidation_key" 2>&1)" || candidate_check_rc=$?
+    fi
     if [[ "$candidate_check_rc" -eq 3 ]]; then
       echo "skip $task_id: unchanged failed integration; action: $candidate_check_out"
       skipped=$((skipped + 1))
@@ -756,7 +783,8 @@ PY
     echo "FAILED $task_id: exact-tree integration gate setup failed ($integration_gate_setup_reason)"
     integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
       "$packet_campaign_binding" "gate-setup-$integration_gate_setup_reason" "$target_head" \
-      "retry after the integration gate workspace is available" || exit 2
+      "retry after the integration gate workspace is available" \
+      "$integration_invalidation_key" infrastructure || exit 2
     failed_integrations=$((failed_integrations + 1))
     continue
   fi
@@ -783,15 +811,37 @@ PY
       echo "refuse: integration gate failed and merge cleanup is incomplete" >&2
       exit 2
     fi
-    action="$(integration_decide "integration-gate-red" "$task_id" "$branch" "$SINGULAR_RUNS_DIR/$run_id-integrate-$task_id/gate-check.log")"
-    singular_record_recovery "post-merge regression gate red (exit $gate_ec) for $task_id" \
-      "$task_id" "$branch" "${action:-escalate-parked}" "decider" "green regression on merged tree" "human"
-    singular_append_event "integration.failed" "integration gate red" \
-      "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"gate-red\",\"exitCode\":$gate_ec,\"action\":\"${action:-escalate-parked}\"}"
-    echo "FAILED $task_id: post-merge gate red (decider: ${action:-escalate-parked})"
+    gate_outcome="$(singular_json_field "$gate_run_dir/gate-report.json" outcome 2>/dev/null || true)"
+    case "$gate_outcome" in
+      inconclusive-infrastructure)
+        gate_failure_class="gate-infrastructure"
+        gate_failure_domain="infrastructure"
+        gate_failure_next="retry with fresh authority after host gate infrastructure is available"
+        ;;
+      failed-product)
+        gate_failure_class="gate-red"
+        if [[ "$recovery_claimed" == "yes" ]]; then
+          gate_failure_domain="regate"
+        else
+          gate_failure_domain="product"
+        fi
+        gate_failure_next="correct the candidate or change a gate dependency before retrying"
+        ;;
+      *)
+        gate_failure_class="gate-report-invalid"
+        gate_failure_domain="infrastructure"
+        gate_failure_next="repair the host gate report path before retrying with fresh authority"
+        ;;
+    esac
+    action="$(integration_decide "integration-$gate_failure_class" "$task_id" "$branch" "$gate_run_dir/gate-check.log")"
+    singular_record_recovery "post-merge regression gate $gate_outcome (exit $gate_ec) for $task_id" \
+      "$task_id" "$branch" "${action:-escalate-parked}" "decider" "$gate_failure_next" "human"
+    singular_append_event "integration.failed" "integration gate failed" \
+      "{\"runId\":\"$run_id\",\"taskId\":\"$task_id\",\"reason\":\"$gate_failure_class\",\"failureDomain\":\"$gate_failure_domain\",\"gateOutcome\":\"$gate_outcome\",\"exitCode\":$gate_ec,\"action\":\"${action:-escalate-parked}\"}"
+    echo "FAILED $task_id: post-merge gate $gate_outcome (decider: ${action:-escalate-parked})"
     integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
-      "$packet_campaign_binding" "gate-red" "$target_head" \
-      "correct the candidate or change a gate dependency before retrying" || exit 2
+      "$packet_campaign_binding" "$gate_failure_class" "$target_head" \
+      "$gate_failure_next" "$integration_invalidation_key" "$gate_failure_domain" || exit 2
     failed_integrations=$((failed_integrations + 1))
     continue
   fi
@@ -903,7 +953,8 @@ PY
     echo "FAILED $task_id: exact-tree integration finalization failed ($finalize_reason)"
     integration_candidate_failed "$task_id" "$head_sha" "$candidate_tree" \
       "$packet_campaign_binding" "finalize-$finalize_reason" "$target_head" \
-      "retry after integration finalization infrastructure is repaired" || exit 2
+      "retry after integration finalization infrastructure is repaired" \
+      "$integration_invalidation_key" infrastructure || exit 2
     failed_integrations=$((failed_integrations + 1))
     if [[ -n "$merge_commit" ]]; then
       echo "refuse: committed integration identity mismatch requires operator recovery" >&2

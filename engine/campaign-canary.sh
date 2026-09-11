@@ -248,7 +248,8 @@ check_fixture_lifecycle() {
     SINGULAR_CONFIG_FILE=/dev/null SINGULAR_LOCAL_CONFIG_FILE=/dev/null
     SINGULAR_ORCH_DIR="$fixture_repo/docs/orchestration"
     SINGULAR_TASKS_DIR="$fixture_repo/docs/orchestration/tasks"
-    SINGULAR_STATE_DIR="$fixture_repo/.singular-state" SINGULAR_TARGET_BRANCH="canary-target"
+    SINGULAR_STATE_DIR="$fixture_repo/.singular-state"
+    SINGULAR_TARGET_BRANCH="canary-target"
     SINGULAR_WORKTREES_DIR="$fixture_repo/.worktrees"
     SINGULAR_RUNNER="$fixture_runner" SINGULAR_REQUIRE_AUDIT=1 SINGULAR_AUDIT_VERIFY=1
     SINGULAR_MAX_RETRIES=0 SINGULAR_AUTO_PROMOTE_GATES=0 SINGULAR_PUSH=0
@@ -314,6 +315,11 @@ import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["outcome"])
 PY
 )"
+  if [[ ! -f "$fixture_repo/canary.txt" ]]; then
+    echo "campaign canary: integration returned without publishing canary.txt" >&2
+    cat "$tmp/import.log" "$tmp/integrate.log" >&2
+    return 1
+  fi
   python3 - "$fixture_repo" "$packet" "$run_id" "$source_target_sha" \
     "$SINGULAR_ROOT" "$SINGULAR_TARGET_BRANCH" <<'PY'
 import json, os, subprocess, sys
