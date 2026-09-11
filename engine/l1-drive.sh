@@ -2299,6 +2299,7 @@ PY
       --worker-gate-command "$(singular_bash_bin) -c $gate_cmd" --evidence-only \
       --verification-request "$verification_request" \
       --task-contract "$verification_task_contract" --policy-contract "$verification_policy" \
+      --attempt "$n" \
       >"$run_dir/audit-verification-evidence-only.log" 2>&1 || verification_rc=$?
     verification_outcome="$(singular_json_field "$run_dir/audit-verification.json" outcome 2>/dev/null || true)"
     if [[ "$verification_rc" -eq 0 && "$verification_outcome" == "not-rerun-evidence-verified" ]]; then
@@ -2326,7 +2327,7 @@ PY
       "$verification_request" "$run_dir/audit-verification.json" \
       "$verification_task_contract" "$verification_policy" \
       "$task_id" "$run_id" "$head_sha" "$verification_tree" "$task_file" \
-      "$l1_campaign_binding" \
+      "$l1_campaign_binding" "$n" \
       >"$run_dir/verification-consumption-${n}.out" \
       2>"$run_dir/verification-consumption-${n}.err"; then
     write_host_audit_verdict "inconclusive-infrastructure" "blocked" \

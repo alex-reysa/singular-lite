@@ -209,6 +209,7 @@ cat >"$repo/trusted-gate.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 echo trusted-command-ran
+[[ -z "${GATE_MARKER:-}" ]] || : >"$GATE_MARKER"
 [[ -z "${SINGULAR_GATE_REPORT_FILE:-}" ]] || printf '%s\n' \
   '{"schema":"singular.orchestration.gate-observation.v0","failures":[]}' \
   >"$SINGULAR_GATE_REPORT_FILE"
@@ -222,7 +223,7 @@ Test policy: `strict_test_first`
 Gate command: `bash trusted-gate.sh`
 MD
 policy="$repo/.singular-state/runs/RUN-HOST/verification-policy-2.json"
-printf '{"campaign":"campaign:test","policy":"policy:test"}\n' >"$policy"
+printf '{"campaign":"legacy","policy":"policy:test"}\n' >"$policy"
 printf 'fixture\n' >"$repo/data.txt"
 git -C "$repo" add .
 git -C "$repo" commit -qm fixture
@@ -233,17 +234,26 @@ bound_task_contract="$repo/.singular-state/runs/RUN-HOST/verification-task-contr
 cp "$repo/docs/orchestration/tasks/TASK-1107.md" "$bound_task_contract"
 python3 "$ROOT/engine/gate-report.py" create-verification-request \
   --output "$request" --task-id TASK-1107 --run-id RUN-HOST --attempt 2 \
-  --head-sha "$head_sha" --tree-sha "$tree_sha" --campaign campaign:test \
+  --head-sha "$head_sha" --tree-sha "$tree_sha" --campaign legacy \
   --task-contract "$bound_task_contract" \
   --policy-contract "$policy" --suite-id task-contract-gate >/dev/null
 if python3 "$ROOT/engine/gate-report.py" create-verification-request \
     --output "$tmp/malformed-request.json" --task-id TASK-1107 \
     --run-id RUN-MALFORMED --attempt 2 --head-sha not-a-commit \
-    --tree-sha "$tree_sha" --campaign campaign:test \
+    --tree-sha "$tree_sha" --campaign legacy \
     --task-contract "$bound_task_contract" \
     --policy-contract "$policy" --suite-id focused \
     >/dev/null 2>&1; then
   fail "malformed candidate identity was normalized into a verification request"
+fi
+if python3 "$ROOT/engine/gate-report.py" create-verification-request \
+    --output "$tmp/nonpositive-attempt.json" --task-id TASK-1107 \
+    --run-id RUN-MALFORMED --attempt 0 --head-sha "$head_sha" \
+    --tree-sha "$tree_sha" --campaign legacy \
+    --task-contract "$bound_task_contract" \
+    --policy-contract "$policy" --suite-id task-contract-gate \
+    >/dev/null 2>&1; then
+  fail "nonpositive verification attempt was issued"
 fi
 python3 - "$request" <<'PY'
 import json, sys
@@ -252,13 +262,53 @@ assert "command" not in d and "commands" not in d
 assert d["commandIdentity"]
 PY
 
+# gate-check refuses mismatched run/attempt/head identities before it creates
+# run evidence or launches the trusted command.
+for mismatch in run attempt; do
+  marker="$tmp/gate-$mismatch-command-ran"
+  rc=0
+  if [[ "$mismatch" == run ]]; then
+    (cd "$repo" && GATE_MARKER="$marker" "$ROOT/engine/gate-check.sh" RUN-WRONG \
+      --task-id TASK-1107 --verification-request "$request" \
+      --task-contract "$bound_task_contract" --policy-contract "$policy" \
+      --attempt 2) \
+      >"$tmp/gate-$mismatch.log" 2>&1 || rc=$?
+  else
+    (cd "$repo" && GATE_MARKER="$marker" "$ROOT/engine/gate-check.sh" RUN-HOST \
+      --task-id TASK-1107 --verification-request "$request" \
+      --task-contract "$bound_task_contract" --policy-contract "$policy" \
+      --attempt 7) \
+      >"$tmp/gate-$mismatch.log" 2>&1 || rc=$?
+  fi
+  [[ "$rc" -ne 0 && ! -e "$marker" ]] \
+    || fail "gate-check $mismatch mismatch launched the trusted command"
+  if [[ "$mismatch" == run && -e "$repo/.singular-state/runs/RUN-WRONG" ]]; then
+    fail "gate-check created run evidence before rejecting the run mismatch"
+  fi
+done
+
+printf 'new head\n' >"$repo/new-head.txt"
+git -C "$repo" add new-head.txt
+git -C "$repo" commit -qm 'new head fixture'
+marker="$tmp/gate-head-command-ran"
+rc=0
+(cd "$repo" && GATE_MARKER="$marker" "$ROOT/engine/gate-check.sh" RUN-HOST \
+  --task-id TASK-1107 --verification-request "$request" \
+  --task-contract "$bound_task_contract" --policy-contract "$policy" \
+  --attempt 2) \
+  >"$tmp/gate-head.log" 2>&1 || rc=$?
+[[ "$rc" -ne 0 && ! -e "$marker" ]] \
+  || fail "gate-check stale head launched the trusted command"
+git -C "$repo" reset -q --hard "$head_sha"
+
 export SINGULAR_ROOT="$repo"
 export SINGULAR_STATE_DIR="$repo/.singular-state"
 export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
 (cd "$repo" && "$ROOT/engine/gate-check.sh" RUN-HOST \
+  --task-id TASK-1107 \
   --verification-request "$request" \
   --task-contract "$bound_task_contract" \
-  --policy-contract "$policy") >/dev/null
+  --policy-contract "$policy" --attempt 2) >/dev/null
 result="$repo/.singular-state/runs/RUN-HOST/gate-report.json"
 python3 "$ROOT/engine/gate-report.py" verify-verification-result \
   --request "$request" --report "$result" \
@@ -294,6 +344,7 @@ fi
   --task-id TASK-1107 --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command 'bash trusted-gate.sh' --worker-gate-report "$result" \
   --worker-gate-command 'bash trusted-gate.sh' --evidence-only \
+  --attempt 2 \
   --verification-request "$request" \
   --task-contract "$bound_task_contract" \
   --policy-contract "$policy" >/dev/null
@@ -315,7 +366,7 @@ expect_verify_rejected() {
       --expected-task TASK-1107 --expected-run RUN-HOST \
       --expected-head "$head_sha" --expected-tree "$tree_sha" \
       --expected-suite task-contract-gate \
-      --expected-campaign campaign:test \
+      --expected-campaign legacy \
       --current-task-contract "$repo/docs/orchestration/tasks/TASK-1107.md" \
       --require-pass >/dev/null 2>&1; then
     fail "$label verification binding was accepted"
@@ -401,9 +452,10 @@ p=sys.argv[1]; d=json.load(open(p)); d["packetCommand"]="touch /tmp/forbidden"
 json.dump(d, open(p,"w"))
 PY
 if (cd "$repo" && "$ROOT/engine/gate-check.sh" RUN-MALICIOUS \
+    --task-id TASK-1107 \
     --verification-request "$request" \
     --task-contract "$bound_task_contract" \
-    --policy-contract "$policy") >/dev/null 2>&1; then
+    --policy-contract "$policy" --attempt 2) >/dev/null 2>&1; then
   fail "request with packet command was accepted"
 fi
 cp "$tmp/request-pristine.json" "$request"
@@ -449,20 +501,53 @@ fi
 packet="$tmp/packet.json"
 audit="$tmp/audit.json"
 cat >"$packet" <<JSON
-{"schema":"singular.orchestration.state-packet.v0","runId":"RUN-HOST","taskId":"TASK-1107","headSha":"$head_sha","status":"accepted","evidence":[{"kind":"audit-verification","ref":"runs/RUN-HOST/audit-verification.json"}]}
+{"schema":"singular.orchestration.state-packet.v0","runId":"RUN-HOST","taskId":"TASK-1107","branch":"fixture/audit","headSha":"$head_sha","status":"accepted","evidence":[{"kind":"audit-verification","ref":"runs/RUN-HOST/audit-verification.json"}]}
 JSON
-printf '%s\n' \
-  '{"schema":"singular.orchestration.audit-verdict.v0","verdict":"accepted"}' \
-  >"$audit"
+cat >"$audit" <<JSON
+{"schema":"singular.orchestration.audit-verdict.v1","taskId":"TASK-1107","runId":"RUN-HOST","branch":"fixture/audit","verdict":"accepted","evidenceReviewed":["reviewed-head-sha:$head_sha"]}
+JSON
 if SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
     SINGULAR_RUNS_DIR="$repo/.singular-state/runs" \
     SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
-    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" campaign:test; }; singular_packet_acceptance_mode "$2" "$3"' \
+    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" legacy; }; singular_packet_acceptance_mode "$2" "$3"' \
       _ "$ROOT/engine/lib.sh" "$packet" "$audit" >/dev/null 2>&1; then
   :
 else
   fail "valid bound verification was rejected by packet acceptance"
+fi
+for bad_heads in missing mismatched duplicate; do
+  case "$bad_heads" in
+    missing) reviewed='[]' ;;
+    mismatched) reviewed='["reviewed-head-sha:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]' ;;
+    duplicate) reviewed="[\"reviewed-head-sha:$head_sha\",\"reviewed-head-sha:$head_sha\"]" ;;
+  esac
+  python3 - "$audit" "$reviewed" <<'PY'
+import json, sys
+path, reviewed = sys.argv[1:3]
+data = json.load(open(path, encoding="utf-8"))
+data["evidenceReviewed"] = json.loads(reviewed)
+json.dump(data, open(path, "w", encoding="utf-8"))
+PY
+  if SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
+      SINGULAR_RUNS_DIR="$repo/.singular-state/runs" \
+      SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+      SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
+      bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" legacy; }; singular_packet_acceptance_mode "$2" "$3"' \
+        _ "$ROOT/engine/lib.sh" "$packet" "$audit" >/dev/null 2>&1; then
+    fail "packet acceptance accepted $bad_heads v1 reviewed-head markers"
+  fi
+done
+cat >"$audit" <<JSON
+{"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-1107","runId":"RUN-HOST","branch":"fixture/audit","verdict":"accepted","evidenceReviewed":["reviewed-head-sha:$head_sha"]}
+JSON
+if ! SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
+    SINGULAR_RUNS_DIR="$repo/.singular-state/runs" \
+    SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
+    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" legacy; }; singular_packet_acceptance_mode "$2" "$3"' \
+      _ "$ROOT/engine/lib.sh" "$packet" "$audit" >/dev/null 2>&1; then
+  fail "packet acceptance rejected explicit marker-bound v0 compatibility"
 fi
 printf '%s\n' '{"schema":"singular.orchestration.audit-verdict.v9","verdict":"accepted"}' \
   >"$audit"
@@ -470,22 +555,70 @@ if SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
     SINGULAR_RUNS_DIR="$repo/.singular-state/runs" \
     SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
-    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" campaign:test; }; singular_packet_acceptance_mode "$2" "$3"' \
+    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" legacy; }; singular_packet_acceptance_mode "$2" "$3"' \
       _ "$ROOT/engine/lib.sh" "$packet" "$audit" >/dev/null 2>&1; then
   fail "packet acceptance accepted an unknown audit schema"
 fi
-printf '%s\n' \
-  '{"schema":"singular.orchestration.audit-verdict.v0","verdict":"accepted"}' \
-  >"$audit"
+cat >"$audit" <<JSON
+{"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-1107","runId":"RUN-HOST","branch":"fixture/audit","verdict":"accepted","evidenceReviewed":["reviewed-head-sha:$head_sha"]}
+JSON
 mv "$repo/.singular-state/runs/RUN-HOST/verification-request-2.json" \
   "$repo/.singular-state/runs/RUN-HOST/verification-request-2.missing"
 if SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
     SINGULAR_RUNS_DIR="$repo/.singular-state/runs" \
     SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
-    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" campaign:test; }; singular_packet_acceptance_mode "$2" "$3"' \
+    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" legacy; }; singular_packet_acceptance_mode "$2" "$3"' \
       _ "$ROOT/engine/lib.sh" "$packet" "$audit" >/dev/null 2>&1; then
   fail "packet acceptance ignored a missing verification request"
+fi
+
+# A new commit can retain the exact same tree. Fresh gate evidence for that
+# commit still cannot reuse the prior commit's accepted audit marker.
+git -C "$repo" -c user.name=fixture -c user.email=fixture@example.local \
+  commit -q --allow-empty -m 'same tree, new commit'
+same_tree_head="$(git -C "$repo" rev-parse HEAD)"
+[[ "$(git -C "$repo" rev-parse 'HEAD^{tree}')" == "$tree_sha" ]] \
+  || fail "empty-commit stale-audit fixture changed the tree"
+request3="$repo/.singular-state/runs/RUN-HOST/verification-request-3.json"
+snapshot3="$repo/.singular-state/runs/RUN-HOST/verification-task-contract-3.md"
+policy3="$repo/.singular-state/runs/RUN-HOST/verification-policy-3.json"
+cp "$bound_task_contract" "$snapshot3"
+cp "$policy" "$policy3"
+python3 "$ROOT/engine/gate-report.py" create-verification-request \
+  --output "$request3" --task-id TASK-1107 --run-id RUN-HOST --attempt 3 \
+  --head-sha "$same_tree_head" --tree-sha "$tree_sha" --campaign legacy \
+  --task-contract "$snapshot3" --policy-contract "$policy3" \
+  --suite-id task-contract-gate >/dev/null
+(cd "$repo" && "$ROOT/engine/gate-check.sh" RUN-HOST \
+  --task-id TASK-1107 --verification-request "$request3" \
+  --task-contract "$snapshot3" --policy-contract "$policy3" --attempt 3) \
+  >/dev/null
+cp "$repo/.singular-state/runs/RUN-HOST/gate-report.json" \
+  "$repo/.singular-state/runs/RUN-HOST/audit-verification.json"
+python3 - "$packet" "$audit" "$same_tree_head" "$head_sha" <<'PY'
+import json, sys
+packet_path, audit_path, current_head, stale_head = sys.argv[1:5]
+packet = json.load(open(packet_path, encoding="utf-8"))
+packet["headSha"] = current_head
+json.dump(packet, open(packet_path, "w", encoding="utf-8"))
+audit = {
+    "schema": "singular.orchestration.audit-verdict.v1",
+    "taskId": "TASK-1107",
+    "runId": "RUN-HOST",
+    "branch": "fixture/audit",
+    "verdict": "accepted",
+    "evidenceReviewed": ["reviewed-head-sha:" + stale_head],
+}
+json.dump(audit, open(audit_path, "w", encoding="utf-8"))
+PY
+if SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
+    SINGULAR_RUNS_DIR="$repo/.singular-state/runs" \
+    SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
+    SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
+    bash -c '. "$1"; singular_campaign_binding(){ printf "%s\n" legacy; }; singular_packet_acceptance_mode "$2" "$3"' \
+      _ "$ROOT/engine/lib.sh" "$packet" "$audit" >/dev/null 2>&1; then
+  fail "same-tree changed-commit candidate reused a stale accepted audit"
 fi
 
 echo "PASS: test-verification-responsibility"

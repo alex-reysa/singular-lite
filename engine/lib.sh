@@ -647,6 +647,7 @@ singular_validate_verification_binding() {
   local expected_task="$5" expected_run="$6" expected_head="$7" expected_tree="$8"
   local current_task_contract="${9:-}"
   local expected_campaign="${10:-}"
+  local expected_attempt="${11:-}"
   local -a args=(
     verify-verification-result
     --request "$request" --report "$report"
@@ -660,13 +661,15 @@ singular_validate_verification_binding() {
     && args+=(--current-task-contract "$current_task_contract")
   [[ -n "$expected_campaign" ]] \
     && args+=(--expected-campaign "$expected_campaign")
+  [[ -n "$expected_attempt" ]] \
+    && args+=(--expected-attempt "$expected_attempt")
   python3 "$SINGULAR_LIB_DIR/gate-report.py" "${args[@]}"
 }
 
 singular_packet_acceptance_mode() {
   local packet="$1"
   local audit_record="$2"
-  local verdict="" audit_schema="" run_id="" task_id="" head_sha="" attempt=""
+  local verdict="" audit_schema="" run_id="" task_id="" branch="" head_sha="" attempt=""
   local verification_report="" verification_request=""
   local verification_task_contract="" verification_policy_contract=""
   local current_task_contract="" tree_sha="" current_campaign_binding=""
@@ -680,8 +683,9 @@ packet = json.load(open(sys.argv[1], encoding="utf-8"))
 run_id = packet.get("runId")
 task_id = packet.get("taskId")
 head = packet.get("headSha")
+branch = packet.get("branch")
 expected_ref = f"runs/{run_id}/audit-verification.json"
-if not all(isinstance(value, str) and value for value in (run_id, task_id, head)):
+if not all(isinstance(value, str) and value for value in (run_id, task_id, branch, head)):
     raise SystemExit(2)
 if not any(
     isinstance(item, dict)
@@ -692,13 +696,15 @@ if not any(
     raise SystemExit(2)
 print(run_id)
 print(task_id)
+print(branch)
 print(head)
 PY
   )
-  [[ "${#acceptance_identity[@]}" -eq 3 ]] || return 1
+  [[ "${#acceptance_identity[@]}" -eq 4 ]] || return 1
   run_id="${acceptance_identity[0]}"
   task_id="${acceptance_identity[1]}"
-  head_sha="${acceptance_identity[2]}"
+  branch="${acceptance_identity[2]}"
+  head_sha="${acceptance_identity[3]}"
   verification_report="$SINGULAR_RUNS_DIR/$run_id/audit-verification.json"
   attempt="$(singular_json_field "$verification_report" verificationRequest.attempt 2>/dev/null || true)"
   [[ "$attempt" =~ ^[0-9]+$ ]] || return 1
@@ -713,7 +719,7 @@ PY
     "$verification_request" "$verification_report" \
     "$verification_task_contract" "$verification_policy_contract" \
     "$task_id" "$run_id" "$head_sha" "$tree_sha" \
-    "$current_task_contract" "$current_campaign_binding" || return 1
+    "$current_task_contract" "$current_campaign_binding" "$attempt" || return 1
 
   if [[ -f "$audit_record" ]]; then
     audit_schema="$(singular_json_field "$audit_record" schema 2>/dev/null || true)"
@@ -723,6 +729,11 @@ PY
     esac
     verdict="$(singular_json_field "$audit_record" verdict 2>/dev/null || true)"
     if [[ "$verdict" == "accepted" ]]; then
+      python3 "$SINGULAR_LIB_DIR/audit-verdict-host-bind.py" \
+        --validate-acceptance --verdict "$audit_record" \
+        --expected-task "$task_id" --expected-run "$run_id" \
+        --expected-branch "$branch" --expected-head "$head_sha" \
+        >/dev/null || return 1
       echo "accepted"
       return 0
     fi

@@ -76,17 +76,11 @@ def ensure_recovery_capacity(lease: dict[str, Any], budget_domain: str) -> None:
 
 
 def verification_artifacts(
-    args: argparse.Namespace, audit: dict[str, Any]
+    args: argparse.Namespace,
 ) -> tuple[Path, Path, Path, Path] | None:
     """Locate the host verification tuple consumed by accepted audit authority."""
     if args.acceptance_mode not in {"accepted", "accepted-waiver"}:
         return None
-    schema = audit.get("schema")
-    if args.acceptance_mode == "accepted" and schema not in {
-        "singular.orchestration.audit-verdict.v0",
-        "singular.orchestration.audit-verdict.v1",
-    }:
-        raise LifecycleError("accepted audit has an unsupported or missing schema")
     report_arg = str(args.verification_report or "")
     request_arg = str(args.verification_request or "")
     policy_arg = str(args.verification_policy or "")
@@ -139,6 +133,26 @@ def validate_verification_binding(
         )
 
 
+def validate_audit_acceptance(
+    audit: Path, task_id: str, run_id: str, branch: str, head_sha: str
+) -> None:
+    """Use the canonical audit identity validator at direct lifecycle consumers."""
+    validator = Path(__file__).with_name("audit-verdict-host-bind.py")
+    command = [
+        sys.executable, str(validator), "--validate-acceptance",
+        "--verdict", str(audit), "--expected-task", task_id,
+        "--expected-run", run_id, "--expected-branch", branch,
+        "--expected-head", head_sha,
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        raise LifecycleError(
+            "accepted candidate audit binding failed"
+            + (f": {detail[0]}" if detail else "")
+        )
+
+
 def validate_candidate_artifacts(candidate: dict[str, Any]) -> None:
     """Re-read the acceptance authorities instead of trusting cached hashes."""
     packet_path = Path(str(candidate.get("packetPath", "")))
@@ -155,12 +169,11 @@ def validate_candidate_artifacts(candidate: dict[str, Any]) -> None:
         audit_path = Path(str(candidate.get("auditPath", "")))
         if not audit_path.is_file() or sha256(audit_path) != candidate.get("auditSha256"):
             raise LifecycleError("recovery predecessor audit is missing or changed")
-        audit = read_object(audit_path)
-        for field in ("taskId", "runId", "branch"):
-            if str(audit.get(field, "")) != str(candidate.get(field, "")):
-                raise LifecycleError(f"recovery predecessor audit {field} mismatch")
-        if audit.get("verdict") != "accepted":
-            raise LifecycleError("recovery predecessor audit is not accepted")
+        validate_audit_acceptance(
+            audit_path, str(candidate.get("taskId", "")),
+            str(candidate.get("runId", "")), str(candidate.get("branch", "")),
+            str(candidate.get("headSha", "")),
+        )
 
     task_path = Path(str(candidate.get("taskContractPath", "")))
     if not task_path.is_file() or sha256(task_path) != candidate.get("taskContractSha256"):
@@ -522,13 +535,11 @@ def retain_candidate(args: argparse.Namespace) -> None:
     if args.acceptance_mode == "accepted":
         audit_path = Path(args.audit)
         audit = read_object(audit_path)
-        for field, expected in (("taskId", args.task), ("runId", args.run), ("branch", args.branch)):
-            if str(audit.get(field, "")) != expected:
-                raise LifecycleError(f"audit {field} binding mismatch")
-        if audit.get("verdict") != "accepted":
-            raise LifecycleError("audit verdict is not accepted")
+        validate_audit_acceptance(
+            audit_path, args.task, args.run, args.branch, args.head
+        )
     task_path = Path(args.task_file)
-    verification = verification_artifacts(args, audit)
+    verification = verification_artifacts(args)
     verification_identity: dict[str, Any] = {"auditSchema": str(audit.get("schema", ""))}
     if verification is not None:
         request_path, report_path, bound_task_path, policy_path = verification
@@ -618,24 +629,39 @@ def candidate_check(args: argparse.Namespace) -> None:
     if candidate.get("state") == "integrated":
         raise LifecycleError("candidate is already integrated")
     if candidate.get("state") == "integration-failed":
-        for failure in reversed(candidate.get("failures") or []):
+        failures = [
+            failure for failure in candidate.get("failures") or []
+            if isinstance(failure, dict)
+        ]
+        for failure in reversed(failures):
             failure_class = failure.get("failureClass") if isinstance(failure, dict) else ""
             expected_key = (
                 args.branch_key
                 if failure_class == "branch-missing" and args.branch_key
                 else args.invalidation_key
             )
-            if isinstance(failure, dict) and (
-                failure_class in {
-                    "gate-red", "integration-conflict", "branch-missing"
-                }
-                and failure.get("invalidationKey") == expected_key
-            ):
+            if failure.get("invalidationKey") == expected_key:
                 print(
                     failure.get("nextAction")
                     or candidate.get("nextAction")
                     or "repair the candidate or change an invalidating input"
                 )
+                raise SystemExit(3)
+        if failures:
+            latest = failures[-1]
+            domain = str(latest.get("domain", "") or "")
+            if domain not in {"product", "infrastructure", "regate"}:
+                domain = (
+                    "infrastructure"
+                    if str(latest.get("failureClass", "")) in {
+                        "branch-missing", "git-lock-timeout", "setup-failed",
+                        "gate-infrastructure", "gate-report-invalid",
+                    }
+                    else "product"
+                )
+            budgets, limits = failure_counters(lease)
+            if budgets[domain] >= limits[domain]:
+                print(f"{domain} recovery budget is exhausted")
                 raise SystemExit(3)
 
 
@@ -669,9 +695,11 @@ def candidate_failed(args: argparse.Namespace) -> None:
                 "successorRunId": str(authority.get("successorRunId", "")),
                 "claimId": str(authority.get("claimId", "")),
             }
-        elif isinstance(authority, dict) and authority.get("state") == "failed":
-            if authority.get("executionFailureBinding") != execution_binding:
-                raise LifecycleError("completed recovery execution cannot record another failure")
+        elif (
+            isinstance(authority, dict)
+            and authority.get("state") == "failed"
+            and authority.get("executionFailureBinding") == execution_binding
+        ):
             recovery_context = {
                 "authorizationId": str(authority.get("authorizationId", "")),
                 "action": str(authority.get("action", "")),

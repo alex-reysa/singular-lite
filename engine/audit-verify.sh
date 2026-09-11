@@ -45,19 +45,47 @@ done
   echo "audit-verify: identity-bound verification request, task contract, and policy contract are required" >&2
   exit 2
 }
-trusted_gate_command="$(python3 "$SCRIPT_DIR/gate-report.py" resolve-verification-request \
-  --request "$verification_request" --task-contract "$verification_task_contract" \
-  --policy-contract "$verification_policy_contract" --expected-task "$task_id")" || exit 2
+[[ -n "$run_dir" && -d "$run_dir" ]] || { echo "audit-verify: --run-dir is required" >&2; exit 2; }
+[[ "$task_id" =~ ^TASK-[0-9]{4,}$ ]] || { echo "audit-verify: valid --task-id is required" >&2; exit 2; }
+[[ -n "$source_worktree" && -d "$source_worktree" ]] || { echo "audit-verify: --source-worktree is required" >&2; exit 2; }
+[[ "$head_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] || { echo "audit-verify: valid --head-sha is required" >&2; exit 2; }
+[[ "$attempt" =~ ^[1-9][0-9]*$ ]] || { echo "audit-verify: positive --attempt is required" >&2; exit 2; }
+
+# Compare the complete host invocation identity before creating a disposable
+# workspace, copying evidence, or launching the trusted command.
+expected_run_id="${run_dir##*/}"
+expected_head_sha="$(git -C "$source_worktree" rev-parse "$head_sha^{commit}" 2>/dev/null || true)"
+expected_tree_sha="$(git -C "$source_worktree" rev-parse "$head_sha^{tree}" 2>/dev/null || true)"
+[[ "$expected_head_sha" == "$head_sha" && "$expected_tree_sha" =~ ^[0-9a-f]{40,64}$ ]] || {
+  echo "audit-verify: invocation commit/tree identity is invalid" >&2
+  exit 2
+}
+expected_campaign="$(singular_campaign_binding 2>/dev/null)" || {
+  echo "audit-verify: current campaign identity is unavailable" >&2
+  exit 2
+}
+resolve_args=(
+  resolve-verification-request
+  --request "$verification_request"
+  --task-contract "$verification_task_contract"
+  --policy-contract "$verification_policy_contract"
+  --expected-task "$task_id"
+  --expected-run "$expected_run_id"
+  --expected-head "$expected_head_sha"
+  --expected-tree "$expected_tree_sha"
+  --expected-attempt "$attempt"
+  --expected-suite task-contract-gate
+  --expected-campaign "$expected_campaign"
+)
+current_task_contract="$SINGULAR_TASKS_DIR/$task_id.md"
+[[ -f "$current_task_contract" ]] \
+  && resolve_args+=(--current-task-contract "$current_task_contract")
+trusted_gate_command="$(python3 "$SCRIPT_DIR/gate-report.py" "${resolve_args[@]}")" || exit 2
 if [[ -n "$gate_command" && "$gate_command" != "$trusted_gate_command" ]]; then
   echo "audit-verify: caller gate command differs from trusted verification contract" >&2
   exit 2
 fi
 gate_command="$trusted_gate_command"
-
-[[ -n "$run_dir" && -d "$run_dir" ]] || { echo "audit-verify: --run-dir is required" >&2; exit 2; }
-[[ "$task_id" =~ ^TASK-[0-9]{4,}$ ]] || { echo "audit-verify: valid --task-id is required" >&2; exit 2; }
-[[ -n "$source_worktree" && -d "$source_worktree" ]] || { echo "audit-verify: --source-worktree is required" >&2; exit 2; }
-[[ "$head_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] || { echo "audit-verify: valid --head-sha is required" >&2; exit 2; }
 [[ -n "$gate_command" ]] || { echo "audit-verify: --gate-command is required" >&2; exit 2; }
 [[ -n "$worker_gate_report" ]] || worker_gate_report="$run_dir/gate-check.json"
 [[ -n "$worker_gate_command" ]] || worker_gate_command="$gate_command"
@@ -81,7 +109,11 @@ if [[ "$evidence_only" == "yes" ]]; then
   "$SCRIPT_DIR/gate-report.py" verify-verification-result \
     --request "$verification_request" --report "$output" \
     --task-contract "$verification_task_contract" \
-    --policy-contract "$verification_policy_contract" --require-pass
+    --policy-contract "$verification_policy_contract" \
+    --expected-task "$task_id" --expected-run "$expected_run_id" \
+    --expected-head "$expected_head_sha" --expected-tree "$expected_tree_sha" \
+    --expected-attempt "$attempt" --expected-suite task-contract-gate \
+    --expected-campaign "$expected_campaign" --require-pass
   printf '%s\n' "$output"
   exit 0
 fi
@@ -455,6 +487,10 @@ fi
 "$SCRIPT_DIR/gate-report.py" verify-verification-result \
   --request "$verification_request" --report "$output" \
   --task-contract "$verification_task_contract" \
-  --policy-contract "$verification_policy_contract" || report_rc=20
+  --policy-contract "$verification_policy_contract" \
+  --expected-task "$task_id" --expected-run "$expected_run_id" \
+  --expected-head "$expected_head_sha" --expected-tree "$expected_tree_sha" \
+  --expected-attempt "$attempt" --expected-suite task-contract-gate \
+  --expected-campaign "$expected_campaign" || report_rc=20
 printf '%s\n' "$output"
 exit "$report_rc"

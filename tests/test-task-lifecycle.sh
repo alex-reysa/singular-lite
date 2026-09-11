@@ -102,7 +102,7 @@ cat >"$packet" <<'EOF'
 {"taskId":"TASK-0001","runId":"RUN-ACCEPT","branch":"agent/test/TASK-0001","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"accepted"}
 EOF
 cat >"$audit" <<'EOF'
-{"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-0001","runId":"RUN-ACCEPT","branch":"agent/test/TASK-0001","verdict":"accepted"}
+{"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-0001","runId":"RUN-ACCEPT","branch":"agent/test/TASK-0001","verdict":"accepted","evidenceReviewed":["reviewed-head-sha:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}
 EOF
 verification_run="$SINGULAR_RUNS_DIR/RUN-ACCEPT"
 mkdir -p "$verification_run"
@@ -176,6 +176,37 @@ singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   branch-restored \
   || fail "restored branch dependency did not permit re-evaluation"
 
+# Every infrastructure path uses the same durable suppression rule as product
+# failures, including malformed reports and setup/finalization failures.
+infra_index=0
+for infra_class in gate-infrastructure gate-report-invalid gate-setup-fixture finalize-fixture; do
+  infra_index=$((infra_index + 1))
+  python3 "$SCRIPT_DIR/task_lifecycle.py" candidate-failed \
+    --lease "$(singular_lease_path "$task")" \
+    --head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    --tree bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    --campaign campaign:test --failure-class "$infra_class" --target-head target-2 \
+    --invalidation-key "infra-inputs-$infra_index" --domain infrastructure \
+    --next-action "repair host integration infrastructure" >/dev/null
+  rc=0
+  singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-2 \
+    "infra-inputs-$infra_index" >/dev/null 2>&1 || rc=$?
+  [[ "$rc" == 3 ]] || fail "unchanged $infra_class failure was not suppressed"
+done
+# A changed input remains bounded by the failure domain ceiling.
+python3 - "$(singular_lease_path "$task")" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["failureLimits"]["infrastructure"]=5
+json.dump(d, open(p,"w"))
+PY
+rc=0
+out="$(singular_lifecycle_candidate_check "$task" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb campaign:test target-3 \
+  infra-inputs-changed 2>&1)" || rc=$?
+[[ "$rc" == 3 && "$out" == *"infrastructure recovery budget is exhausted"* ]] \
+  || fail "changed infrastructure input bypassed its exhausted ceiling"
+
 # Reconciliation of the same packet is idempotent and retains failure history.
 state="$(singular_lifecycle_retain_candidate "$task" "$packet" "$audit" \
   "$SINGULAR_TASKS_DIR/$task.md" RUN-ACCEPT agent/test/TASK-0001 \
@@ -194,7 +225,7 @@ c = d["acceptedCandidate"]
 assert d["status"] == "accepted"
 assert c["state"] == "integration-failed"
 assert c["packetSha256"] and c["auditSha256"] and c["taskContractSha256"]
-assert len(c["failures"]) == 3
+assert len(c["failures"]) == 7
 PY
 
 # A wrapper without reservation authority must not run its driver.

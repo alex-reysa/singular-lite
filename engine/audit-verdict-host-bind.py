@@ -5,12 +5,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 
 AUDIT_V1 = "singular.orchestration.audit-verdict.v1"
+AUDIT_V0 = {
+    "singular.orchestration.audit-verdict.v0",
+    "pmgo.orchestration.audit-verdict.v0",
+}
 CLASSIFICATIONS = {
     "passed",
     "failed-product",
@@ -38,6 +43,40 @@ def host_classification(report: dict[str, Any]) -> str:
     if classification not in CLASSIFICATIONS:
         raise ValueError(f"unsupported host verification classification: {raw!r}")
     return classification
+
+
+def validate_identity(
+    verdict: dict[str, Any], *, task: str, run: str, branch: str, head: str,
+    require_accepted: bool = False,
+) -> str:
+    """Validate the audit identity imported and consumed at acceptance edges."""
+    schema = verdict.get("schema")
+    if schema != AUDIT_V1 and schema not in AUDIT_V0:
+        raise ValueError(f"unsupported audit verdict schema: {schema!r}")
+    if require_accepted and verdict.get("verdict") != "accepted":
+        raise ValueError("audit verdict is not accepted")
+    if not re.fullmatch(r"[0-9a-f]{40,64}", head):
+        raise ValueError("expected reviewed head is not a full lowercase identity")
+    for field, expected in (("taskId", task), ("runId", run), ("branch", branch)):
+        if verdict.get(field) != expected:
+            raise ValueError(
+                f"audit {field} does not match packet: expected {expected!r}, "
+                f"got {verdict.get(field)!r}"
+            )
+    evidence_reviewed = verdict.get("evidenceReviewed")
+    if not isinstance(evidence_reviewed, list):
+        raise ValueError("audit evidenceReviewed must be an array")
+    reviewed_heads = [
+        str(item)[len("reviewed-head-sha:"):]
+        for item in evidence_reviewed
+        if str(item).startswith("reviewed-head-sha:")
+    ]
+    if reviewed_heads != [head]:
+        raise ValueError(
+            "audit must contain exactly one reviewed-head-sha marker matching "
+            f"the packet head ({head})"
+        )
+    return str(schema)
 
 
 def model_aggregate(verdict: dict[str, Any]) -> tuple[str, list[str]]:
@@ -142,23 +181,51 @@ def normalize(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host-report", type=Path, required=True)
+    parser.add_argument("--host-report", type=Path)
     parser.add_argument("--verdict", type=Path)
     parser.add_argument("--normalize", action="store_true",
                         help="rewrite a mismatched verdict to the host classification")
     parser.add_argument("--command", default="")
     parser.add_argument("--evidence-ref", default="")
+    identity_mode = parser.add_mutually_exclusive_group()
+    identity_mode.add_argument("--validate-identity", action="store_true")
+    identity_mode.add_argument("--validate-acceptance", action="store_true")
+    parser.add_argument("--expected-task", default="")
+    parser.add_argument("--expected-run", default="")
+    parser.add_argument("--expected-branch", default="")
+    parser.add_argument("--expected-head", default="")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     try:
-        if args.normalize:
+        if args.validate_identity or args.validate_acceptance:
+            if args.verdict is None or not all((
+                args.expected_task, args.expected_run,
+                args.expected_branch, args.expected_head,
+            )):
+                raise ValueError(
+                    "identity validation requires --verdict and all expected identities"
+                )
+            verdict = read_object(args.verdict, "audit verdict")
+            print(validate_identity(
+                verdict,
+                task=args.expected_task,
+                run=args.expected_run,
+                branch=args.expected_branch,
+                head=args.expected_head,
+                require_accepted=args.validate_acceptance,
+            ))
+        elif args.normalize:
             if args.verdict is None:
                 raise ValueError("--normalize requires --verdict")
+            if args.host_report is None:
+                raise ValueError("--normalize requires --host-report")
             print(normalize(args.host_report, args.verdict, args.command, args.evidence_ref))
         else:
+            if args.host_report is None:
+                raise ValueError("--host-report is required")
             print(bind(args.host_report, args.verdict))
     except ValueError as exc:
         raise SystemExit(f"audit-verdict-host-bind: {exc}") from exc

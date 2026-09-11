@@ -13,6 +13,7 @@ workspace_kind="${SINGULAR_GATE_WORKSPACE_KIND:-worker}"
 verification_request=""
 verification_task_contract=""
 verification_policy_contract=""
+verification_attempt=""
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --task-id) task_id="${2:-}"; shift 2 ;;
@@ -21,6 +22,7 @@ while [[ $# -gt 0 ]]; do
     --verification-request) verification_request="${2:-}"; shift 2 ;;
     --task-contract) verification_task_contract="${2:-}"; shift 2 ;;
     --policy-contract) verification_policy_contract="${2:-}"; shift 2 ;;
+    --attempt) verification_attempt="${2:-}"; shift 2 ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -59,26 +61,40 @@ if [[ -n "$verification_request" ]]; then
     echo "gate-check: verification request requires trusted task and policy contracts" >&2
     exit 2
   }
-  trusted_gate_command="$(python3 "$SCRIPT_DIR/gate-report.py" resolve-verification-request \
-    --request "$verification_request" --task-contract "$verification_task_contract" \
-    --policy-contract "$verification_policy_contract")" || exit 2
-  mapfile -t verification_identity < <(python3 - "$verification_request" <<'PY'
-import json, sys
-d=json.load(open(sys.argv[1], encoding="utf-8"))
-print(d["taskId"]); print(d["headSha"]); print(d["treeSha"])
-PY
-  )
-  [[ "${#verification_identity[@]}" -eq 3 ]] || exit 2
-  task_id="${verification_identity[0]}"
-  verification_expected_head="${verification_identity[1]}"
-  verification_expected_tree="${verification_identity[2]}"
+  [[ "$verification_attempt" =~ ^[1-9][0-9]*$ ]] || {
+    echo "gate-check: verification request requires a positive --attempt" >&2
+    exit 2
+  }
   actual_request_head="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)"
   actual_request_tree="$(git -C "$PWD" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
-  if [[ "$actual_request_head" != "$verification_expected_head" \
-      || "$actual_request_tree" != "$verification_expected_tree" ]]; then
-    echo "gate-check: verification request candidate identity is stale" >&2
+  [[ "$actual_request_head" =~ ^[0-9a-f]{40,64}$ \
+      && "$actual_request_tree" =~ ^[0-9a-f]{40,64}$ ]] || {
+    echo "gate-check: current candidate identity is unavailable" >&2
     exit 2
-  fi
+  }
+  verification_expected_head="$actual_request_head"
+  verification_expected_tree="$actual_request_tree"
+  verification_expected_campaign="$(singular_campaign_binding 2>/dev/null)" || {
+    echo "gate-check: current campaign identity is unavailable" >&2
+    exit 2
+  }
+  resolve_args=(
+    resolve-verification-request
+    --request "$verification_request"
+    --task-contract "$verification_task_contract"
+    --policy-contract "$verification_policy_contract"
+    --expected-task "$task_id"
+    --expected-run "$run_id"
+    --expected-head "$verification_expected_head"
+    --expected-tree "$verification_expected_tree"
+    --expected-attempt "$verification_attempt"
+    --expected-suite task-contract-gate
+    --expected-campaign "$verification_expected_campaign"
+  )
+  current_task_contract="$SINGULAR_TASKS_DIR/$task_id.md"
+  [[ -f "$current_task_contract" ]] \
+    && resolve_args+=(--current-task-contract "$current_task_contract")
+  trusted_gate_command="$(python3 "$SCRIPT_DIR/gate-report.py" "${resolve_args[@]}")" || exit 2
   # Shell interpretation is host-owned and only applied to the command read
   # from the trusted task contract. No packet/request command is accepted.
   set -- "$(singular_bash_bin)" -c "$trusted_gate_command"
@@ -322,7 +338,10 @@ if [[ -n "$verification_request" ]]; then
     --policy-contract "$verification_policy_contract" \
     --expected-task "$task_id" --expected-run "$run_id" \
     --expected-head "$verification_expected_head" \
-    --expected-tree "$verification_expected_tree" || exit 20
+    --expected-tree "$verification_expected_tree" \
+    --expected-attempt "$verification_attempt" \
+    --expected-suite task-contract-gate \
+    --expected-campaign "$verification_expected_campaign" || exit 20
 fi
 
 cp "$report" "$summary"

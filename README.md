@@ -106,6 +106,11 @@ execution is incomplete. A completed failed execution closes that claim and a
 new host authorization must bind the resulting failure before another launch.
 Recovery limits are checked both when authority is issued and when execution is
 claimed, so a stale issued record cannot bypass a changed or exhausted ceiling.
+Ordinary integration retries use the same limits: an unchanged recorded
+failure is suppressed regardless of whether it came from product behavior,
+host infrastructure, report validation, setup or finalization. A relevant
+input change permits another ordinary attempt only while that failure domain
+still has capacity.
 Repair candidates always need a fresh accepted audit even when the
 tree is unchanged; regate keeps the exact candidate and prints the bound
 `singular integrate --run-id ...` next action. `singular health --json` exposes
@@ -116,7 +121,9 @@ active recovery action and successor attempt, and integration consumes the gate
 report's product/infrastructure outcome instead of charging every red exit as a
 product failure. Supported accepted audit schemas and waiver acceptance also
 revalidate their exact host verification request, result and policy through the
-canonical gate-report validator before retention or recovery.
+canonical gate-report validator before retention or recovery. Accepted audit
+authority is bound to exactly one reviewed-head marker for the candidate commit,
+so a new commit cannot reuse an earlier audit even when its tree is unchanged.
 
 ## Dispatch model
 

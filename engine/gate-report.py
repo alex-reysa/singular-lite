@@ -189,7 +189,11 @@ def load_verification_request(
         raise ValueError("verification request missing: " + ", ".join(missing))
     if request.get("schema") != "singular.orchestration.verification-request.v0":
         raise ValueError("unsupported verification request schema")
-    if not isinstance(request.get("attempt"), int) or isinstance(request.get("attempt"), bool):
+    if (
+        not isinstance(request.get("attempt"), int)
+        or isinstance(request.get("attempt"), bool)
+        or request.get("attempt") <= 0
+    ):
         raise ValueError("verification request attempt is invalid")
     if request.get("taskContractSha256") != sha_bytes(task_contract.read_bytes()):
         raise ValueError("verification task contract changed")
@@ -221,6 +225,8 @@ def load_verification_request(
 
 
 def command_create_verification_request(args: argparse.Namespace) -> int:
+    if args.attempt <= 0:
+        raise ValueError("verification request attempt must be positive")
     task_contract = pathlib.Path(args.task_contract).resolve()
     policy_contract = pathlib.Path(args.policy_contract).resolve()
     command = trusted_gate_command(task_contract)
@@ -254,10 +260,37 @@ def command_resolve_verification_request(args: argparse.Namespace) -> int:
     request, command = load_verification_request(
         pathlib.Path(args.request), pathlib.Path(args.task_contract), pathlib.Path(args.policy_contract)
     )
-    if args.expected_task and request.get("taskId") != args.expected_task:
-        raise ValueError("verification request task mismatch")
+    validate_expected_request(request, args, pathlib.Path(args.task_contract))
     print(command)
     return 0
+
+
+def validate_expected_request(
+    request: dict[str, Any], args: argparse.Namespace, bound_task_contract: pathlib.Path
+) -> None:
+    expected_values = {
+        "taskId": getattr(args, "expected_task", ""),
+        "runId": getattr(args, "expected_run", ""),
+        "headSha": getattr(args, "expected_head", ""),
+        "treeSha": getattr(args, "expected_tree", ""),
+        "suiteId": getattr(args, "expected_suite", ""),
+        "campaignBinding": getattr(args, "expected_campaign", ""),
+    }
+    for key, value in expected_values.items():
+        if value and request.get(key) != value:
+            raise ValueError(f"verification request {key} mismatch")
+    expected_attempt = getattr(args, "expected_attempt", None)
+    if expected_attempt is not None:
+        if expected_attempt <= 0:
+            raise ValueError("expected verification attempt must be positive")
+        if request.get("attempt") != expected_attempt:
+            raise ValueError("verification request attempt mismatch")
+    current_task_contract = getattr(args, "current_task_contract", "")
+    if current_task_contract:
+        current = pathlib.Path(current_task_contract).resolve()
+        bound = bound_task_contract.resolve()
+        if task_contract_semantic_bytes(current) != task_contract_semantic_bytes(bound):
+            raise ValueError("current verification task contract changed semantically")
 
 
 def result_binding(report: dict[str, Any]) -> str:
@@ -348,22 +381,7 @@ def command_verify_verification_result(args: argparse.Namespace) -> int:
         raise ValueError("verification result task mismatch")
     if report.get("runId") != request.get("runId"):
         raise ValueError("verification result run mismatch")
-    expected_values = {
-        "taskId": args.expected_task,
-        "runId": args.expected_run,
-        "headSha": args.expected_head,
-        "treeSha": args.expected_tree,
-        "suiteId": args.expected_suite,
-        "campaignBinding": args.expected_campaign,
-    }
-    for key, value in expected_values.items():
-        if value and request.get(key) != value:
-            raise ValueError(f"verification request {key} mismatch")
-    if args.current_task_contract:
-        current = pathlib.Path(args.current_task_contract).resolve()
-        bound = pathlib.Path(args.task_contract).resolve()
-        if task_contract_semantic_bytes(current) != task_contract_semantic_bytes(bound):
-            raise ValueError("current verification task contract changed semantically")
+    validate_expected_request(request, args, pathlib.Path(args.task_contract))
     return 0
 
 
@@ -644,7 +662,13 @@ def build_parser() -> argparse.ArgumentParser:
     resolve = commands.add_parser("resolve-verification-request")
     for flag in ("request", "task_contract", "policy_contract"):
         resolve.add_argument("--" + flag.replace("_", "-"), required=True)
-    resolve.add_argument("--expected-task", default="")
+    for flag in (
+        "expected_task", "expected_run", "expected_head", "expected_tree",
+        "expected_suite", "expected_campaign",
+    ):
+        resolve.add_argument("--" + flag.replace("_", "-"), default="")
+    resolve.add_argument("--expected-attempt", type=int)
+    resolve.add_argument("--current-task-contract", default="")
     resolve.set_defaults(handler=command_resolve_verification_request)
 
     bind_result = commands.add_parser("bind-verification-result")
@@ -661,6 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
         "expected_suite", "expected_campaign",
     ):
         verify_result.add_argument("--" + flag.replace("_", "-"), default="")
+    verify_result.add_argument("--expected-attempt", type=int)
     verify_result.add_argument("--current-task-contract", default="")
     verify_result.add_argument("--require-pass", action="store_true")
     verify_result.set_defaults(handler=command_verify_verification_result)

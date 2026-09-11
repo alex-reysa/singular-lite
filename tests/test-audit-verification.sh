@@ -85,12 +85,12 @@ prepare_verification() {
   verification_policy_contract="$run_dir/verification-policy-$verification_sequence.json"
   printf '# TASK-0001: audit verification fixture\n\nStatus: running\nTest policy: `strict_test_first`\nGate command: `%s`\n' \
     "$command" >"$verification_task_contract"
-  printf '%s\n' '{"campaign":"campaign:audit-test","policy":"strict-test-first"}' \
+  printf '%s\n' '{"campaign":"legacy","policy":"strict-test-first"}' \
     >"$verification_policy_contract"
   python3 "$ROOT/engine/gate-report.py" create-verification-request \
     --output "$verification_request" --task-id TASK-0001 --run-id RUN-AUDIT \
     --attempt "$verification_sequence" --head-sha "$head_sha" \
-    --tree-sha "$tree_sha" --campaign campaign:audit-test \
+    --tree-sha "$tree_sha" --campaign legacy \
     --task-contract "$verification_task_contract" \
     --policy-contract "$verification_policy_contract" \
     --suite-id task-contract-gate >/dev/null
@@ -107,7 +107,7 @@ run_verify() {
   env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
     --run-dir "$run_dir" --task-id TASK-0001 \
     --source-worktree "$repo" --head-sha "$head_sha" \
-    --gate-command "$command" --attempt 1 --try 0 \
+    --gate-command "$command" --attempt "$verification_sequence" --try 0 \
     "${verification_args[@]}" \
     >"$run_dir/driver.log" 2>&1 || rc=$?
   [[ "$rc" -eq "$expected_rc" ]] || {
@@ -121,6 +121,54 @@ outcome() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["outcome"])' \
     "$run_dir/audit-verification.json"
 }
+
+expect_identity_refusal_before_launch() {
+  local label="$1" invocation_run_dir="$2" invocation_head="$3" invocation_attempt="$4"
+  local marker="$tmp/$label-command-ran" command="touch '$tmp/$label-command-ran'"
+  local rc=0
+  prepare_verification "$command"
+  [[ "$invocation_attempt" == current ]] && invocation_attempt="$verification_sequence"
+  mkdir -p "$invocation_run_dir"
+  env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
+    --run-dir "$invocation_run_dir" --task-id TASK-0001 \
+    --source-worktree "$repo" --head-sha "$invocation_head" \
+    --gate-command "$command" --attempt "$invocation_attempt" --try 0 \
+    "${verification_args[@]}" >"$tmp/$label-driver.log" 2>&1 || rc=$?
+  [[ "$rc" -ne 0 ]] || {
+    echo "$label verification identity unexpectedly succeeded" >&2
+    exit 1
+  }
+  [[ ! -e "$marker" ]] || {
+    echo "$label verification identity ran the gate before refusal" >&2
+    exit 1
+  }
+}
+
+# Invocation identity is checked before a worktree is created or any trusted
+# command can run. The request alone cannot select a different run or attempt.
+expect_identity_refusal_before_launch stale-run "$tmp/runs/RUN-OTHER" \
+  "$head_sha" current
+next_attempt=$((verification_sequence + 2))
+expect_identity_refusal_before_launch stale-attempt "$run_dir" \
+  "$head_sha" "$next_attempt"
+
+# A fresh commit with the same trusted command cannot reuse an old-head request.
+prepare_verification "touch '$tmp/stale-head-command-ran'"
+printf 'new head\n' >"$repo/new-head.txt"
+git -C "$repo" add new-head.txt
+git -C "$repo" commit -qm 'new head fixture'
+new_head_sha="$(git -C "$repo" rev-parse HEAD)"
+rc=0
+env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
+  --run-dir "$run_dir" --task-id TASK-0001 \
+  --source-worktree "$repo" --head-sha "$new_head_sha" \
+  --gate-command "touch '$tmp/stale-head-command-ran'" \
+  --attempt "$verification_sequence" --try 0 "${verification_args[@]}" \
+  >"$tmp/stale-head-driver.log" 2>&1 || rc=$?
+[[ "$rc" -ne 0 ]] || { echo "stale-head verification unexpectedly succeeded" >&2; exit 1; }
+[[ ! -e "$tmp/stale-head-command-ran" ]] \
+  || { echo "stale-head verification ran the gate before refusal" >&2; exit 1; }
+git -C "$repo" reset -q --hard "$head_sha"
 
 # Turbo/Vitest/Bun-style cache writes are allowed in ignored workspace paths
 # and isolated cache roots, while the original audited checkout stays unchanged.
@@ -233,7 +281,8 @@ env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-report "$run_dir/worker-gate.json" \
-  --evidence-only "${verification_args[@]}" >/dev/null
+  --evidence-only --attempt "$verification_sequence" \
+  "${verification_args[@]}" >/dev/null
 [[ "$(outcome)" == "not-rerun-evidence-verified" ]]
 
 # The worker gate may have recorded the host shell wrapper while the
@@ -250,7 +299,8 @@ env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-command "bash -c true" \
   --worker-gate-report "$run_dir/wrapped-worker-gate.json" \
-  --evidence-only "${verification_args[@]}" >/dev/null
+  --evidence-only --attempt "$verification_sequence" \
+  "${verification_args[@]}" >/dev/null
 [[ "$(outcome)" == "not-rerun-evidence-verified" ]]
 
 # A successful-looking report is not eligible for evidence-only substitution
@@ -265,7 +315,8 @@ if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-report "$run_dir/unverified-gate.json" \
-  --evidence-only "${verification_args[@]}" >/dev/null 2>&1; then
+  --evidence-only --attempt "$verification_sequence" \
+  "${verification_args[@]}" >/dev/null 2>&1; then
   echo "unverified source integrity must fail evidence-only validation" >&2
   exit 1
 fi
@@ -294,7 +345,8 @@ if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command false --worker-gate-report "$run_dir/failed-gate.json" \
-  --evidence-only "${verification_args[@]}" >/dev/null 2>&1; then
+  --evidence-only --attempt "$verification_sequence" \
+  "${verification_args[@]}" >/dev/null 2>&1; then
   echo "outcome-only gate report forgery must fail verification" >&2
   exit 1
 fi
@@ -305,7 +357,8 @@ if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --run-dir "$run_dir" --task-id TASK-0001 \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command true --worker-gate-report "$run_dir/worker-gate.json" \
-  --evidence-only "${verification_args[@]}" >/dev/null 2>&1; then
+  --evidence-only --attempt "$verification_sequence" \
+  "${verification_args[@]}" >/dev/null 2>&1; then
   echo "tampered gate evidence must fail verification" >&2
   exit 1
 fi
@@ -344,7 +397,7 @@ env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command "$baseline_command" \
   --worker-gate-report "$run_dir/baseline-gate.json" --evidence-only \
-  "${verification_args[@]}" >/dev/null
+  --attempt "$verification_sequence" "${verification_args[@]}" >/dev/null
 printf '\n' >>"$run_dir/baseline.json"
 prepare_verification "$baseline_command"
 if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
@@ -352,7 +405,7 @@ if env "${base_env[@]}" "$ROOT/engine/audit-verify.sh" \
   --source-worktree "$repo" --head-sha "$head_sha" \
   --gate-command "$baseline_command" \
   --worker-gate-report "$run_dir/baseline-gate.json" --evidence-only \
-  "${verification_args[@]}" \
+  --attempt "$verification_sequence" "${verification_args[@]}" \
   >/dev/null 2>&1; then
   echo "changed acknowledged baseline must fail evidence verification" >&2
   exit 1
