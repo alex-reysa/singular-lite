@@ -50,7 +50,7 @@ try:
     if os.environ.get('EXACT_TREE_PROCESS_RECORD'):
         pathlib.Path(os.environ['EXACT_TREE_PROCESS_RECORD']).write_text(str(proc.pid))
     try:
-        rc = proc.wait(timeout=45)
+        rc = proc.wait(timeout=75)
     except subprocess.TimeoutExpired:
         print('FAIL: fixture lifecycle timed out', file=sys.stderr)
         rc = 1

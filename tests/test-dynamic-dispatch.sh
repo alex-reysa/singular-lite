@@ -1035,6 +1035,24 @@ test_integrate_push_logs_sanitize_branch_names() {
   git -C "$SINGULAR_ROOT" branch -m codex/singular-bootstrap-target
   export SINGULAR_TARGET_BRANCH="codex/singular-bootstrap-target"
 
+  write_task TASK-0100 accepted internal/artifact/push_log_fixture.go "[]"
+  python3 - "$SINGULAR_TASKS_DIR/TASK-0100.md" "$SINGULAR_TARGET_BRANCH" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace("Target branch: `target`", f"Target branch: `{sys.argv[2]}`")
+text = text.replace(
+    "Worker branch: `agent/artifact/TASK-0100-test`",
+    "Worker branch: `agent/artifact/TASK-0100-push-log`",
+)
+path.write_text(text, encoding="utf-8")
+PY
+  git -C "$SINGULAR_ROOT" add "$SINGULAR_TASKS_DIR/TASK-0100.md"
+  git -C "$SINGULAR_ROOT" -c user.name=test -c user.email=test@example.local \
+    commit -q -m "TASK-0100: push log task"
+
   local origin="$SINGULAR_ROOT/../origin.git"
   git init --bare -q "$origin"
   git -C "$SINGULAR_ROOT" remote add origin "$origin"
@@ -1050,8 +1068,26 @@ const PushLogFixture = "ok"
 EOF
   git -C "$SINGULAR_ROOT" add internal/artifact/push_log_fixture.go
   git -C "$SINGULAR_ROOT" -c user.name=test -c user.email=test@example.local commit -q -m "TASK-0100: push log fixture"
-  local head
+  local head tree run_dir request task_snapshot policy
   head="$(git -C "$SINGULAR_ROOT" rev-parse HEAD)"
+  tree="$(git -C "$SINGULAR_ROOT" rev-parse 'HEAD^{tree}')"
+
+  run_dir="$SINGULAR_RUNS_DIR/RUN-PUSHLOG"
+  request="$run_dir/verification-request-1.json"
+  task_snapshot="$run_dir/verification-task-contract-1.md"
+  policy="$run_dir/verification-policy-1.json"
+  mkdir -p "$run_dir"
+  cp "$SINGULAR_TASKS_DIR/TASK-0100.md" "$task_snapshot"
+  printf '%s\n' '{"campaign":"legacy","policy":"push-log-fixture"}' >"$policy"
+  python3 "$SCRIPT_DIR/gate-report.py" create-verification-request \
+    --output "$request" --task-id TASK-0100 --run-id RUN-PUSHLOG \
+    --attempt 1 --head-sha "$head" --tree-sha "$tree" --campaign legacy \
+    --task-contract "$task_snapshot" --policy-contract "$policy" \
+    --suite-id task-contract-gate >/dev/null
+  (cd "$SINGULAR_ROOT" && "$SCRIPT_DIR/gate-check.sh" RUN-PUSHLOG \
+    --task-id TASK-0100 --verification-request "$request" \
+    --task-contract "$task_snapshot" --policy-contract "$policy" --attempt 1) >/dev/null
+  mv "$run_dir/gate-report.json" "$run_dir/audit-verification.json"
   git -C "$SINGULAR_ROOT" checkout -q "$SINGULAR_TARGET_BRANCH"
 
   local packet_dir="$SINGULAR_ORCH_DIR/packets/imported/TASK-0100"
@@ -1073,7 +1109,7 @@ EOF
   "changedFiles": ["internal/artifact/push_log_fixture.go"],
   "commands": [{"cmd": "true", "exitCode": 0}],
   "tests": [{"name": "fixture", "phase": "regression", "status": "passed"}],
-  "evidence": [{"kind": "test", "ref": "fixture"}],
+  "evidence": [{"kind": "test", "ref": "fixture"}, {"kind": "audit-verification", "ref": "runs/RUN-PUSHLOG/audit-verification.json"}],
   "blockers": [],
   "nextAction": "integrate",
   "createdAt": "2026-05-29T00:00:00Z"
@@ -1086,7 +1122,7 @@ EOF
   "runId": "RUN-PUSHLOG",
   "branch": "$branch",
   "verdict": "accepted",
-  "evidenceReviewed": ["fixture"],
+  "evidenceReviewed": ["fixture", "audit-verification.json", "reviewed-head-sha:$head"],
   "commandsRun": ["true"],
   "findings": [],
   "requiredFixes": [],
@@ -1094,12 +1130,11 @@ EOF
 }
 EOF
 
-  local out run_dir
+  local out
   out="$(SINGULAR_DEFAULT_GATE_CMD=true SINGULAR_PUSH=1 "$SCRIPT_DIR/integrate.sh" --task TASK-0100 --run-id RUN-PUSHLOG 2>&1)"
   assert_contains "$out" "pushed codex/singular-bootstrap-target -> origin" "target branch pushed with slash name"
   assert_contains "$out" "pushed agent/artifact/TASK-0100-push-log -> origin" "worker branch pushed with slash name"
 
-  run_dir="$SINGULAR_RUNS_DIR/RUN-PUSHLOG"
   [[ -f "$run_dir/secret-scan-push-codex__singular-bootstrap-target.log" ]] || fail "missing sanitized target push scan log"
   [[ -f "$run_dir/secret-scan-push-agent__artifact__TASK-0100-push-log.log" ]] || fail "missing sanitized worker push scan log"
   [[ ! -d "$run_dir/secret-scan-push-codex" ]] || fail "target push scan log used branch slash as directory"
