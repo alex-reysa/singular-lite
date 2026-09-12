@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-12T12:40:28Z — TASK-1111 — escalate-parked
+
+- Run: `RUN-20260912T123002Z-20014`
+- Branch: `codex/brain-rescue/TASK-1111`
+- Authority: l1
+- Rationale: no product progress: attempt 1 left the exact candidate unchanged after audit-needs-fix; another implement/audit pass would evaluate identical source.
+
 ### 2026-09-12T12:27:00Z — TASK-1108 — supersede
 
 - Run: `ORIGIN-20260912T122700Z-15735`
