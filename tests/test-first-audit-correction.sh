@@ -1,49 +1,68 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Frozen actual-L1 regression for a committed candidate whose first worker is a
-# no-op but whose first fresh, host-bound audit returns actionable findings.
+# Frozen-campaign regression for a pre-existing committed candidate whose first
+# worker makes no edit and whose first fresh audit returns actionable findings.
+# The provider is a deterministic fixture, not native unattended-provider
+# evidence. Evidence delivery itself uses the real Unix-socket broker by
+# default. FIRST_AUDIT_SOCKETLESS=1 is only a supplemental managed-sandbox seam.
+
+find_bash4() {
+  local candidate resolved major
+  # The host pins PATH for qualification; an explicit override remains useful
+  # for other portable runners without baking a workstation path into the test.
+  for candidate in "${SINGULAR_TEST_BASH:-}" bash; do
+    [[ -n "$candidate" ]] || continue
+    resolved="$(command -v "$candidate" 2>/dev/null || true)"
+    [[ -n "$resolved" && -x "$resolved" ]] || continue
+    major="$("$resolved" -c 'printf "%s" "${BASH_VERSINFO[0]:-0}"' 2>/dev/null || true)"
+    if [[ "$major" =~ ^[0-9]+$ && "$major" -ge 4 ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
 
 if [[ "${BASH_VERSINFO[0]:-0}" -lt 4 ]]; then
-  if [[ -x /opt/homebrew/bin/bash ]]; then exec /opt/homebrew/bin/bash "$0" "$@"; fi
-  echo "test-first-audit-correction.sh requires bash >= 4" >&2
-  exit 1
+  replacement_bash="$(find_bash4 || true)"
+  [[ -n "$replacement_bash" ]] || {
+    echo "test-first-audit-correction.sh requires a discoverable Bash >= 4" >&2
+    exit 1
+  }
+  exec "$replacement_bash" "$0" "$@"
 fi
 
 ENGINE_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASH_BIN=/opt/homebrew/bin/bash
-PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-[[ -x "$BASH_BIN" ]] || { echo "missing pinned Bash: $BASH_BIN" >&2; exit 1; }
-[[ -x "$PYTHON_BIN" ]] || { echo "missing pinned Python: $PYTHON_BIN" >&2; exit 1; }
+BASH_BIN="$(find_bash4 || true)"
+PYTHON_BIN="${SINGULAR_TEST_PYTHON:-$(command -v python3 2>/dev/null || true)}"
+[[ -n "$BASH_BIN" ]] || { echo "missing discoverable Bash >= 4" >&2; exit 1; }
+[[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] \
+  || { echo "missing discoverable Python 3" >&2; exit 1; }
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)' \
+  || { echo "selected Python is not Python 3: $PYTHON_BIN" >&2; exit 1; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "$3: want '$2', got '$1'"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: missing '$2'"; }
+assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "$3: unexpectedly contained '$2'"; }
 
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/singular-first-audit-correction.XXXXXX")"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/singular-first-audit-frozen.XXXXXX")"
 cleanup() {
   if [[ "${FIRST_AUDIT_KEEP_TMP:-0}" == "1" ]]; then
-    echo "fixture retained: $scratch" >&2
+    echo "first-audit frozen fixture retained: $scratch" >&2
   else
     rm -rf "$scratch"
   fi
 }
 trap cleanup EXIT
-repo="$scratch/repo"
-state="$repo/.singular-state"
-tasks="$repo/docs/orchestration/tasks"
-prompts="$repo/docs/orchestration/prompts"
-counters="$scratch/counters"
-socketless_fixture="$scratch/socketless-fixture"
-worker_branch=agent/widget/TASK-0001-generic
-mkdir -p "$tasks" "$prompts" "$state" "$counters" "$socketless_fixture"
 
-# Explicit fixture adapter only: this managed test sandbox denies AF_UNIX
-# listener creation. The provider fixture consumes the complete required
-# evidence already embedded by evidence_delivery.py and never uses paged reads,
-# so replace only the unused socket server lifecycle. This is not native
-# evidence-delivery proof; host verification must rerun without this adapter.
-cat >"$socketless_fixture/sitecustomize.py" <<'PY'
+socketless_fixture="$scratch/socketless-fixture"
+BROKER_ENV=()
+if [[ "${FIRST_AUDIT_SOCKETLESS:-0}" == "1" ]]; then
+  echo "SUPPLEMENTAL ONLY: socketless managed-sandbox adapter enabled; this is not real-broker operational evidence" >&2
+  mkdir -p "$socketless_fixture"
+  cat >"$socketless_fixture/sitecustomize.py" <<'PY'
 import socketserver
 import threading
 
@@ -67,92 +86,144 @@ class SocketlessFixtureServer:
 
 socketserver.ThreadingUnixStreamServer = SocketlessFixtureServer
 PY
+  BROKER_ENV+=("PYTHONPATH=$socketless_fixture${PYTHONPATH:+:$PYTHONPATH}")
+fi
 
-git -C "$repo" init -q
-git -C "$repo" checkout -q -b target
-cp "$ENGINE_HOME/templates/prompts/l2-test-first-developer.md" "$prompts/"
-cp "$ENGINE_HOME/templates/prompts/auditor.md" "$prompts/"
-printf '# Decider Prompt\n[TASK-ID] [FAILURE CLASS]\n' >"$prompts/decider.md"
-printf '%s\n' '{"schemaVersion":"v2","targetBranch":"target","gateCommand":"bash strict-gate.sh"}' \
-  >"$repo/singular.config.json"
-cat >"$repo/strict-gate.sh" <<'SH'
+FIXTURE_ROOT=""
+FIXTURE_COUNTERS=""
+FIXTURE_RUNNER=""
+FIXTURE_MODE=""
+CASE_MAX_RETRIES="1"
+SEED_HEAD=""
+CAMPAIGN_BINDING=""
+ENGINE_FINGERPRINT=""
+CONFIG_SHA=""
+RUNNER_SHA=""
+worker_branch="agent/widget/TASK-0001-frozen"
+
+sha256_file() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+print(digest.hexdigest())
+PY
+}
+
+write_runner() {
+  local runner="$1"
+  cat >"$runner" <<'RUNNER'
 #!/usr/bin/env bash
-printf '%s\n' '{"schema":"singular.orchestration.gate-observation.v0","failures":[]}' \
-  >"$SINGULAR_GATE_REPORT_FILE"
-SH
-chmod +x "$repo/strict-gate.sh"
-cat >"$tasks/TASK-0001.md" <<'TASK'
-# TASK-0001: Correct a committed candidate after fresh audit feedback
-
-Status: ready
-Area: widget
-Target branch: `target`
-Worker branch: `agent/widget/TASK-0001-generic`
-Test policy: `strict_test_first`
-Dispatch mode: canonical
-Depends on: []
-
-## Objective
-
-Correct the pre-existing widget candidate from fresh audit findings.
-
-## Scope
-
-Owned files:
-
-- `internal/widget/parser.go`
-
-Forbidden files:
-
-- Any file outside the owned scope.
-
-## Acceptance Criteria
-
-- The fresh audit finding is fixed in one bounded correcting pass.
-TASK
-git -C "$repo" add .
-git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm base
-
-runner="$scratch/fixture-runner.sh"
-cat >"$runner" <<'RUNNER'
-#!/opt/homebrew/bin/bash
 set -euo pipefail
 
-level=""; role=""; worktree=""; output=""; prompt=""
+if [[ "${1:-}" == "--describe-contract" ]]; then
+  printf '%s\n' '{"schema":"singular.runner-contract.v1","version":1,"provider":"codex","arguments":["--worktree","--prompt-file","--level","--run-id","--output-last-message","--role","--capability-profile","--result-file","--describe-contract"],"structuredResult":"singular.orchestration.runner-result.v0","structuredProviderError":"singular.orchestration.provider-error.v0"}'
+  exit 0
+fi
+
+role="${SINGULAR_RUNNER_ROLE:-}"
+capability="${SINGULAR_RUNNER_CAPABILITY_PROFILE:-fixture}"
+result_file="${SINGULAR_RUNNER_RESULT_FILE:-}"
+run_id=""; level=""; worktree=""; output=""; prompt=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --level) level="$2"; shift 2 ;;
     --role) role="$2"; shift 2 ;;
+    --capability-profile) capability="$2"; shift 2 ;;
+    --result-file) result_file="$2"; shift 2 ;;
+    --run-id) run_id="$2"; shift 2 ;;
+    --level) level="$2"; shift 2 ;;
     -C|--worktree) worktree="$2"; shift 2 ;;
     --output-last-message) output="$2"; shift 2 ;;
     --prompt-file) prompt="$2"; shift 2 ;;
-    --result-file|--run-id|--capability-profile|--session-meta|--resume-session) shift 2 ;;
+    --session-meta|--resume-session) shift 2 ;;
     *) shift ;;
   esac
 done
+[[ -n "$run_id" && -n "$output" ]] || exit 92
 
 bump() {
-  local path="${FIXTURE_COUNTERS:?}/$1" count=0
+  local name="$1" path="${FIRST_AUDIT_COUNTERS:?}/$1-calls" count=0
+  mkdir -p "${FIRST_AUDIT_COUNTERS:?}"
   [[ -f "$path" ]] && count="$(<"$path")"
   printf '%s\n' "$((count + 1))" >"$path"
   printf '%s\n' "$((count + 1))"
 }
 
-if [[ "$level" == "l2" ]]; then
-  call="$(bump worker-calls)"
-  git -C "$worktree" rev-parse HEAD >"$FIXTURE_COUNTERS/worker-head-$call"
-  cp "$prompt" "$FIXTURE_COUNTERS/worker-prompt-$call.md"
-  [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]] || exit 94
-  [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
-    "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]] || exit 95
-  if [[ "$call" -gt 1 ]]; then
-    grep -q 'FINDING_ALPHA: replace the seeded implementation' "$prompt" || exit 96
-    if [[ "${FIXTURE_MODE:?}" == "accept" ]]; then
-      printf 'package widget\n// corrected after actionable audit feedback\n' \
-        >"$worktree/internal/widget/parser.go"
+write_result() {
+  [[ -n "$result_file" ]] || return 0
+  "$FIRST_AUDIT_PYTHON" - "$result_file" "$run_id" "$role" "$capability" "$output" <<'PY'
+import datetime
+import json
+import sys
+
+path, run_id, role, capability, output = sys.argv[1:]
+record = {
+    "schema": "singular.orchestration.runner-result.v0",
+    "contractVersion": 1,
+    "provider": "codex",
+    "runId": run_id,
+    "role": role,
+    "capabilityProfile": capability,
+    "exitCode": 0,
+    "outcome": "succeeded",
+    "failureClass": "none",
+    "providerErrorRef": None,
+    "outputRef": output,
+    "recordedAt": datetime.datetime.now(datetime.timezone.utc).replace(
+        microsecond=0).isoformat().replace("+00:00", "Z"),
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(record, handle)
+    handle.write("\n")
+PY
+}
+
+case "$role" in
+  supervisor)
+    printf '%s\n' '{"ok":true}' >"$output"
+    write_result
+    ;;
+  implementer)
+    [[ "$level" == "l2" && -d "$worktree" ]] || exit 93
+    [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]] || exit 94
+    [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
+      "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]] || exit 95
+    call="$(bump worker)"
+    cp "$prompt" "$FIRST_AUDIT_COUNTERS/worker-prompt-$call.md"
+    git -C "$worktree" rev-parse HEAD >"$FIRST_AUDIT_COUNTERS/worker-head-$call"
+    "$FIRST_AUDIT_PYTHON" - \
+      "${FIRST_AUDIT_LEASE:?}" \
+      "$FIRST_AUDIT_COUNTERS/worker-retry-$call" <<'PY'
+import json
+import sys
+
+lease = json.load(open(sys.argv[1], encoding="utf-8"))
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(str(lease.get("retryCount")) + "\n")
+PY
+    if [[ "$call" == "1" ]]; then
+      [[ "$(<"$FIRST_AUDIT_COUNTERS/worker-retry-1")" == "0" ]] || exit 96
+      grep -q 'seeded committed candidate' "$worktree/internal/widget/parser.go" || exit 97
+    else
+      [[ "$call" == "2" ]] || exit 98
+      [[ "$(<"$FIRST_AUDIT_COUNTERS/worker-retry-2")" == "1" ]] || exit 99
+      grep -q 'FINDING_ALPHA: replace the seeded implementation' "$prompt" || exit 100
+      if [[ "${FIRST_AUDIT_MODE:?}" == "accept" ]]; then
+        printf 'package widget\n// corrected after actionable audit feedback\n' \
+          >"$worktree/internal/widget/parser.go"
+      fi
     fi
-  fi
-  FIXTURE_OUTPUT="$output" FIXTURE_WORKTREE="$worktree" "$FIXTURE_PYTHON" - <<'PY'
+    if [[ "${FIRST_AUDIT_MODE:?}" == "no-output" ]]; then
+      rm -f "$output"
+      write_result
+      exit 0
+    fi
+    FIRST_AUDIT_OUTPUT="$output" FIRST_AUDIT_WORKTREE="$worktree" \
+      "$FIRST_AUDIT_PYTHON" - <<'PY'
 import json
 import os
 
@@ -165,9 +236,9 @@ record = {
     "role": "l2-developer",
     "status": "needs-review",
     "baseRef": "target",
-    "branch": "agent/widget/TASK-0001-generic",
+    "branch": "agent/widget/TASK-0001-frozen",
     "headSha": "uncommitted",
-    "workspace": os.environ["FIXTURE_WORKTREE"],
+    "workspace": os.environ["FIRST_AUDIT_WORKTREE"],
     "ownedFiles": ["internal/widget/parser.go"],
     "changedFiles": [],
     "commands": [],
@@ -177,201 +248,449 @@ record = {
     "nextAction": "await auditor verdict",
     "createdAt": "2026-09-12T00:00:00Z",
 }
-with open(os.environ["FIXTURE_OUTPUT"], "w", encoding="utf-8") as handle:
+with open(os.environ["FIRST_AUDIT_OUTPUT"], "w", encoding="utf-8") as handle:
     json.dump(record, handle)
     handle.write("\n")
 PY
-  exit 0
-fi
+    write_result
+    ;;
+  auditor)
+    call="$(bump auditor)"
+    host_report="$(dirname "$output")/audit-verification.json"
+    [[ -f "$host_report" ]] || exit 101
+    status="$($FIRST_AUDIT_PYTHON - "$host_report" <<'PY'
+import json
+import sys
 
-audit_count_path="${AUDIT_COUNT_FILE:?}"
-audit_count=0
-[[ -f "$audit_count_path" ]] && audit_count="$(<"$audit_count_path")"
-call=$((audit_count + 1))
-printf '%s\n' "$call" >"$audit_count_path"
-status=""
-if [[ -f "$prompt" ]]; then
-  status="$(sed -n 's/.*classification is `\([^`]*\)`.*/\1/p' "$prompt" | tail -1)"
-fi
-[[ -n "$status" ]] || status=passed
-verdict=needs-fix
-finding='FINDING_ALPHA: replace the seeded implementation'
-mode="$(<"${audit_count_path%/*}/mode")"
-if [[ "$mode" == "accept" && "$call" -gt 1 ]]; then
-  verdict=accepted
-  finding=""
-fi
-FIXTURE_OUTPUT="$output" FIXTURE_STATUS="$status" FIXTURE_VERDICT="$verdict" \
-  FIXTURE_FINDING="$finding" /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 - <<'PY'
+status = json.load(open(sys.argv[1], encoding="utf-8"))["outcome"]
+print("passed" if status == "passed-with-acknowledged-baseline" else status)
+PY
+)"
+    [[ "$status" == "passed" || "$status" == "not-rerun-evidence-verified" ]] || exit 102
+    verdict="needs-fix"
+    finding='FINDING_ALPHA: replace the seeded implementation'
+    if [[ "${FIRST_AUDIT_MODE:?}" == "accept" && "$call" -gt 1 ]]; then
+      verdict="accepted"
+      finding=""
+    elif [[ "${FIRST_AUDIT_MODE:?}" == "repeat" && "$call" -gt 1 ]]; then
+      finding='  FINDING_ALPHA:   replace the seeded implementation  '
+    fi
+    FIRST_AUDIT_OUTPUT="$output" FIRST_AUDIT_STATUS="$status" \
+      FIRST_AUDIT_VERDICT="$verdict" FIRST_AUDIT_FINDING="$finding" \
+      "$FIRST_AUDIT_PYTHON" - <<'PY'
 import json
 import os
 
-finding = os.environ["FIXTURE_FINDING"]
+finding = os.environ["FIRST_AUDIT_FINDING"]
 record = {
     "schema": "singular.orchestration.audit-verdict.v1",
     "taskId": "TASK-0001",
     "runId": "fixture-run",
-    "branch": "agent/widget/TASK-0001-generic",
-    "verdict": os.environ["FIXTURE_VERDICT"],
+    "branch": "agent/widget/TASK-0001-frozen",
+    "verdict": os.environ["FIRST_AUDIT_VERDICT"],
     "evidenceReviewed": ["evidence-manifest.json", "audit-verification.json"],
     "verificationResults": [{
-        "status": os.environ["FIXTURE_STATUS"],
+        "status": os.environ["FIRST_AUDIT_STATUS"],
         "command": "bash strict-gate.sh",
         "exitCode": 0,
         "evidenceRefs": ["audit-verification.json"],
-        "rationale": "matches the host-derived classification",
+        "rationale": "matches the exact host-derived classification",
     }],
     "commandsRun": [],
     "findings": [finding] if finding else [],
     "requiredFixes": [finding] if finding else [],
     "rationale": "fresh actionable audit" if finding else "fresh accepted audit",
 }
-with open(os.environ["FIXTURE_OUTPUT"], "w", encoding="utf-8") as handle:
+with open(os.environ["FIRST_AUDIT_OUTPUT"], "w", encoding="utf-8") as handle:
     json.dump(record, handle)
     handle.write("\n")
 PY
-exit 0
+    write_result
+    ;;
+  *) exit 103 ;;
+esac
 RUNNER
-chmod +x "$runner"
+  chmod +x "$runner"
+}
 
-prepare_case() {
-  local kind="${1:-seeded}"
-  rm -rf "$state/runs" "$state/leases" "$state/inbox" "$repo/.worktrees" "$counters"
-  mkdir -p "$state" "$counters"
-  : >"$state/events.ndjson"
-  git -C "$repo" worktree prune
-  git -C "$repo" branch -D "$worker_branch" >/dev/null 2>&1 || true
-  "$PYTHON_BIN" - "$tasks/TASK-0001.md" <<'PY'
+run_engine() {
+  (
+    cd "$FIXTURE_ROOT"
+    env "${BROKER_ENV[@]}" \
+      PATH="$(dirname "$BASH_BIN"):$(dirname "$PYTHON_BIN"):/usr/bin:/bin:${PATH:-}" \
+      PYTHONDONTWRITEBYTECODE=1 \
+      FIRST_AUDIT_PYTHON="$PYTHON_BIN" \
+      FIRST_AUDIT_MODE="$FIXTURE_MODE" \
+      FIRST_AUDIT_COUNTERS="$FIXTURE_COUNTERS" \
+      FIRST_AUDIT_LEASE="$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+      SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
+      SINGULAR_BASH_BIN="$BASH_BIN" \
+      SINGULAR_RUNNER="$FIXTURE_RUNNER" \
+      SINGULAR_CONFIG_FILE=/dev/null \
+      SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
+      SINGULAR_GENERATE=0 \
+      SINGULAR_AUTO_INTEGRATE=0 \
+      SINGULAR_AUTO_PROMOTE_GATES=0 \
+      SINGULAR_PUSH=0 \
+      SINGULAR_MAX_CONCURRENT=1 \
+      SINGULAR_MAX_DISPATCH=1 \
+      SINGULAR_DISK_RESERVE_BYTES=0 \
+      SINGULAR_ESTIMATED_WORKTREE_BYTES=1048576 \
+      SINGULAR_MIN_DISK_GB=0 \
+      SINGULAR_DETACHED_DISPATCH=0 \
+      SINGULAR_REQUIRE_AUDIT=1 \
+      SINGULAR_AUDIT_VERIFY=0 \
+      SINGULAR_WORKER_INFRA_MAX=0 \
+      SINGULAR_AUDIT_INFRA_MAX=0 \
+      SINGULAR_MAX_RETRIES="$CASE_MAX_RETRIES" \
+      SINGULAR_DECIDER_FAST=1 \
+      "$@"
+  )
+}
+
+make_fixture() {
+  local name="$1" mode="$2" max_retries="$3" risk_tier="$4"
+  FIXTURE_ROOT="$scratch/$name/repo"
+  FIXTURE_COUNTERS="$scratch/$name/counters"
+  FIXTURE_RUNNER="$scratch/$name/runner.sh"
+  FIXTURE_MODE="$mode"
+  CASE_MAX_RETRIES="$max_retries"
+  mkdir -p "$FIXTURE_ROOT/docs/orchestration/tasks" \
+    "$FIXTURE_ROOT/docs/orchestration/prompts" "$FIXTURE_COUNTERS"
+  git -C "$FIXTURE_ROOT" init -q
+  git -C "$FIXTURE_ROOT" checkout -q -b target
+  git -C "$FIXTURE_ROOT" config user.name first-audit-test
+  git -C "$FIXTURE_ROOT" config user.email first-audit@example.invalid
+  cp "$ENGINE_HOME/templates/prompts/l2-test-first-developer.md" \
+    "$FIXTURE_ROOT/docs/orchestration/prompts/"
+  cp "$ENGINE_HOME/templates/prompts/auditor.md" \
+    "$FIXTURE_ROOT/docs/orchestration/prompts/"
+  printf '# Fixture planner policy\n' >"$FIXTURE_ROOT/docs/orchestration/prompts/l1-planner.md"
+  printf '# Decider Prompt\n[TASK-ID] [FAILURE CLASS]\n' \
+    >"$FIXTURE_ROOT/docs/orchestration/prompts/decider.md"
+  cat >"$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<TASK
+# TASK-0001: Correct a committed candidate after fresh audit feedback
+
+Status: ready
+Area: widget
+Risk tier: $risk_tier
+Target branch: \`target\`
+Worker branch: \`agent/widget/TASK-0001-frozen\`
+Test policy: \`strict_test_first\`
+Gate command: \`bash strict-gate.sh\`
+Dispatch mode: canonical
+Depends on: []
+
+## Objective
+
+Correct the pre-existing widget candidate from fresh audit findings.
+
+## Scope
+
+Owned files:
+
+- \`internal/widget/parser.go\`
+
+Forbidden files:
+
+- Any file outside the owned scope.
+
+## Acceptance Criteria
+
+- The fresh audit finding is fixed in one bounded correcting pass.
+TASK
+  cat >"$FIXTURE_ROOT/strict-gate.sh" <<'GATE'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]]
+[[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
+  "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]]
+printf '%s\n' '{"schema":"singular.orchestration.gate-observation.v0","failures":[]}' \
+  >"${SINGULAR_GATE_REPORT_FILE:?}"
+GATE
+  chmod +x "$FIXTURE_ROOT/strict-gate.sh"
+  write_runner "$FIXTURE_RUNNER"
+  printf '.singular-state/\n.worktrees/\n.singular-evidence/\n' >"$FIXTURE_ROOT/.gitignore"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/singular.config.json" "$FIXTURE_RUNNER" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schemaVersion": "v2",
+        "targetBranch": "target",
+        "gateCommand": "bash strict-gate.sh",
+        "runner": sys.argv[2],
+        "bootstrap": {"required": False, "commands": []},
+    }, handle)
+    handle.write("\n")
+PY
+  run_engine "$BASH_BIN" -c \
+    '. "$1"; singular_ensure_state_dirs; singular_ensure_repo_scaffold' \
+    fixture "$ENGINE_HOME/engine/lib.sh"
+  git -C "$FIXTURE_ROOT" add .
+  git -C "$FIXTURE_ROOT" commit -qm 'first-audit frozen fixture baseline'
+
+  local seed="$scratch/$name/seed"
+  git -C "$FIXTURE_ROOT" worktree add -q -b "$worker_branch" "$seed" target
+  mkdir -p "$seed/internal/widget"
+  printf 'package widget\n// seeded committed candidate\n' >"$seed/internal/widget/parser.go"
+  git -C "$seed" add internal/widget/parser.go
+  git -C "$seed" commit -qm 'seed committed candidate'
+  SEED_HEAD="$(git -C "$seed" rev-parse HEAD)"
+  git -C "$FIXTURE_ROOT" worktree remove "$seed"
+
+  run_engine "$BASH_BIN" "$ENGINE_HOME/engine/campaign.sh" start \
+    --id "first-audit-$name" >"$scratch/$name/campaign-start.raw.log" 2>&1 \
+    || { cat "$scratch/$name/campaign-start.raw.log" >&2; fail "$name campaign did not start"; }
+  run_engine "$BASH_BIN" "$ENGINE_HOME/engine/campaign.sh" verify --quiet \
+    || fail "$name frozen campaign did not verify"
+  CAMPAIGN_BINDING="$(run_engine "$BASH_BIN" -c \
+    '. "$1"; singular_campaign_binding' fixture "$ENGINE_HOME/engine/lib.sh")"
+  ENGINE_FINGERPRINT="$(run_engine "$BASH_BIN" -c \
+    '. "$1"; singular_campaign_engine_source_fingerprint' fixture "$ENGINE_HOME/engine/lib.sh")"
+  CONFIG_SHA="$(sha256_file "$FIXTURE_ROOT/singular.config.json")"
+  RUNNER_SHA="$(sha256_file "$FIXTURE_RUNNER")"
+  [[ "$CAMPAIGN_BINDING" == campaign:first-audit-"$name":sha256:* ]] \
+    || fail "$name did not establish a content-addressed campaign binding"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" \
+    "$FIXTURE_ROOT/singular.config.json" "$FIXTURE_RUNNER" "$CONFIG_SHA" \
+    "$RUNNER_SHA" "$ENGINE_FINGERPRINT" "first-audit-$name" <<'PY'
+import json
+import os
+import sys
+
+(manifest_path, config_path, runner_path, config_sha, runner_sha,
+ engine_fingerprint, campaign_id) = sys.argv[1:]
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+assert manifest["campaignId"] == campaign_id, manifest
+assert os.path.realpath(manifest["configuration"]["json"]["path"]) == os.path.realpath(config_path), manifest
+assert manifest["configuration"]["json"]["sha256"] == config_sha, manifest
+assert os.path.realpath(manifest["runner"]["path"]) == os.path.realpath(runner_path), manifest
+assert manifest["runner"]["sha256"] == runner_sha, manifest
+assert manifest["engine"]["sourceFingerprint"] == engine_fingerprint, manifest
+assert os.path.isfile(manifest_path), manifest_path
+PY
+}
+
+reconcile() {
+  local name="$1" label="$2" rc=0
+  run_engine "$BASH_BIN" "$ENGINE_HOME/engine/reconcile.sh" --actuate \
+    >"$scratch/$name/$label.raw.log" 2>&1 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    cat "$scratch/$name/$label.raw.log" >&2
+    fail "$name/$label reconcile returned $rc"
+  fi
+}
+
+calls() {
+  local role="$1" path="$FIXTURE_COUNTERS/$1-calls"
+  [[ -f "$path" ]] && cat "$path" || printf '0\n'
+}
+
+set_task_ready() {
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<'PY'
 import re
 import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-text = re.sub(r"^Status: \S+", "Status: ready", text, count=1, flags=re.M)
-open(path, "w", encoding="utf-8").write(text)
+text = re.sub(r"^Status:\s*`?[^`\n]+`?\s*$", "Status: ready", text,
+              count=1, flags=re.MULTILINE | re.IGNORECASE)
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text)
 PY
-  seed="$scratch/seed"
-  rm -rf "$seed"
-  if [[ "$kind" == "empty" ]]; then
-    git -C "$repo" branch "$worker_branch" target
-    seed_head="$(git -C "$repo" rev-parse "$worker_branch")"
-    return 0
-  fi
-  git -C "$repo" worktree add -q -b "$worker_branch" "$seed" target
-  mkdir -p "$seed/internal/widget"
-  printf 'package widget\n// seeded committed candidate\n' >"$seed/internal/widget/parser.go"
-  git -C "$seed" add internal/widget/parser.go
-  git -C "$seed" -c user.name=fixture -c user.email=fixture@example.invalid \
-    commit -qm 'seed committed candidate'
-  seed_head="$(git -C "$seed" rev-parse HEAD)"
-  git -C "$repo" worktree remove "$seed"
 }
 
-run_drive() {
-  env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$socketless_fixture" FIXTURE_PYTHON="$PYTHON_BIN" \
-    FIXTURE_COUNTERS="$counters" SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$state" \
-    AUDIT_COUNT_FILE="$counters/auditor-calls" \
-    SINGULAR_ORCH_DIR="$repo/docs/orchestration" SINGULAR_TASKS_DIR="$tasks" \
-    SINGULAR_LEASES_DIR="$state/leases" SINGULAR_INBOX_DIR="$state/inbox" \
-    SINGULAR_RUNS_DIR="$state/runs" SINGULAR_WORKTREES_DIR="$repo/.worktrees" \
-    SINGULAR_EVENTS_FILE="$state/events.ndjson" SINGULAR_TARGET_BRANCH=target \
-    SINGULAR_RUNNER="$runner" SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
-    SINGULAR_DECIDER_FAST=1 "$@" "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001
+assert_attempt_count() {
+  local expected="$1" actual
+  actual="$("$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/runs" <<'PY'
+import json
+import pathlib
+import sys
+
+count = 0
+for path in pathlib.Path(sys.argv[1]).glob("*/attempts/index.json"):
+    data = json.load(open(path, encoding="utf-8"))
+    if data.get("taskId") == "TASK-0001":
+        count += len(data.get("attempts", []))
+print(count)
+PY
+)"
+  assert_eq "$actual" "$expected" "durable attempt archive count"
 }
 
-single_run_assertions() {
-  local expected_retry="$1" expected_workers="$2" expected_auditors="$3"
-  assert_eq "$(<"$counters/worker-calls")" "$expected_workers" "worker invocation count"
-  assert_eq "$(<"$counters/auditor-calls")" "$expected_auditors" "auditor invocation count"
-  lease="$state/leases/TASK-0001.json"
-  "$PYTHON_BIN" - "$lease" "$expected_retry" <<'PY'
+assert_terminal_contract() {
+  local kind="$1" failure_class="$2" action="$3" expected_retry="$4"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+    "$FIXTURE_ROOT/.singular-state/dispatch/TASK-0001.json" \
+    "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" \
+    "$kind" "$failure_class" "$action" "$expected_retry" \
+    "$CAMPAIGN_BINDING" "$ENGINE_FINGERPRINT" "$CONFIG_SHA" <<'PY'
 import json
 import sys
 
-lease = json.load(open(sys.argv[1], encoding="utf-8"))
-assert lease["retryCount"] == int(sys.argv[2]), lease
-assert lease["maxRetries"] in {0, 1}, lease
+(lease_path, dispatch_path, manifest_path, kind, failure_class, action,
+ expected_retry, campaign_binding, engine_fingerprint, config_sha) = sys.argv[1:]
+lease = json.load(open(lease_path, encoding="utf-8"))
+dispatch = json.load(open(dispatch_path, encoding="utf-8"))
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+terminal = lease["terminalDisposition"]
+attempt = lease["attemptLifecycle"]
+dispatch_attempt = dispatch["attemptLifecycle"]
+assert lease["retryCount"] == int(expected_retry), lease
+assert terminal["schema"] == "singular.orchestration.terminal-disposition.v0", terminal
+assert terminal["kind"] == kind, terminal
+assert terminal.get("failureClass", "") == failure_class, terminal
+assert terminal["action"] == action, terminal
+assert terminal["campaignBinding"] == campaign_binding, terminal
+assert dispatch["campaignBinding"] == campaign_binding, dispatch
+assert lease["campaignBinding"] == campaign_binding, lease
+assert manifest["engine"]["sourceFingerprint"] == engine_fingerprint, manifest
+assert manifest["configuration"]["json"]["sha256"] == config_sha, manifest
+for record in (attempt, dispatch_attempt):
+    assert record["schema"] == "singular.orchestration.attempt-lifecycle.v0", record
+    assert record["taskId"] == "TASK-0001", record
+    assert record["state"] == "terminal", record
+    assert record["disposition"] == kind, record
+    assert record.get("failureClass", "") == failure_class, record
+    assert record["action"] == action, record
+    assert record["runId"] == terminal["runId"], (record, terminal)
+    assert record["reservationOwner"] == terminal["reservationOwner"], (record, terminal)
+    assert record["reservationGeneration"] == terminal["reservationGeneration"], (record, terminal)
+    assert record["campaignBinding"] == campaign_binding, record
+assert attempt == dispatch_attempt, (attempt, dispatch_attempt)
+assert terminal["reservationGeneration"] == 1, terminal
+assert dispatch["reservationGeneration"] == 1, dispatch
+assert dispatch["state"] == "reaped", dispatch
 PY
-  events="$(<"$state/events.ndjson")"
-  dispatches="$(grep -c '"type":"l1.dispatch_started"' "$state/events.ndjson" || true)"
-  assert_eq "$dispatches" 1 "single L1 dispatch"
 }
 
-# A committed candidate gets a fresh actionable audit after the first no-op
-# worker. One durable repair is charged before a correcting worker sees the
-# finding, changes the candidate, and receives a fresh accepted audit.
-prepare_case
-printf '%s\n' accept >"$counters/mode"
-if ! output="$(run_drive env FIXTURE_MODE=accept SINGULAR_MAX_RETRIES=1 2>&1)"; then
-  fail "actionable first audit did not reach one correcting pass: $output"
-fi
-single_run_assertions 1 2 2
-events="$(<"$state/events.ndjson")"
-assert_contains "$events" '"type":"l1.no_changes_reconciled"' "preseeded no-op reconciled"
-assert_contains "$events" '"type":"l1.actionable_audit_correction_eligible"' \
-  "fresh normalized audit feedback crossed the unchanged guard"
-assert_contains "$events" '"type":"l1.product_repair_budget_consumed"' "repair charged"
-assert_contains "$events" '"type":"l1.task_accepted"' "corrected candidate accepted"
-assert_eq "$(<"$counters/worker-head-1")" "$seed_head" "first worker saw preseeded commit"
-final_head="$(git -C "$repo/.worktrees/TASK-0001" rev-parse HEAD)"
-[[ "$final_head" != "$seed_head" ]] || fail "correcting worker did not create a fresh candidate"
-grep -q 'corrected after actionable audit feedback' \
-  "$repo/.worktrees/TASK-0001/internal/widget/parser.go" \
-  || fail "corrected candidate bytes missing"
+finish_and_prove_no_redispatch() {
+  local name="$1" workers="$2" auditors="$3"
+  reconcile "$name" terminal-reap
+  set_task_ready
+  reconcile "$name" terminal-reentry-one
+  reconcile "$name" terminal-reentry-two
+  assert_eq "$(calls worker)" "$workers" "$name terminal worker count"
+  assert_eq "$(calls auditor)" "$auditors" "$name terminal auditor count"
+  assert_eq "$(find "$FIXTURE_ROOT/.singular-state/dispatch" -name 'TASK-0001.json' \
+    -type f | wc -l | tr -d '[:space:]')" "1" "$name single dispatch record"
+  run_engine "$BASH_BIN" "$ENGINE_HOME/engine/campaign.sh" verify --quiet \
+    || fail "$name campaign identity drifted"
+  assert_contains "$(cat "$scratch/$name/terminal-reentry-one.raw.log" \
+    "$scratch/$name/terminal-reentry-two.raw.log")" \
+    'reservation refused for TASK-0001' "$name durable terminal reservation refusal"
+}
 
-# If the correcting worker is also a no-op and the fresh audit repeats the
-# normalized finding on the exact candidate, park after the paid correction;
-# do not dispatch a third worker or reset the durable retry.
-prepare_case
-printf '%s\n' repeat >"$counters/mode"
-rc=0
-output="$(run_drive env FIXTURE_MODE=repeat SINGULAR_MAX_RETRIES=1 2>&1)" || rc=$?
-[[ "$rc" -ne 0 ]] || fail "repeated unchanged findings unexpectedly accepted"
-single_run_assertions 1 2 2
-events="$(<"$state/events.ndjson")"
-assert_contains "$events" '"type":"l1.identical_findings_parked"' \
-  "exact candidate and repeated normalized findings parked"
-assert_eq "$(git -C "$repo/.worktrees/TASK-0001" rev-parse HEAD)" "$seed_head" \
-  "no-op correction kept exact candidate"
+test_corrected_after_fresh_audit() {
+  local name=corrected
+  make_fixture "$name" accept 1 normal
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "2" "$name worker calls"
+  assert_eq "$(calls auditor)" "2" "$name fresh auditor calls"
+  assert_eq "$(<"$FIXTURE_COUNTERS/worker-head-1")" "$SEED_HEAD" \
+    "$name first worker saw preseeded commit"
+  assert_eq "$(<"$FIXTURE_COUNTERS/worker-retry-1")" "0" \
+    "$name initial pass accounting"
+  assert_eq "$(<"$FIXTURE_COUNTERS/worker-retry-2")" "1" \
+    "$name correction charged before worker"
+  local events
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.no_changes_reconciled"' \
+    "$name preseeded no-edit reconciliation"
+  assert_contains "$events" '"type":"l1.actionable_audit_correction_eligible"' \
+    "$name fresh findings correction eligibility"
+  assert_contains "$events" '"type":"l1.product_repair_budget_consumed"' \
+    "$name durable retry 0 to 1"
+  assert_contains "$events" '"type":"l1.task_accepted"' "$name accepted correction"
+  assert_not_contains "$events" '"type":"l1.identical_findings_parked"' \
+    "$name accepted path did not repeat findings"
+  grep -q 'corrected after actionable audit feedback' \
+    "$FIXTURE_ROOT/.worktrees/TASK-0001/internal/widget/parser.go" \
+    || fail "$name corrected candidate bytes missing"
+  assert_attempt_count 2
+  finish_and_prove_no_redispatch "$name" 2 2
+  assert_terminal_contract completed "" accepted 1
+  echo "ok: frozen preseed -> no-edit -> fresh needs-fix -> charged correction -> fresh accept"
+}
 
-# A zero-repair policy still permits the initial fresh audit but cannot invoke
-# a corrective worker or mint/reset durable budget.
-prepare_case
-printf '%s\n' accept >"$counters/mode"
-rc=0
-output="$(run_drive env FIXTURE_MODE=accept SINGULAR_MAX_RETRIES=0 2>&1)" || rc=$?
-[[ "$rc" -ne 0 ]] || fail "max-zero actionable audit unexpectedly accepted"
-single_run_assertions 0 1 1
-events="$(<"$state/events.ndjson")"
-assert_contains "$events" '"type":"l1.product_repair_budget_exhausted"' \
-  "max-zero audit correction terminated durably"
-[[ "$events" != *'"type":"l1.product_repair_budget_consumed"'* ]] \
-  || fail "max-zero case consumed a nonexistent repair"
+test_max_zero_is_terminal() {
+  local name=max-zero
+  make_fixture "$name" repeat 0 normal
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "1" "$name initial worker calls"
+  assert_eq "$(calls auditor)" "1" "$name initial auditor calls"
+  local events
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.actionable_audit_correction_eligible"' \
+    "$name fresh audit still ran"
+  assert_contains "$events" '"type":"l1.product_repair_budget_exhausted"' \
+    "$name zero repair terminal"
+  assert_not_contains "$events" '"type":"l1.product_repair_budget_consumed"' \
+    "$name cannot consume nonexistent repair"
+  assert_attempt_count 1
+  finish_and_prove_no_redispatch "$name" 1 1
+  assert_terminal_contract blocked audit-needs-fix escalate-parked 0
+  echo "ok: max-zero fresh audit terminates durably and reconciliation cannot mint a pass"
+}
 
-# A genuinely empty initial worker on the target candidate still stops at the
-# original no-changes/unchanged-candidate guard, before audit or repair spend.
-prepare_case empty
-printf '%s\n' repeat >"$counters/mode"
-rc=0
-output="$(run_drive env FIXTURE_MODE=repeat SINGULAR_MAX_RETRIES=1 2>&1)" || rc=$?
-[[ "$rc" -ne 0 ]] || fail "empty fresh worker unexpectedly accepted"
-assert_eq "$(<"$counters/worker-calls")" 1 "empty fresh worker invocation count"
-[[ ! -e "$counters/auditor-calls" ]] || fail "empty fresh worker reached the auditor"
-lease="$state/leases/TASK-0001.json"
-"$PYTHON_BIN" - "$lease" <<'PY'
-import json
-import sys
+test_repeated_findings_stop_with_budget_left() {
+  local name=repeated
+  make_fixture "$name" repeat 2 high
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "2" "$name worker calls"
+  assert_eq "$(calls auditor)" "2" "$name auditor calls"
+  assert_eq "$(<"$FIXTURE_COUNTERS/worker-retry-2")" "1" \
+    "$name correction charged before second worker"
+  local events
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.identical_findings_parked"' \
+    "$name normalized repeated findings guard"
+  assert_contains "$events" '"productRepairMax":2' \
+    "$name retained nominal high-risk repair headroom"
+  assert_eq "$(git -C "$FIXTURE_ROOT/.worktrees/TASK-0001" rev-parse HEAD)" \
+    "$SEED_HEAD" "$name no-op correction kept exact candidate"
+  assert_attempt_count 2
+  finish_and_prove_no_redispatch "$name" 2 2
+  assert_terminal_contract blocked audit-needs-fix escalate-parked 1
+  echo "ok: normalized repeated findings park before a third pass despite budget headroom"
+}
 
-lease = json.load(open(sys.argv[1], encoding="utf-8"))
-assert lease["retryCount"] == 0, lease
-assert lease["maxRetries"] == 1, lease
-PY
-events="$(<"$state/events.ndjson")"
-assert_contains "$events" '"type":"l1.unchanged_candidate_parked"' \
-  "real no-changes guard remained active"
-assert_contains "$events" '"failureClass":"no-changes"' \
-  "real no-changes failure remained classified"
-assert_eq "$(grep -c '"type":"l1.dispatch_started"' "$state/events.ndjson" || true)" 1 \
-  "empty fresh case single dispatch"
+test_no_output_stays_fail_closed() {
+  local name=no-output
+  make_fixture "$name" no-output 1 normal
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "1" "$name worker calls"
+  assert_eq "$(calls auditor)" "0" "$name auditor calls"
+  local events
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.unchanged_candidate_parked"' \
+    "$name unchanged no-output guard"
+  assert_contains "$events" '"failureClass":"worker-no-packet"' \
+    "$name output failure classification"
+  assert_not_contains "$events" '"type":"worker.infra_retry"' \
+    "$name no-output is not infrastructure"
+  assert_not_contains "$events" '"type":"l1.product_repair_budget_consumed"' \
+    "$name no-output did not spend repair"
+  assert_attempt_count 1
+  finish_and_prove_no_redispatch "$name" 1 0
+  assert_terminal_contract blocked worker-no-packet escalate-parked 0
+  echo "ok: frozen rc-zero no-output remains fail-closed without audit or repair spend"
+}
 
-echo "PASS: test-first-audit-correction"
+echo "NOTE: deterministic fixture provider; this test is not live unattended-provider evidence"
+case "${FIRST_AUDIT_CASE:-all}" in
+  corrected) test_corrected_after_fresh_audit ;;
+  max-zero) test_max_zero_is_terminal ;;
+  repeated) test_repeated_findings_stop_with_budget_left ;;
+  no-output) test_no_output_stays_fail_closed ;;
+  all)
+    test_corrected_after_fresh_audit
+    test_max_zero_is_terminal
+    test_repeated_findings_stop_with_budget_left
+    test_no_output_stays_fail_closed
+    ;;
+  *) fail "unknown FIRST_AUDIT_CASE=${FIRST_AUDIT_CASE}" ;;
+esac
+echo "PASS: test-first-audit-correction (frozen campaign lifecycle)"
