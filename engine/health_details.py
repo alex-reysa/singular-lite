@@ -204,6 +204,32 @@ def collect_lifecycle(tasks: Path, state: Path) -> dict[str, Any]:
     }
 
 
+def unavailable_lifecycle(
+    configuration: dict[str, Any], generation: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Fail-closed lifecycle envelope when durable roots were not resolved."""
+    reason = str(configuration.get("reason") or "configuration-unavailable")
+    return {
+        "schema": "singular.orchestration.lifecycle-diagnostics.v1",
+        "configuration": configuration,
+        "generation": generation or {},
+        "paths": {},
+        "active": [],
+        "activeCount": 0,
+        "phaseCounts": {},
+        "implementersActive": 0,
+        "candidates": [],
+        "preservedAttempts": [],
+        "unknownRecords": [{
+            "kind": "configuration",
+            "record": "startup-resolution",
+            "status": reason,
+            "restartRequired": bool(configuration.get("restartRequired")),
+        }],
+        "sources": {"runs": "unknown", "leases": "unknown", "tasks": "unknown"},
+    }
+
+
 def _bounded_text(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
 

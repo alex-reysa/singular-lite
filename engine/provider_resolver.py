@@ -251,6 +251,67 @@ def load_json_config(
     return loaded, resolution
 
 
+def unavailable_effective_configuration(
+    repo: Path | str,
+    env: Mapping[str, str],
+    message: str,
+    *,
+    reason: str = "configuration-unavailable",
+    resolution: JsonConfigResolution | None = None,
+) -> dict[str, Any]:
+    """Return the single fail-closed projection used after resolution failure.
+
+    Selected input provenance remains diagnostic evidence, but runner/provider,
+    model and durable path authority are deliberately unknown.  In particular,
+    inherited environment values are not an effective runtime after lib.sh
+    failed before completing its precedence chain.
+    """
+    root = Path(repo).resolve()
+    selected = resolution or resolve_json_config(root, env)
+
+    def diagnostic_path(raw: str, fallback: Path) -> str:
+        path = Path(raw).expanduser() if raw else fallback
+        if not path.is_absolute():
+            path = root / path
+        return str(path.resolve())
+
+    shell_raw = str(env.get("SINGULAR_CONFIG_FILE", "") or "").strip()
+    local_raw = str(env.get("SINGULAR_LOCAL_CONFIG_FILE", "") or "").strip()
+    engine_raw = str(env.get("SINGULAR_ENGINE_HOME", "") or "").strip()
+    return {
+        "schema": "singular.effective-configuration.v1",
+        "configuration": {
+            "path": str(selected.path),
+            "source": selected.source,
+            "status": "error",
+            "reason": reason,
+            "message": message,
+        },
+        "configurationLayers": {
+            "json": str(selected.path),
+            "shell": diagnostic_path(shell_raw, root / "singular.config.sh"),
+            # The default local layer depends on the unresolved state root.  Only
+            # an explicit selector is safe to report as input provenance.
+            "local": diagnostic_path(local_raw, root) if local_raw else None,
+            "engine": diagnostic_path(
+                engine_raw, Path(__file__).resolve().parent.parent
+            ),
+        },
+        "generation": {
+            "id": None,
+            "status": "unavailable",
+            "restartRequired": False,
+        },
+        "runner": None,
+        "provider": "unknown",
+        "targetBranch": None,
+        "paths": {"root": str(root), "tasks": None, "state": None},
+        "roles": {},
+        "settings": {},
+        "providerRuntime": {},
+    }
+
+
 def normalize_codex_role(role: str) -> str:
     value = str(role or "").strip().lower().replace("_", "-")
     return CODEX_ROLE_ALIASES.get(value, value)
@@ -322,6 +383,10 @@ def effective_configuration(
             status, error = "ok", ""
         except ConfigResolutionError as exc:
             config, status, error = {}, "error", str(exc)
+    if status == "error":
+        return unavailable_effective_configuration(
+            root, env, error, reason="json-configuration-error", resolution=resolution
+        )
     effective_env = {str(key): str(value) for key, value in env.items()}
     config_env = config.get("env") if isinstance(config.get("env"), dict) else {}
     if not environment_is_effective:

@@ -125,6 +125,57 @@ assert all(role["model"] is None and role["reasoningEffort"] is None
            for role in doc["roles"].values()), doc
 PY
 
+custom_doctor="$(env SINGULAR_ENGINE_HOME="$ROOT" \
+  SINGULAR_RUNNER="$repo/custom-runner/codex-run.sh" HOME="$tmp/home" \
+  python3 "$ROOT/engine/doctor.py" --engine-home "$ROOT" --repo-root "$repo" \
+    --bash /opt/homebrew/bin/bash --bash-version 5.3 --json 2>/dev/null || true)"
+python3 - "$custom_doctor" <<'PY' || fail "doctor guessed provider from custom basename"
+import json, sys
+report = json.loads(sys.argv[1])
+selected = next(row for row in report["checks"] if row["id"] == "runner.selected")
+assert selected["details"]["provider"] == "custom", selected
+assert report["effectiveConfiguration"]["provider"] == "unknown", report
+assert report["effectiveConfiguration"]["roles"], report
+assert all(row["model"] is None for row in report["effectiveConfiguration"]["roles"].values())
+assert not any(row["id"].startswith("model.selection.") for row in report["checks"]), report
+PY
+
+absent_repo="$tmp/absent optional"
+mkdir -p "$absent_repo/shell state" "$absent_repo/local tasks" \
+  "$absent_repo/docs/orchestration"
+git -C "$absent_repo" init -q
+git -C "$absent_repo" -c user.name=test -c user.email=test@example.com \
+  commit -q --allow-empty -m init
+printf '%s\n' '{"schema":"singular.orchestration.dag.v0","nodes":[]}' \
+  >"$absent_repo/docs/orchestration/dag.v0.json"
+printf '%s\n' "export SINGULAR_STATE_DIR='shell state' SINGULAR_CODEX_MODEL='shell-model'" \
+  >"$absent_repo/singular.config.sh"
+printf '%s\n' "export SINGULAR_TASKS_DIR='local tasks'" \
+  >"$absent_repo/shell state/config.local.sh"
+absent_doctor="$(cd / && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
+  SINGULAR_CODEX_BIN=/bin/true python3 "$ROOT/engine/doctor.py" --engine-home "$ROOT" \
+  --repo-root "$absent_repo" --bash /opt/homebrew/bin/bash --bash-version 5.3 \
+  --json 2>/dev/null || true)"
+absent_console="$(cd / && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
+  SINGULAR_CODEX_BIN=/bin/true python3 "$ROOT/plugin/scripts/singular_graph_server.py" \
+  --repo "$absent_repo" --config)"
+python3 - "$absent_doctor" "$absent_console" "$absent_repo" <<'PY' \
+  || fail "absent optional JSON became an explicit selector"
+import json, os, sys
+doctor, console = map(json.loads, sys.argv[1:3])
+root = os.path.realpath(sys.argv[3])
+for view in (doctor["effectiveConfiguration"], console):
+    assert view["configuration"]["status"] == "absent", view
+    assert view["configuration"]["source"] == "default", view
+    assert view["paths"]["state"] == os.path.join(root, "shell state"), view
+    assert view["paths"]["tasks"] == os.path.join(root, "local tasks"), view
+    assert view["roles"]["implementer"]["model"] == "shell-model", view
+repo_check = next(row for row in doctor["checks"] if row["id"] == "repo.config")
+assert repo_check["status"] == "warn", repo_check
+load = next(row for row in doctor["checks"] if row["id"] == "runtime.config-load")
+assert load["status"] == "pass", load
+PY
+
 for bad in missing.json malformed.json; do
   [[ "$bad" != malformed.json ]] || printf '{bad\n' >"$repo/$bad"
   report="$(env SINGULAR_JSON_CONFIG_FILE="$bad" SINGULAR_CODEX_BIN=/bin/true \
@@ -136,6 +187,89 @@ report = json.loads(sys.argv[1])
 item = next(row for row in report["checks"] if row["id"] == "repo.config")
 assert item["status"] == "fail", item
 assert os.path.realpath(sys.argv[2]) in item["message"], item
+PY
+done
+
+# Failed configuration never lends authority to inherited defaults or guessed
+# lifecycle roots. Exercise the actual fresh-process doctor, console and CLI
+# entrypoints for ordinary errexit failures as well as explicit exits and bad
+# selected JSON.
+PY=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+BASH_BIN=/opt/homebrew/bin/bash
+for mode in malformed missing-selected shell-false shell-exit local-false local-exit; do
+  bad_repo="$tmp/failure-$mode"
+  mkdir -p "$bad_repo/docs/orchestration/tasks" "$bad_repo/.singular-state/runs" \
+    "$bad_repo/.singular-state/leases" "$bad_repo/json tasks" "$bad_repo/json state"
+  git -C "$bad_repo" init -q
+  git -C "$bad_repo" -c user.name=test -c user.email=test@example.com \
+    commit -q --allow-empty -m init
+  printf '%s\n' '{"schema":"singular.orchestration.dag.v0","nodes":[]}' \
+    >"$bad_repo/docs/orchestration/dag.v0.json"
+  printf '%s\n' '{"schemaVersion":"v2","runner":"codex-run.sh","env":{"SINGULAR_CODEX_MODEL":"json-model","SINGULAR_TASKS_DIR":"json tasks","SINGULAR_STATE_DIR":"json state"}}' \
+    >"$bad_repo/singular.config.json"
+  selector_args=()
+  local_args=()
+  case "$mode" in
+    malformed) printf '%s\n' '{bad' >"$bad_repo/singular.config.json" ;;
+    missing-selected) selector_args=(SINGULAR_JSON_CONFIG_FILE=missing.json) ;;
+    shell-false) printf '%s\n' false >"$bad_repo/singular.config.sh" ;;
+    shell-exit) printf '%s\n' 'exit 7' >"$bad_repo/singular.config.sh" ;;
+    local-false)
+      printf '%s\n' false >"$bad_repo/local.sh"
+      local_args=(SINGULAR_LOCAL_CONFIG_FILE=local.sh)
+      ;;
+    local-exit)
+      printf '%s\n' 'exit 8' >"$bad_repo/local.sh"
+      local_args=(SINGULAR_LOCAL_CONFIG_FILE=local.sh)
+      ;;
+  esac
+  common=(env PYTHONDONTWRITEBYTECODE=1 HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
+    SINGULAR_CODEX_BIN=/definitely/missing SINGULAR_CODEX_MODEL=inherited-model \
+    "${selector_args[@]}" "${local_args[@]}")
+  set +e
+  (cd / && "${common[@]}" "$PY" "$ROOT/engine/doctor.py" --engine-home "$ROOT" \
+    --repo-root "$bad_repo" --bash "$BASH_BIN" --bash-version 5.3 --json \
+    >"$tmp/$mode-doctor.json" 2>"$tmp/$mode-doctor.stderr")
+  doctor_rc=$?
+  (cd / && "${common[@]}" "$PY" "$ROOT/plugin/scripts/singular_graph_server.py" \
+    --repo "$bad_repo" --config >"$tmp/$mode-console.json" 2>"$tmp/$mode-console.stderr")
+  console_rc=$?
+  (cd / && "${common[@]}" "$PY" "$ROOT/plugin/scripts/singular_graph_server.py" \
+    --repo "$bad_repo" --lifecycle >"$tmp/$mode-lifecycle.json" 2>"$tmp/$mode-lifecycle.stderr")
+  lifecycle_rc=$?
+  (cd "$bad_repo" && "${common[@]}" "$BASH_BIN" "$ROOT/cli/singular" health --json \
+    >"$tmp/$mode-cli.stdout" 2>"$tmp/$mode-cli.stderr")
+  cli_rc=$?
+  set -e
+  [[ "$doctor_rc" -eq 1 ]] || fail "$mode doctor exited $doctor_rc, expected 1"
+  [[ "$console_rc" -eq 0 && "$lifecycle_rc" -eq 0 ]] \
+    || fail "$mode console entrypoint failed unexpectedly"
+  [[ "$cli_rc" -ne 0 ]] || fail "$mode CLI health fabricated a successful startup"
+  "$PY" - "$mode" "$tmp/$mode-doctor.json" "$tmp/$mode-console.json" \
+    "$tmp/$mode-lifecycle.json" <<'PY' || fail "$mode exposed authority after failed resolution"
+import json, sys
+mode = sys.argv[1]
+doctor, console, lifecycle = (
+    json.load(open(path, encoding="utf-8")) for path in sys.argv[2:5]
+)
+effective = doctor["effectiveConfiguration"]
+for view in (effective, console):
+    assert view["configuration"]["status"] == "error", (mode, view)
+    assert view["provider"] == "unknown", (mode, view)
+    assert view["runner"] is None, (mode, view)
+    assert view["roles"] == {}, (mode, view)
+    assert view["paths"].get("tasks") is None, (mode, view)
+    assert view["paths"].get("state") is None, (mode, view)
+assert effective["generation"]["status"] == "unavailable", (mode, effective)
+assert console["generation"]["status"] == "unavailable", (mode, console)
+assert lifecycle["paths"] == {}, (mode, lifecycle)
+assert lifecycle["sources"] == {"runs":"unknown","leases":"unknown","tasks":"unknown"}, (mode, lifecycle)
+assert lifecycle["unknownRecords"], (mode, lifecycle)
+config_load = next(row for row in doctor["checks"] if row["id"] == "runtime.config-load")
+assert config_load["status"] == "fail", (mode, config_load)
+for ident in ("runner.selected", "provider.executable", "model.availability", "governance.posture"):
+    rows = [row for row in doctor["checks"] if row["id"] == ident]
+    assert rows and all(row["status"] == "skip" for row in rows), (mode, ident, rows)
 PY
 done
 

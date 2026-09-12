@@ -441,6 +441,11 @@ def run_command(repo: Path, cmd: list[str], timeout: int = 12) -> dict[str, Any]
         )
     except FileNotFoundError as exc:
         return {"ok": False, "exit": 127, "stdout": "", "stderr": str(exc), "cmd": cmd}
+    except OSError as exc:
+        # Sandboxes may expose an executable path but deny execve (notably ps).
+        # A read-only dashboard probe is unavailable in that case; it must not
+        # crash the complete snapshot or masquerade as product state.
+        return {"ok": False, "exit": 126, "stdout": "", "stderr": str(exc), "cmd": cmd}
     except subprocess.TimeoutExpired as exc:
         return {
             "ok": False,
@@ -523,7 +528,7 @@ def _configured_path(repo: Path, env_key: str, fallback: str) -> Path:
     configuration = effective.get("configuration") or {}
     if (configuration.get("status") == "error"
             and configuration.get("reason") != "configuration-not-initialized"):
-        raise ConfigurationUnavailable(configuration)
+        raise ConfigurationUnavailable(configuration, effective.get("generation"))
     path_key = "state" if env_key == "SINGULAR_STATE_DIR" else "tasks"
     raw = str((effective.get("paths") or {}).get(path_key) or "").strip()
     if not raw:
@@ -1816,6 +1821,7 @@ def collect_snapshot(repo: Path) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "schema": "singular.codex.orchestration-graph.v1",
         "generatedAt": utc_now(),
+        "generation": _effective_configuration_view(repo).get("generation") or {},
         "repo": str(repo),
         "targetBranch": TARGET_BRANCH,
         "stop": {"present": stop_present},
@@ -2899,6 +2905,7 @@ def collect_sessions(repo: Path) -> dict[str, Any]:
     return {
         "schema": "singular.codex.sessions.v0",
         "generatedAt": utc_now(),
+        "generation": _effective_configuration_view(repo).get("generation") or {},
         "repo": str(repo.resolve()),
         "sessions": sessions,
         "auto": recommend_auto(sessions),
@@ -3482,17 +3489,18 @@ class _ComputeCache:
         return None
 
     def get(self, key: str, compute_arg) -> Any:
-        cached = self._fresh(key)
+        cache_key = _configuration_cache_key(key, compute_arg)
+        cached = self._fresh(cache_key)
         if cached is not None:
             return cached
         with self._gate:
-            cached = self._fresh(key)
+            cached = self._fresh(cache_key)
             if cached is not None:
                 return cached
             value = self._compute_fn(compute_arg)
             with self._lock:
-                self._slots[key] = (value, time.monotonic())
-                self._slots.move_to_end(key)
+                self._slots[cache_key] = (value, time.monotonic())
+                self._slots.move_to_end(cache_key)
                 while len(self._slots) > self.CAPACITY:
                     self._slots.popitem(last=False)  # evict least-recently-used
             return value
@@ -3507,9 +3515,10 @@ class _ComputeCache:
 class ConfigurationUnavailable(RuntimeError):
     """A read cannot select durable paths from the current generation."""
 
-    def __init__(self, configuration: dict[str, Any]) -> None:
+    def __init__(self, configuration: dict[str, Any], generation: dict[str, Any] | None = None) -> None:
         super().__init__(str(configuration.get("message") or "configuration unavailable"))
         self.configuration = configuration
+        self.generation = generation or {}
 
 
 _CONFIGURATION_LOCK = threading.RLock()
@@ -3551,7 +3560,7 @@ def _compute_effective_configuration(repo: Path) -> dict[str, Any]:
                     [
                         selected_bash, "-c",
                         '_singular_provider_path="$PATH"; PATH="$2"; export PATH; '
-                        'source "$1" >/dev/null || exit $?; '
+                        'source "$1" >/dev/null; '
                         'if [[ "$PATH" == "$2" ]]; then PATH="$_singular_provider_path"; export PATH; fi; '
                         'singular_effective_configuration_json "$3"',
                         "_", str(lib), infrastructure_path, str(Path(sys.executable).resolve()),
@@ -3564,21 +3573,18 @@ def _compute_effective_configuration(repo: Path) -> dict[str, Any]:
                 selected_path = Path(selected).expanduser() if selected else repo / "singular.config.json"
                 if not selected_path.is_absolute():
                     selected_path = repo / selected_path
-                return {
-                    "schema": "singular.effective-configuration.v1",
-                    "configuration": {
-                        "path": str(selected_path.resolve()),
-                        "source": "selector" if selected else "default",
-                        "status": "error",
-                        "message": f"effective configuration projection unavailable: {type(exc).__name__}: {exc}",
-                    },
-                    "runner": None, "provider": "unknown", "roles": {}, "settings": {},
-                    "paths": {"root": str(repo), "tasks": str(repo / TASKS_DIR_REL), "state": str(repo / STATE_DIR_REL)},
-                }
+                return _unavailable_effective_configuration(
+                    repo,
+                    f"effective configuration projection unavailable: {type(exc).__name__}: {exc}",
+                    reason="configuration-projection-unavailable",
+                )
             if proc.returncode == 0:
                 try:
                     value = json.loads(proc.stdout)
-                    if isinstance(value, dict):
+                    configuration = value.get("configuration") if isinstance(value, dict) else None
+                    if (isinstance(value, dict)
+                            and value.get("schema") == "singular.effective-configuration.v1"
+                            and isinstance(configuration, dict)):
                         return value
                 except json.JSONDecodeError:
                     pass
@@ -3586,22 +3592,64 @@ def _compute_effective_configuration(repo: Path) -> dict[str, Any]:
             selected_path = Path(selected).expanduser() if selected else repo / "singular.config.json"
             if not selected_path.is_absolute():
                 selected_path = repo / selected_path
-            return {
-                "schema": "singular.effective-configuration.v1",
-                "configuration": {
-                    "path": str(selected_path.resolve()),
-                    "source": "selector" if selected else "default",
-                    "status": "error",
-                    "message": f"effective configuration projection failed for {selected_path.resolve()} (exit {proc.returncode})",
-                },
-                "runner": None, "provider": "unknown", "roles": {}, "settings": {},
-                "paths": {"root": str(repo), "tasks": str(repo / TASKS_DIR_REL), "state": str(repo / STATE_DIR_REL)},
-            }
+            return _unavailable_effective_configuration(
+                repo,
+                f"effective configuration projection failed for {selected_path.resolve()} (exit {proc.returncode})",
+                reason="configuration-load-failed",
+            )
+    return _unavailable_effective_configuration(
+        repo, "engine lib.sh unavailable", reason="configuration-engine-unavailable"
+    )
+
+
+def _unavailable_effective_configuration(
+    repo: Path, message: str, *, reason: str
+) -> dict[str, Any]:
+    """Build the same fail-closed projection as engine/provider_resolver.py."""
+    resolver = _load_provider_resolver()
+    if resolver is not None and hasattr(resolver, "unavailable_effective_configuration"):
+        return resolver.unavailable_effective_configuration(
+            repo, os.environ, message, reason=reason
+        )
+    root = Path(repo).resolve()
+    selected = str(os.environ.get("SINGULAR_JSON_CONFIG_FILE") or "").strip()
+    selected_path = Path(selected).expanduser() if selected else root / "singular.config.json"
+    if not selected_path.is_absolute():
+        selected_path = root / selected_path
+    shell = str(os.environ.get("SINGULAR_CONFIG_FILE") or "").strip()
+    shell_path = Path(shell).expanduser() if shell else root / "singular.config.sh"
+    if not shell_path.is_absolute():
+        shell_path = root / shell_path
+    local = str(os.environ.get("SINGULAR_LOCAL_CONFIG_FILE") or "").strip()
+    local_path = Path(local).expanduser() if local else None
+    if local_path is not None and not local_path.is_absolute():
+        local_path = root / local_path
+    engine = str(os.environ.get("SINGULAR_ENGINE_HOME") or "").strip()
+    engine_path = Path(engine).expanduser() if engine else None
+    if engine_path is not None and not engine_path.is_absolute():
+        engine_path = root / engine_path
     return {
         "schema": "singular.effective-configuration.v1",
-        "configuration": {"status": "error", "message": "engine lib.sh unavailable"},
-        "runner": None, "provider": "unknown", "roles": {}, "settings": {},
-        "paths": {"root": str(repo), "tasks": str(repo / TASKS_DIR_REL), "state": str(repo / STATE_DIR_REL)},
+        "configuration": {
+            "path": str(selected_path.resolve()),
+            "source": "selector" if selected else "default",
+            "status": "error",
+            "reason": reason,
+            "message": message,
+        },
+        "configurationLayers": {
+            "json": str(selected_path.resolve()),
+            "shell": str(shell_path.resolve()),
+            "local": str(local_path.resolve()) if local_path is not None else None,
+            "engine": str(engine_path.resolve()) if engine_path is not None else None,
+        },
+        "runner": None,
+        "provider": "unknown",
+        "targetBranch": None,
+        "roles": {},
+        "settings": {},
+        "paths": {"root": str(root), "tasks": None, "state": None},
+        "providerRuntime": {},
     }
 
 
@@ -3707,10 +3755,13 @@ class _ConfigurationSnapshots:
             bindings = _configuration_bindings(view)
             generation_id = _configuration_generation_id(environment, bindings)
             view = copy.deepcopy(view)
+            available = (view.get("configuration") or {}).get("status") != "error"
             view["generation"] = {
                 "id": generation_id,
-                "status": "current",
-                "restartRequired": False,
+                "status": "current" if available else "unavailable",
+                "restartRequired": bool(
+                    (view.get("configuration") or {}).get("restartRequired")
+                ),
                 "boundInputCount": len(bindings) + 1,
             }
             self._snapshots[key] = {
@@ -3777,6 +3828,19 @@ class _ConfigurationSnapshots:
         finally:
             self._local.pinned = prior
 
+    @contextlib.contextmanager
+    def pin_view(self, repo: Path, view: dict[str, Any]):
+        """Pin an explicitly captured generation in a background worker."""
+        key = str(Path(repo).resolve())
+        prior = getattr(self._local, "pinned", None)
+        pinned = dict(prior or {})
+        pinned[key] = view
+        self._local.pinned = pinned
+        try:
+            yield view
+        finally:
+            self._local.pinned = prior
+
     def invalidate(self) -> None:
         with _CONFIGURATION_LOCK:
             self._snapshots.clear()
@@ -3796,6 +3860,23 @@ def initialize_configuration(repo: Path, *, force: bool = False) -> dict[str, An
 
 def _effective_configuration_view(repo: Path) -> dict[str, Any]:
     return _EFFECTIVE_CONFIGURATION_CACHE.get(Path(repo))
+
+
+def _configuration_cache_key(key: str, compute_arg: Any) -> str:
+    """Bind every repository-derived cache slot to resolution generation/status."""
+    if not isinstance(compute_arg, Path):
+        return key
+    view = _effective_configuration_view(compute_arg)
+    generation = view.get("generation") if isinstance(view.get("generation"), dict) else {}
+    configuration = view.get("configuration") if isinstance(view.get("configuration"), dict) else {}
+    token = json.dumps({
+        "id": generation.get("id"),
+        "generationStatus": generation.get("status"),
+        "restartRequired": generation.get("restartRequired"),
+        "configurationStatus": configuration.get("status"),
+        "reason": configuration.get("reason"),
+    }, sort_keys=True, separators=(",", ":"))
+    return f"{key}\0{token}"
 
 
 def _pinned_configuration_call(repo: Path, function, *args, **kwargs):
@@ -5241,6 +5322,7 @@ def collect_dag_view(repo: Path) -> dict[str, Any]:
     return {
         "schema": "singular.codex.dag.v0",
         "generatedAt": utc_now(),
+        "generation": _effective_configuration_view(repo).get("generation") or {},
         "validate": validate,
         "layers": [str(x) for x in raw.get("layers")] if isinstance(raw.get("layers"), list) else [],
         "kinds": [str(x) for x in raw.get("kinds")] if isinstance(raw.get("kinds"), list) else [],
@@ -5419,6 +5501,7 @@ def collect_timeline(repo: Path) -> dict[str, Any]:
     return {
         "schema": "singular.codex.timeline.v0",
         "generatedAt": utc_now(),
+        "generation": _effective_configuration_view(repo).get("generation") or {},
         "now": utc_now(),
         "window": {"truncated": truncated},
         "tasks": tasks_out,
@@ -5990,9 +6073,7 @@ def apply_settings_changes(repo: Path, changes: Any) -> tuple[int, dict[str, Any
         # It resolves exactly once and publishes TARGET_BRANCH with every other
         # consumer in the replacement generation.
         initialize_configuration(repo, force=True)
-        _CONFIG_CACHE.invalidate()
-        _OVERVIEW_CACHE.invalidate()
-        _PROVIDERS_CACHE.invalidate()
+        _invalidate_configuration_derived_caches()
         response = {
             "ok": True,
             "applied": normalized,
@@ -6001,6 +6082,24 @@ def apply_settings_changes(repo: Path, changes: Any) -> tuple[int, dict[str, Any
             "settings": _overlay_config_env(repo, collect_settings(repo)),
         }
     return 200, response
+
+
+def _invalidate_configuration_derived_caches() -> None:
+    """Retire all live data derived from effective paths or identity.
+
+    Generation-bound keys also prevent an old in-flight computation from
+    publishing into the replacement generation; clearing keeps the bounded
+    caches from retaining now-unreachable slots after an authorized refresh.
+    """
+    for name in (
+        "_EVENTS_INDEX_CACHE", "_DAG_CACHE", "_DOC_CACHE", "_PLANNER_RUNS_CACHE",
+        "_DUP_CACHE", "_OVERVIEW_CACHE", "_DAG_VIEW_CACHE", "_TIMELINE_CACHE",
+        "_PROVIDERS_CACHE", "_HOME_CACHE", "_PLANS_CACHE", "SNAPSHOT_CACHE",
+        "SESSIONS_CACHE",
+    ):
+        cache = globals().get(name)
+        if cache is not None and hasattr(cache, "invalidate"):
+            cache.invalidate()
 
 
 def _overlay_config_env(repo: Path, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6505,15 +6604,22 @@ def collect_lifecycle_view(repo: Path) -> dict[str, Any]:
     repo = Path(repo).resolve()
     effective = _effective_configuration_view(repo)
     configuration = effective.get("configuration") or {}
-    if configuration.get("status") == "error" and configuration.get("reason") == "configuration-changed":
+    if configuration.get("status") == "error":
+        module = _load_health_details()
+        if module is not None and hasattr(module, "unavailable_lifecycle"):
+            return module.unavailable_lifecycle(
+                configuration, effective.get("generation") or {}
+            )
+        reason = str(configuration.get("reason") or "configuration-unavailable")
         return {
             "schema": "singular.orchestration.lifecycle-diagnostics.v1",
             "configuration": configuration,
             "generation": effective.get("generation") or {},
             "paths": {}, "active": [], "activeCount": 0, "phaseCounts": {},
             "implementersActive": 0, "candidates": [], "preservedAttempts": [],
-            "unknownRecords": [{"kind": "configuration", "record": "startup-snapshot",
-                                "status": "changed", "restartRequired": True}],
+            "unknownRecords": [{"kind": "configuration", "record": "startup-resolution",
+                                "status": reason,
+                                "restartRequired": bool(configuration.get("restartRequired"))}],
             "sources": {"runs": "unknown", "leases": "unknown", "tasks": "unknown"},
         }
     paths = effective.get("paths") if isinstance(effective.get("paths"), dict) else {}
@@ -7516,7 +7622,12 @@ def collect_plans(repo: Path) -> dict[str, Any]:
             if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
                 entries[item["id"]] = _plan_entry(item)
     plans = sorted(entries.values(), key=lambda p: p.get("archivedAt") or "", reverse=True)
-    return {"schema": "singular.plans.v0", "generatedAt": utc_now(), "plans": plans}
+    return {
+        "schema": "singular.plans.v0",
+        "generatedAt": utc_now(),
+        "generation": _effective_configuration_view(repo).get("generation") or {},
+        "plans": plans,
+    }
 
 
 _PLANS_CACHE = _ComputeCache(collect_plans, 6.0)
@@ -7802,11 +7913,14 @@ class SnapshotCache:
                 return None
             return time.monotonic() - self._stamp
 
-    def _refresh_in_background(self, repo: Path, key: str) -> None:
+    def _refresh_in_background(
+        self, repo: Path, key: str, view: dict[str, Any]
+    ) -> None:
         try:
-            with self._compute:
-                if self._fresh_enough(key) is None:
-                    self._store(collect_snapshot(repo), key)
+            with _EFFECTIVE_CONFIGURATION_CACHE.pin_view(repo, view):
+                with self._compute:
+                    if self._fresh_enough(key) is None:
+                        self._store(collect_snapshot(repo), key)
         except Exception as exc:  # never let a refresh failure escape the daemon thread
             with self._lock:
                 self.last_error = f"{type(exc).__name__}: {exc}"
@@ -7815,7 +7929,8 @@ class SnapshotCache:
                 self._refreshing = False
 
     def get(self, repo: Path, fresh: bool = False) -> dict[str, Any]:
-        key = str(repo.resolve())
+        view = _effective_configuration_view(repo)
+        key = _configuration_cache_key(str(repo.resolve()), repo)
         if not fresh:
             cached = self._fresh_enough(key)
             if cached is not None:
@@ -7830,7 +7945,9 @@ class SnapshotCache:
                         self._refreshing = True
                 if start:
                     threading.Thread(
-                        target=self._refresh_in_background, args=(repo, key), daemon=True,
+                        target=self._refresh_in_background,
+                        args=(repo, key, view),
+                        daemon=True,
                     ).start()
                 stale = dict(value)
                 stale["stale"] = True
@@ -7847,6 +7964,12 @@ class SnapshotCache:
             snapshot = collect_snapshot(repo)
             self._store(snapshot, key)
             return snapshot
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._value = None
+            self._stamp = 0.0
+            self._key = ""
 
 
 SNAPSHOT_CACHE = SnapshotCache()
@@ -7872,7 +7995,7 @@ class SessionsCache:
         return None
 
     def get(self, repo: Path) -> dict[str, Any]:
-        key = str(repo.resolve())
+        key = _configuration_cache_key(str(repo.resolve()), repo)
         cached = self._fresh_enough(key)
         if cached is not None:
             return cached
@@ -7886,6 +8009,12 @@ class SessionsCache:
                 self._stamp = time.monotonic()
                 self._key = key
             return value
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._value = None
+            self._stamp = 0.0
+            self._key = ""
 
 
 SESSIONS_CACHE = SessionsCache()
@@ -7986,7 +8115,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._do_GET()
             except ConfigurationUnavailable as exc:
                 self.send_json({"error": "configuration unavailable",
-                                "configuration": exc.configuration}, 409)
+                                "configuration": exc.configuration,
+                                "generation": exc.generation}, 409)
 
     def _do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -8314,7 +8444,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._do_POST()
             except ConfigurationUnavailable as exc:
                 self.send_json({"error": "configuration unavailable",
-                                "configuration": exc.configuration}, 409)
+                                "configuration": exc.configuration,
+                                "generation": exc.generation}, 409)
 
     def _do_POST(self) -> None:
         # Write routes only: /api/settings, /api/ask, /api/report. Everything else

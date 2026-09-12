@@ -140,6 +140,10 @@ SINGULAR_JSON_CONFIG_FILE="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.
 singular_normalize_consumer_path_var SINGULAR_JSON_CONFIG_FILE
 _singular_selected_json_config_file="$SINGULAR_JSON_CONFIG_FILE"
 _singular_selected_json_config_source="$SINGULAR_JSON_CONFIG_SOURCE"
+if [[ "$SINGULAR_JSON_CONFIG_SOURCE" == "selector" && ! -f "$SINGULAR_JSON_CONFIG_FILE" ]]; then
+  echo "singular: selected JSON configuration is missing: $SINGULAR_JSON_CONFIG_FILE" >&2
+  exit 2
+fi
 if [[ -f "$SINGULAR_JSON_CONFIG_FILE" ]]; then
   _singular_cfg_env="$(singular_json_config_to_env "$SINGULAR_JSON_CONFIG_FILE")" \
     || { echo "singular: failed to parse $SINGULAR_JSON_CONFIG_FILE" >&2; exit 2; }

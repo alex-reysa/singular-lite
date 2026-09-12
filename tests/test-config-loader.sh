@@ -89,5 +89,48 @@ out="$(SINGULAR_ROOT="$tmp" SINGULAR_BASH_BIN="$BASH" bash -c '
 ')"
 [[ "$out" == "$BASH" ]] || fail "bootstrap SINGULAR_BASH_BIN was not preserved"
 
+# An explicitly selected JSON file is authority, not an optional hint. Missing
+# selected input must stop startup before defaults or shell layers can fabricate
+# an effective runtime; an absent default remains optional.
+set +e
+missing_out="$(SINGULAR_ROOT="$tmp" SINGULAR_JSON_CONFIG_FILE=missing.json \
+  /opt/homebrew/bin/bash -c 'source "$1/lib.sh"' _ "$SCRIPT_DIR" 2>&1)"
+missing_rc=$?
+set -e
+[[ "$missing_rc" -eq 2 ]] || fail "missing explicit JSON exited $missing_rc, expected 2"
+assert_contains "$missing_out" "selected JSON configuration is missing:" \
+  "missing explicit JSON diagnostic"
+
+absent="$tmp/absent-default"
+mkdir -p "$absent"
+SINGULAR_ROOT="$absent" /opt/homebrew/bin/bash -c \
+  'source "$1/lib.sh"; singular_effective_configuration_json' _ "$SCRIPT_DIR" \
+  >"$tmp/absent.json"
+python3 - "$tmp/absent.json" <<'PY'
+import json, sys
+view = json.load(open(sys.argv[1], encoding="utf-8"))
+assert view["configuration"]["status"] == "absent", view
+assert view["configuration"]["source"] == "default", view
+PY
+
+# Keep lib.sh's native errexit behavior observable by callers: ordinary false
+# and explicit exit in either trusted shell layer are startup failures.
+for kind in false exit; do
+  bad="$tmp/bad-$kind.sh"
+  if [[ "$kind" == false ]]; then
+    printf '%s\n' false >"$bad"
+    expected=1
+  else
+    printf '%s\n' 'exit 7' >"$bad"
+    expected=7
+  fi
+  set +e
+  SINGULAR_ROOT="$absent" SINGULAR_CONFIG_FILE="$bad" \
+    /opt/homebrew/bin/bash -c 'source "$1/lib.sh"' _ "$SCRIPT_DIR" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq "$expected" ]] || fail "shell $kind exited $rc, expected $expected"
+done
+
 rm -rf "$tmp"
 echo "config-loader tests passed"

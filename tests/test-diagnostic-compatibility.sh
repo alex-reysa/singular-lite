@@ -139,4 +139,132 @@ after="$(find "$repo" -path "$repo/.git" -prune -o -type f -print0 | sort -z | x
   exit 1
 }
 
+# Real server-entrypoint regression: warm every configuration-dependent HTTP
+# route, change bound inputs inside every TTL, then authorize exactly one
+# settings refresh. A sandbox that denies loopback bind is reported distinctly
+# as infrastructure-unavailable; on a normal host every assertion is mandatory.
+http_repo="$tmp/http-main"
+mkdir -p "$http_repo/docs/orchestration/tasks" "$http_repo/state-a/runs" \
+  "$http_repo/state-a/leases" "$http_repo/state-b/runs" "$http_repo/state-b/leases"
+git -C "$http_repo" init -q
+git -C "$http_repo" -c user.name=test -c user.email=test@example.com \
+  commit -q --allow-empty -m init
+printf '%s\n' '{"schema":"singular.orchestration.dag.v0","nodes":[]}' \
+  >"$http_repo/docs/orchestration/dag.v0.json"
+printf '%s\n' '{"schemaVersion":"v2","runner":"codex-run.sh","env":{"SINGULAR_CODEX_MODEL":"model-a"}}' \
+  >"$http_repo/singular.config.json"
+printf '%s\n' 'printf "startup\n" >> "$SINGULAR_ROOT/startup-marker"' \
+  'export SINGULAR_STATE_DIR=state-a' >"$http_repo/singular.config.sh"
+set +e
+PYTHONDONTWRITEBYTECODE=1 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 \
+  - "$ROOT" "$http_repo" <<'PY'
+import http.client, json, os, pathlib, select, subprocess, sys, time
+
+engine, repo = map(pathlib.Path, sys.argv[1:3])
+python = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+env = {
+    "PATH": "/usr/bin:/bin",
+    "HOME": str(repo / "home"),
+    "TMPDIR": str(repo.parent),
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "SINGULAR_ENGINE_HOME": str(engine),
+    "SINGULAR_BASH_BIN": "/opt/homebrew/bin/bash",
+    "SINGULAR_CODEX_BIN": str(repo / "missing-codex"),
+    "SINGULAR_CONSOLE_NO_STATE": "1",
+}
+(repo / "home").mkdir()
+proc = subprocess.Popen(
+    [python, str(engine / "plugin/scripts/singular_graph_server.py"),
+     "--repo", str(repo), "--host", "127.0.0.1", "--port", "0"],
+    cwd="/", env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+try:
+    ready, _, _ = select.select([proc.stdout], [], [], 20)
+    if not ready:
+        stderr = proc.stderr.read()
+        if "PermissionError: [Errno 1] Operation not permitted" in stderr:
+            print("SKIP infrastructure: loopback socket bind denied (EPERM)", file=sys.stderr)
+            raise SystemExit(77)
+        raise AssertionError(f"server did not become ready: {stderr}")
+    line = proc.stdout.readline().strip()
+    if "http://" not in line:
+        stderr = proc.stderr.read()
+        if "PermissionError: [Errno 1] Operation not permitted" in stderr:
+            print("SKIP infrastructure: loopback socket bind denied (EPERM)", file=sys.stderr)
+            raise SystemExit(77)
+        raise AssertionError(f"bad readiness line: {line!r}; {stderr}")
+    port = int(line.rsplit(":", 1)[1])
+
+    def request(method, route, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+        raw = json.dumps(body).encode() if body is not None else None
+        headers = ({"Content-Type": "application/json", "Content-Length": str(len(raw))}
+                   if raw is not None else {})
+        conn.request(method, route, raw, headers)
+        response = conn.getresponse()
+        payload = response.read()
+        conn.close()
+        return response.status, payload, json.loads(payload)
+
+    routes = (
+        "/api/config", "/api/providers", "/api/overview", "/api/home",
+        "/api/dag", "/api/timeline", "/api/lifecycle", "/api/settings",
+        "/api/state", "/api/sessions", "/api/plans",
+    )
+    warm = {route: request("GET", route) for route in routes}
+    assert all(status == 200 for status, _raw, _data in warm.values()), warm
+    initial = warm["/api/config"][2]["generation"]["id"]
+    (repo / "singular.config.json").write_text(json.dumps({
+        "schemaVersion": "v2", "runner": "gemini-run.sh",
+        "env": {"SINGULAR_CODEX_MODEL": "model-b"},
+    }))
+    (repo / "singular.config.sh").write_text(
+        'printf "startup\\n" >> "$SINGULAR_ROOT/startup-marker"\n'
+        'export SINGULAR_STATE_DIR=state-b\n'
+    )
+    started = time.monotonic()
+    changed = {route: request("GET", route) for route in routes}
+    assert time.monotonic() - started < 6.0
+    assert not any(changed[route][1] == warm[route][1] for route in routes), changed
+    for route in ("/api/config", "/api/providers", "/api/lifecycle", "/api/settings"):
+        status, _raw, data = changed[route]
+        assert status == 200, (route, status, data)
+        assert data["generation"]["status"] == "changed", (route, data)
+    providers = changed["/api/providers"][2]
+    assert providers["activeProvider"] == "unknown" and providers["activeRunner"] is None
+    assert not any(row["isDefaultRunner"] for row in providers["providers"])
+    for route in set(routes) - {"/api/config", "/api/providers", "/api/lifecycle", "/api/settings"}:
+        status, _raw, data = changed[route]
+        assert status == 409, (route, status, data)
+        assert data["generation"]["status"] == "changed", (route, data)
+
+    status, _raw, posted = request(
+        "POST", "/api/settings", {"changes": {"SINGULAR_MAX_CONCURRENT": "4"}}
+    )
+    assert status == 200 and posted["ok"] is True, posted
+    replacement = posted["config"]["generation"]["id"]
+    assert replacement != initial
+    refreshed = {route: request("GET", route) for route in routes}
+    for route, (status, _raw, data) in refreshed.items():
+        assert status == 200, (route, status, data)
+        assert data["generation"]["id"] == replacement, (route, data)
+        assert data["generation"]["status"] == "current", (route, data)
+    assert (repo / "startup-marker").read_text().splitlines() == ["startup", "startup"]
+finally:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+PY
+http_rc=$?
+set -e
+if [[ "$http_rc" -eq 77 ]]; then
+  echo "SKIP: real HTTP diagnostic contract (socket bind unavailable)"
+elif [[ "$http_rc" -ne 0 ]]; then
+  echo "FAIL: real HTTP diagnostic contract exited $http_rc" >&2
+  exit "$http_rc"
+fi
+
 echo "PASS: test-diagnostic-compatibility"

@@ -1503,6 +1503,53 @@ class SnapshotCacheStaleServeTests(unittest.TestCase):
             self.assertIn("boom", cache.last_error or "")
             self.assertIsNotNone(cache.age_seconds())
 
+    def test_background_refresh_stays_on_captured_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / "singular.config.json").write_text(json.dumps({
+                "runner": "codex-run.sh", "env": {}
+            }))
+            initial = srv.initialize_configuration(repo, force=True)
+            self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
+            entered = threading.Event()
+            release = threading.Event()
+            seen: list[str] = []
+
+            def snapshot(root):
+                generation = srv._effective_configuration_view(root)["generation"]["id"]
+                seen.append(generation)
+                if len(seen) == 2:
+                    entered.set()
+                    self.assertTrue(release.wait(5))
+                return {"generation": {"id": generation}, "call": len(seen)}
+
+            saved = srv.collect_snapshot
+            self.addCleanup(setattr, srv, "collect_snapshot", saved)
+            srv.collect_snapshot = snapshot
+            cache = srv.SnapshotCache(ttl=0.02)
+            self.assertEqual(
+                cache.get(repo)["generation"]["id"], initial["generation"]["id"]
+            )
+            time.sleep(0.04)
+            stale = cache.get(repo)
+            self.assertTrue(stale["stale"])
+            self.assertTrue(entered.wait(5))
+            (repo / "singular.config.json").write_text(json.dumps({
+                "runner": "gemini-run.sh", "env": {}
+            }))
+            replacement = srv.initialize_configuration(repo, force=True)
+            release.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with cache._lock:
+                    if not cache._refreshing:
+                        break
+                time.sleep(0.01)
+            current = cache.get(repo)
+            self.assertEqual(seen[1], initial["generation"]["id"])
+            self.assertEqual(current["generation"]["id"], replacement["generation"]["id"])
+            self.assertEqual(len(seen), 3)
+
 
 class DiskUsageCacheTests(unittest.TestCase):
     """O1 (0.5.0): the du walk lives in its own background cache; a cold peek
@@ -2593,6 +2640,133 @@ class ConfigurationSnapshotContractTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(before, after)
 
+    def test_warmed_derived_caches_cannot_bypass_changed_generation(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {}})
+        original_collect_processes = srv.collect_processes
+        srv.collect_processes = lambda: []
+        self.addCleanup(setattr, srv, "collect_processes", original_collect_processes)
+        (repo / ".singular-state/runs").mkdir(parents=True)
+        (repo / ".singular-state/leases").mkdir()
+        (repo / "docs/orchestration/tasks").mkdir(parents=True)
+        initial = srv.initialize_configuration(repo, force=True)
+        caches = (
+            srv._OVERVIEW_CACHE, srv._HOME_CACHE, srv._DAG_VIEW_CACHE,
+            srv._TIMELINE_CACHE, srv._PROVIDERS_CACHE, srv._PLANS_CACHE,
+            srv.SNAPSHOT_CACHE, srv.SESSIONS_CACHE,
+        )
+        for cache in caches:
+            cache.invalidate()
+
+        original_provider_compute = srv._PROVIDERS_CACHE._compute_fn
+
+        def safe_provider_compute(root):
+            cfg = srv.collect_config(root)
+            return {
+                "schema": "singular.providers.v0",
+                "activeProvider": cfg["provider"] if cfg["ok"] else "unknown",
+                "activeRunner": cfg["runner"] if cfg["ok"] else None,
+                "generation": cfg["generation"],
+                "providers": [],
+                "summary": {},
+            }
+
+        srv._PROVIDERS_CACHE._compute_fn = safe_provider_compute
+        self.addCleanup(setattr, srv._PROVIDERS_CACHE, "_compute_fn",
+                        original_provider_compute)
+        warm = {
+            "overview": srv.load_overview(repo),
+            "home": srv.load_home(repo),
+            "dag": srv.load_dag_view(repo),
+            "timeline": srv.load_timeline(repo),
+            "providers": srv.collect_providers(repo),
+            "state": srv.SNAPSHOT_CACHE.get(repo, fresh=True),
+            "sessions": srv.SESSIONS_CACHE.get(repo),
+            "plans": srv.load_plans(repo),
+        }
+        self.assertTrue(all(
+            value["generation"]["id"] == initial["generation"]["id"]
+            for value in warm.values()
+        ))
+
+        (repo / "singular.config.json").write_text(
+            json.dumps({"runner": "gemini-run.sh", "env": {}})
+        )
+        providers = srv.collect_providers(repo)
+        self.assertEqual(providers["activeProvider"], "unknown")
+        self.assertEqual(providers["generation"]["status"], "changed")
+        for loader in (
+            srv.load_overview, srv.load_home, srv.load_dag_view,
+            srv.load_timeline, lambda root: srv.SNAPSHOT_CACHE.get(root),
+            srv.SESSIONS_CACHE.get, srv.load_plans,
+        ):
+            with self.assertRaises(srv.ConfigurationUnavailable):
+                loader(repo)
+
+    def test_authorized_refresh_replaces_every_warmed_generation(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {}})
+        original_collect_processes = srv.collect_processes
+        srv.collect_processes = lambda: []
+        self.addCleanup(setattr, srv, "collect_processes", original_collect_processes)
+        (repo / ".singular-state/runs").mkdir(parents=True)
+        (repo / ".singular-state/leases").mkdir()
+        (repo / "docs/orchestration/tasks").mkdir(parents=True)
+        initial = srv.initialize_configuration(repo, force=True)
+        loaders = (
+            srv.load_overview, srv.load_home, srv.load_dag_view,
+            srv.load_timeline, lambda root: srv.SNAPSHOT_CACHE.get(root, fresh=True),
+            srv.SESSIONS_CACHE.get, srv.load_plans,
+        )
+        for loader in loaders:
+            loader(repo)
+        status, response = srv.apply_settings_changes(
+            repo, {"SINGULAR_MAX_CONCURRENT": "4"}
+        )
+        self.assertEqual(status, 200)
+        replacement = response["config"]["generation"]["id"]
+        self.assertNotEqual(replacement, initial["generation"]["id"])
+        for loader in loaders:
+            value = loader(repo)
+            self.assertEqual(value["generation"]["id"], replacement)
+            self.assertEqual(value["generation"]["status"], "current")
+
+    def test_old_inflight_compute_is_isolated_from_replacement_generation(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {}})
+        initial = srv.initialize_configuration(repo, force=True)
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        def compute(root):
+            generation = srv._effective_configuration_view(root)["generation"]["id"]
+            calls.append(generation)
+            if generation == initial["generation"]["id"]:
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return {"generation": {"id": generation}}
+
+        cache = srv._ComputeCache(compute, 60.0)
+        old_result: list[dict] = []
+
+        def old_request():
+            with srv._EFFECTIVE_CONFIGURATION_CACHE.pin(repo):
+                old_result.append(cache.get(str(repo), repo))
+
+        thread = threading.Thread(target=old_request)
+        thread.start()
+        self.assertTrue(entered.wait(5))
+        (repo / "singular.config.json").write_text(
+            json.dumps({"runner": "gemini-run.sh", "env": {}})
+        )
+        replacement = srv.initialize_configuration(repo, force=True)
+        release.set()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        new_result = cache.get(str(repo), repo)
+        self.assertEqual(old_result[0]["generation"]["id"], initial["generation"]["id"])
+        self.assertEqual(new_result["generation"]["id"], replacement["generation"]["id"])
+        self.assertEqual(calls, [initial["generation"]["id"],
+                                 replacement["generation"]["id"]])
+
 
 class AutonomateLogResolutionTests(unittest.TestCase):
     """The engine's --detach loop writes autonomate.log; the legacy name is
@@ -3623,6 +3797,54 @@ class ProvidersRouteTests(unittest.TestCase):
         status, data = self._req("GET", "/api/dag")
         self.assertEqual(status, 409)
         self.assertEqual(data["configuration"]["reason"], "configuration-changed")
+
+    def test_warmed_http_routes_share_invalidation_and_refresh_generation(self) -> None:
+        routes = (
+            "/api/config", "/api/providers", "/api/overview", "/api/home",
+            "/api/dag", "/api/timeline", "/api/lifecycle", "/api/settings",
+            "/api/state", "/api/sessions", "/api/plans",
+        )
+        warm = {route: self._req("GET", route) for route in routes}
+        self.assertTrue(all(status == 200 for status, _ in warm.values()))
+        initial = warm["/api/config"][1]["generation"]["id"]
+
+        (self.repo / "singular.config.json").write_text(json.dumps({
+            "runner": "gemini-run.sh", "env": {"SINGULAR_MAX_CONCURRENT": "2"}
+        }))
+        changed = {route: self._req("GET", route) for route in routes}
+        for route in ("/api/config", "/api/providers", "/api/lifecycle", "/api/settings"):
+            self.assertEqual(changed[route][0], 200, route)
+            self.assertEqual(changed[route][1]["generation"]["status"], "changed", route)
+            self.assertNotEqual(changed[route], warm[route], route)
+        providers = changed["/api/providers"][1]
+        self.assertEqual(providers["activeProvider"], "unknown")
+        self.assertIsNone(providers["activeRunner"])
+        self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
+        for route in (
+            "/api/overview", "/api/home", "/api/dag", "/api/timeline",
+            "/api/state", "/api/sessions", "/api/plans",
+        ):
+            self.assertEqual(changed[route][0], 409, route)
+            self.assertEqual(
+                changed[route][1]["configuration"]["reason"],
+                "configuration-changed",
+                route,
+            )
+            self.assertEqual(changed[route][1]["generation"]["status"], "changed", route)
+            self.assertNotEqual(changed[route], warm[route], route)
+
+        status, response = self._req(
+            "POST", "/api/settings",
+            body={"changes": {"SINGULAR_MAX_CONCURRENT": "4"}},
+        )
+        self.assertEqual(status, 200)
+        replacement = response["config"]["generation"]["id"]
+        self.assertNotEqual(replacement, initial)
+        refreshed = {route: self._req("GET", route) for route in routes}
+        for route, (route_status, data) in refreshed.items():
+            self.assertEqual(route_status, 200, route)
+            self.assertEqual(data["generation"]["id"], replacement, route)
+            self.assertEqual(data["generation"]["status"], "current", route)
 
     def test_http_reads_share_generation_past_former_ttls_and_concurrently(self) -> None:
         def forbidden(_root):

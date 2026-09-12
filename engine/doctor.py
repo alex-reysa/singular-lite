@@ -35,12 +35,12 @@ from provider_resolver import (
     ConfigResolutionError,
     JsonConfigResolution,
     codex_role_settings,
-    effective_configuration,
     load_json_config,
     resolve_json_config,
     resolve_provider_bin,
+    unavailable_effective_configuration,
 )
-from health_details import collect_lifecycle
+from health_details import collect_lifecycle, unavailable_lifecycle
 
 
 CHECK_SCHEMA = "singular.doctor-report.v1"
@@ -283,8 +283,12 @@ class Doctor:
             )
         except OSError:
             self.engine_version = ""
-        self.runtime_env = dict(os.environ)
+        # Populated only after lib.sh completes its full precedence chain.  The
+        # inherited process environment is input, not evidence of an effective
+        # runtime when configuration initialization fails.
+        self.runtime_env: dict[str, str] = {}
         self.effective_config_projection: dict[str, Any] | None = None
+        self.config_exports: str | None = None
         self.runner: Path | None = None
         self.provider: str | None = None
         self.provider_bin: Path | None = None
@@ -799,15 +803,22 @@ class Doctor:
         if not self.repo or not (self.engine / "engine/lib.sh").is_file():
             return
         script = r'''
-source "$1/engine/lib.sh" >/dev/null || exit $?
-projection="$(singular_effective_configuration_json)" || exit $?
-exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.environ),"projection":json.loads(sys.argv[1])},separators=(",",":")))' "$projection"
+source "$1/engine/lib.sh" >/dev/null
+projection="$(singular_effective_configuration_json)"
+config_exports=""
+if [[ -f "$_singular_selected_json_config_file" ]]; then
+  config_exports="$(singular_json_config_to_env "$_singular_selected_json_config_file")"
+fi
+exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.environ),"projection":json.loads(sys.argv[1]),"configExports":sys.stdin.read()},separators=(",",":")))' "$projection" <<<"$config_exports"
 '''
         env = dict(os.environ)
         env["SINGULAR_ROOT"] = str(self.repo)
         env["SINGULAR_ENGINE_HOME"] = str(self.engine)
-        if self.config_resolution:
+        if self.config_resolution and self.config_resolution.source == "selector":
             env["SINGULAR_JSON_CONFIG_FILE"] = str(self.config_resolution.path)
+        else:
+            env.pop("SINGULAR_JSON_CONFIG_FILE", None)
+            env.pop("SINGULAR_JSON_CONFIG_SOURCE", None)
         result = command(
             [str(self.bash), "-c", script, "_", str(self.engine), sys.executable],
             cwd=self.repo,
@@ -815,21 +826,52 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
         )
         if result.returncode != 0:
             detail = first_line(result.stderr or result.stdout)
+            message = (
+                f"selected runtime configuration failed to load: {detail or f'exit {result.returncode}'}"
+            )
+            self.effective_config_projection = unavailable_effective_configuration(
+                self.repo,
+                env,
+                message,
+                reason="configuration-load-failed",
+                resolution=self.config_resolution,
+            )
             self.add(
                 "runtime.config-load",
                 "fail",
-                f"selected runtime configuration failed to load: {detail}",
+                message,
                 required_for=("all-runs",),
                 remediation="Repair the repository or local singular configuration.",
             )
+            if not self.blocking:
+                self.blocking = {
+                    "checkId": "runtime.config-load",
+                    "code": "SINGULAR_CONFIGURATION_UNAVAILABLE",
+                }
             return
         try:
             data = json.loads(result.stdout)
             if not isinstance(data, dict) or not isinstance(data.get("environment"), dict):
                 raise ValueError("environment record is not an object")
-            self.runtime_env = {str(k): str(v) for k, v in data["environment"].items()}
             projection = data.get("projection")
-            self.effective_config_projection = projection if isinstance(projection, dict) else None
+            if not isinstance(projection, dict):
+                raise ValueError("effective configuration projection is not an object")
+            configuration = projection.get("configuration")
+            if projection.get("schema") != "singular.effective-configuration.v1":
+                raise ValueError("effective configuration projection has the wrong schema")
+            if not isinstance(configuration, dict) or configuration.get("status") not in {"ok", "absent"}:
+                raise ValueError(
+                    str((configuration or {}).get("message") or "effective configuration is unavailable")
+                )
+            paths = projection.get("paths")
+            if not isinstance(paths, dict) or not all(
+                isinstance(paths.get(key), str) and paths.get(key)
+                for key in ("root", "tasks", "state")
+            ):
+                raise ValueError("effective durable paths are unavailable")
+            self.runtime_env = {str(k): str(v) for k, v in data["environment"].items()}
+            self.effective_config_projection = projection
+            self.config_exports = str(data.get("configExports") or "")
             self.add(
                 "runtime.config-load",
                 "pass",
@@ -837,6 +879,14 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
                 required_for=("all-runs",),
             )
         except (json.JSONDecodeError, ValueError) as exc:
+            self.runtime_env = {}
+            self.effective_config_projection = unavailable_effective_configuration(
+                self.repo,
+                env,
+                f"selected runtime configuration returned invalid data: {exc}",
+                reason="configuration-projection-invalid",
+                resolution=self.config_resolution,
+            )
             self.add(
                 "runtime.config-load",
                 "fail",
@@ -844,6 +894,11 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
                 required_for=("all-runs",),
                 remediation="Inspect output emitted while sourcing engine/lib.sh.",
             )
+            if not self.blocking:
+                self.blocking = {
+                    "checkId": "runtime.config-load",
+                    "code": "SINGULAR_CONFIGURATION_UNAVAILABLE",
+                }
 
     def config_source_conflict(self) -> None:
         """Two configuration sources, one silent winner (AXON-001).
@@ -870,36 +925,19 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
         )
         if not config_path.is_file():
             return
-        script = r'''
-source "$1/engine/lib.sh" >/dev/null 2>&1 || exit $?
-singular_json_config_to_env "$2"
-'''
-        env = dict(os.environ)
-        env["SINGULAR_ROOT"] = str(self.repo)
-        env["SINGULAR_ENGINE_HOME"] = str(self.engine)
-        env["SINGULAR_JSON_CONFIG_FILE"] = str(config_path)
-        result = command(
-            [str(self.bash), "-c", script, "_", str(self.engine), str(config_path)],
-            cwd=self.repo,
-            env=env,
-        )
-        if result.returncode != 0:
+        if self.config_exports is None:
             self.add(
                 "config.source-conflict",
                 "skip",
-                (
-                    "configuration sources could not be compared: the config "
-                    f"generator exited {result.returncode}"
-                ),
+                "configuration sources could not be compared because runtime initialization failed",
                 required_for=("all-runs",),
                 remediation="Repair singular.config.json (see runtime.config-load).",
-                details={"detail": first_line(result.stderr or result.stdout)},
             )
             return
         # shlex over the WHOLE emission, not line by line: setv() quotes with
         # shlex.quote, and a quoted value (areas, prompts) may span lines.
         try:
-            tokens = shlex.split(result.stdout)
+            tokens = shlex.split(self.config_exports)
         except ValueError as exc:
             self.add(
                 "config.source-conflict",
@@ -1417,6 +1455,14 @@ singular_json_config_to_env "$2"
             )
         if not self.repo:
             return
+        if self.blocking and self.blocking.get("checkId") == "runtime.config-load":
+            self.add(
+                "state.pidfiles",
+                "skip",
+                "state pidfiles were not inspected because the durable state root is unknown",
+                details={"blockedBy": "runtime.config-load"},
+            )
+            return
         # A pidfile probe has FOUR outcomes, and they are not interchangeable.
         # This loop used to catch `(OSError, ValueError)` as one case and call
         # all of it "stale", so a sandbox that denies process inspection made
@@ -1564,17 +1610,27 @@ singular_json_config_to_env "$2"
     def resolve_runner(self) -> None:
         if self.blocked("runner.selected"):
             return
-        raw = self.runtime_env.get(
-            "SINGULAR_RUNNER", str(self.engine / "engine/codex-run.sh")
-        )
+        projection = self.effective_config_projection or {}
+        raw = projection.get("runner")
+        if not isinstance(raw, str) or not raw:
+            self.add(
+                "runner.selected",
+                "skip",
+                "selected runner identity is unavailable",
+                required_for=("provider-runs",),
+                details={"provider": "unknown"},
+            )
+            return
         runner = Path(raw)
         if not runner.is_absolute() and self.repo:
             runner = self.repo / runner
         self.runner = runner.resolve()
-        for provider, (runner_name, _) in PROVIDERS.items():
-            if self.runner.name == runner_name:
-                self.provider = provider
-                break
+        proved_provider = projection.get("provider")
+        self.provider = (
+            str(proved_provider)
+            if isinstance(proved_provider, str) and proved_provider not in {"", "unknown"}
+            else None
+        )
         if self.runner.is_file() and os.access(self.runner, os.X_OK):
             self.add(
                 "runner.selected",
@@ -1800,6 +1856,9 @@ singular_json_config_to_env "$2"
 
     def model_checks(self) -> None:
         if self.blocked("model.availability"):
+            return
+        if not self.provider:
+            self.model_conformance_check()
             return
         for provider, (env_name, default) in MODEL_ENV.items():
             model = self.runtime_env.get(env_name, default)
@@ -2184,6 +2243,8 @@ singular_json_config_to_env "$2"
 
     def maybe_repair_model_cache(self) -> None:
         if not self.repair_model_cache:
+            return
+        if self.blocked("model-cache.repair"):
             return
         cache = self.codex_cache_path()
         if not cache.is_file():
@@ -2887,6 +2948,8 @@ singular_json_config_to_env "$2"
         gone. One that is still here with a dead owner means a repository is
         sitting in a state a read-only run left it in.
         """
+        if self.blocked("readonly-guard.pending"):
+            return
         if not self.repo:
             return
         base = self.repo / ".singular-state" / "readonly-guard"
@@ -2941,6 +3004,8 @@ singular_json_config_to_env "$2"
             )
 
     def resource_check(self) -> None:
+        if self.blocked("resources.adaptive-disk"):
+            return
         if not self.repo:
             return
         helper = self.engine / "engine/resource-plan.sh"
@@ -3065,7 +3130,7 @@ singular_json_config_to_env "$2"
     )
 
     def governance_posture(self) -> None:
-        if self.blocked("runtime.config-load"):
+        if self.blocked("governance.posture", "governance.flag-dependencies"):
             return
         if not self.runtime_env:
             return
@@ -3488,20 +3553,8 @@ singular_json_config_to_env "$2"
             "ok": failed == 0,
             "repo": str(self.repo) if self.repo else None,
             "engine": str(self.engine),
-            "effectiveConfiguration": (
-                self.effective_config_projection
-                or effective_configuration(self.repo, self.runtime_env, environment_is_effective=True)
-                if self.repo
-                else None
-            ),
-            "lifecycle": (
-                collect_lifecycle(
-                    Path(self.runtime_env.get("SINGULAR_TASKS_DIR", self.repo / "docs/orchestration/tasks")),
-                    Path(self.runtime_env.get("SINGULAR_STATE_DIR", self.repo / ".singular-state")),
-                )
-                if self.repo
-                else None
-            ),
+            "effectiveConfiguration": self.effective_config_projection if self.repo else None,
+            "lifecycle": self._lifecycle_report(),
             # Additive: the primary diagnosis every "skip" entry points back to,
             # or null. Readers that predate it see the same schema id and the
             # same checks[] they always did.
@@ -3524,6 +3577,23 @@ singular_json_config_to_env "$2"
                 if item["status"] in {"warn", "fail"} and item["remediation"]:
                     print(f"        remediation: {item['remediation']}")
         return 1 if failed else 0
+
+    def _lifecycle_report(self) -> dict[str, Any] | None:
+        if not self.repo:
+            return None
+        effective = self.effective_config_projection or unavailable_effective_configuration(
+            self.repo,
+            os.environ,
+            "effective configuration was not initialized",
+            reason="configuration-not-initialized",
+            resolution=self.config_resolution,
+        )
+        configuration = effective.get("configuration") or {}
+        generation = effective.get("generation") or {}
+        paths = effective.get("paths") if isinstance(effective.get("paths"), dict) else {}
+        if configuration.get("status") == "error" or not paths.get("tasks") or not paths.get("state"):
+            return unavailable_lifecycle(configuration, generation)
+        return collect_lifecycle(Path(paths["tasks"]), Path(paths["state"]))
 
 
 def main() -> int:
