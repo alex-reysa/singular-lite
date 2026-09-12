@@ -904,7 +904,7 @@ test_policy_drift_injection_failure_is_fail_closed() {
 }
 
 test_policy_drift() {
-  local packet original_sha original_mode
+  local packet original_sha original_mode manifest_reader_controls
   make_fixture drift
   cp "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md" "$scratch/drift-auditor.original"
   original_sha="$(shasum -a 256 "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md" | awk '{print $1}')"
@@ -940,10 +940,26 @@ assert expected["sha256"] != actual["sha256"], (expected, actual)
 PY
   assert_eq "$(calls worker)" "1" "drift worker calls"
   assert_eq "$(calls auditor)" "1" "drift semantic audit completed before refusal"
+  manifest_reader_controls="$scratch/drift-manifest-reader-controls"
+  mkdir -p "$manifest_reader_controls"
   "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/events.ndjson" \
     "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
-    "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" <<'PY'
-import json, sys
+    "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" \
+    "$manifest_reader_controls" <<'PY'
+import json, os, sys
+
+def assert_manifest_reference(data, expected_manifest):
+    assert isinstance(data["manifest"], str) and os.path.isabs(data["manifest"]), data
+    assert os.path.isfile(data["manifest"]), data
+    assert os.path.samefile(data["manifest"], expected_manifest), data
+
+def assert_manifest_rejected(manifest, expected_manifest, label):
+    try:
+        assert_manifest_reference({"manifest": manifest}, expected_manifest)
+    except (AssertionError, OSError):
+        return
+    raise AssertionError(f"manifest reader accepted {label}: {manifest!r}")
+
 events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 drift_events = [event for event in events if event.get("type") == "campaign.drift_detected"]
 assert len(drift_events) == 2, drift_events
@@ -954,10 +970,31 @@ assert [(event["data"]["entrypoint"], event["data"]["phase"])
 ], drift_events
 for event in drift_events:
     data = event["data"]
-    assert data["manifest"] == sys.argv[3], data
+    assert_manifest_reference(data, sys.argv[3])
     assert type(data["verifyExitCode"]) is int, data
     assert data["verifyExitCode"] == 3, data
     assert "raw" not in data, data
+
+controls = sys.argv[4]
+alias = os.path.join(controls, "manifest-alias.json")
+wrong = os.path.join(controls, "byte-identical-wrong-manifest.json")
+missing_actual = os.path.join(controls, "missing-actual.json")
+missing_expected = os.path.join(controls, "missing-expected.json")
+dangling = os.path.join(controls, "dangling-manifest.json")
+directory = os.path.join(controls, "manifest-directory")
+os.symlink(sys.argv[3], alias)
+with open(sys.argv[3], "rb") as source, open(wrong, "wb") as target:
+    target.write(source.read())
+os.symlink(missing_actual, dangling)
+os.mkdir(directory)
+assert_manifest_reference({"manifest": alias}, sys.argv[3])
+assert_manifest_rejected(wrong, sys.argv[3], "byte-identical wrong file")
+assert_manifest_rejected(missing_actual, sys.argv[3], "missing actual path")
+assert_manifest_rejected(sys.argv[3], missing_expected, "missing expected path")
+assert_manifest_rejected(dangling, sys.argv[3], "dangling link")
+assert_manifest_rejected(directory, sys.argv[3], "directory")
+assert_manifest_rejected("relative-manifest.json", sys.argv[3], "relative path")
+assert_manifest_rejected(None, sys.argv[3], "non-string field")
 assert sum(event.get("type") == "l1.campaign_mismatch" for event in events) == 1, events
 assert not any(event.get("type") == "l1.task_accepted" for event in events), events
 assert not any(event.get("type") == "origin.control_state_committed" for event in events), events
