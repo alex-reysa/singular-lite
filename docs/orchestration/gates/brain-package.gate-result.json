@@ -82,7 +82,7 @@
       "kind": "source-path",
       "ref": "cli/singular",
       "description": "Explicit brain-package implementation or acceptance-test input for the promoted gate.",
-      "sha256": "60f346c76ceb303161446b5a8bbb0b6b16d6ff58f3940744b473c110ab803fa6"
+      "sha256": "ffd347ec9825fb174123fd8101d3047e457310a02f699f26866caf49d0ba168b"
     },
     {
       "kind": "source-path",
@@ -119,19 +119,19 @@
       "exitCode": 0,
       "logRef": "docs/orchestration/gates/evidence/brain-package.regression.txt",
       "sha256": "cf52b7fc253b588d1713ebb66dfc4ea7262b4a845bf5706783c826ec42d0e53f",
-      "headSha": "d381d97f9338c4453762aafcedd2a4bf5a844456"
+      "headSha": "f23206ef1dbb5a5485b927b78e0b7ab1bcace4c3"
     },
     {
       "kind": "gate-report",
       "ref": "docs/orchestration/gates/evidence/brain-package.gate-report.json",
-      "sha256": "a2b9b4d371c2d86f4908ac1e16f95fa2a3c095954e9663e71e3e0d64b5c39b58",
+      "sha256": "b216faa8d9969da5e449a8cff8d6cd0257849fef325ef1d0e1992dc3c2d3115e",
       "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
     }
   ],
   "upstreamGates": [],
   "decidedBy": "l0-gate-promoter",
   "rationale": "Integrated audited end-to-end acceptance for brain-package plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
-  "recordedAt": "2026-09-12T17:26:09Z",
+  "recordedAt": "2026-09-12T21:15:06Z",
   "verificationClassification": "passed",
   "gateReportRef": "docs/orchestration/gates/evidence/brain-package.gate-report.json"
 }
