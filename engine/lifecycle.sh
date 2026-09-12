@@ -58,6 +58,27 @@ singular_lifecycle_record_attempt() {
     --disposition "$disposition" --failure-class "$failure_class" --action "$action"
 }
 
+singular_lifecycle_claim_repair() {
+  local task_id="$1" authorization_id="$2" run_id="$3" head="$4" tree="$5"
+  local owner="${SINGULAR_RESERVATION_OWNER:-}"
+  local generation="${SINGULAR_RESERVATION_GENERATION:-}"
+  local record reservation_run campaign_binding ticks=0
+  [[ -n "$owner" && "$generation" =~ ^[1-9][0-9]*$ ]] || return 2
+  record="$(singular_dispatch_record_path "$task_id")"
+  while [[ ! -f "$record" && "$ticks" -lt 20 ]]; do
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  reservation_run="$(singular_json_field "$record" runId 2>/dev/null || true)"
+  campaign_binding="$(singular_json_field "$record" campaignBinding 2>/dev/null || true)"
+  [[ -n "$reservation_run" && -n "$campaign_binding" ]] || return 1
+  python3 "$SINGULAR_TASK_LIFECYCLE" claim-recovery \
+    --lease "$(singular_lease_path "$task_id")" --authorization-id "$authorization_id" \
+    --action repair --head "$head" --tree "$tree" --campaign "$campaign_binding" \
+    --run "$run_id" --owner "$owner" --generation "$generation" \
+    --reservation-run "$reservation_run"
+}
+
 singular_lifecycle_claim_continuation() {
   local task_id="$1" authorization_id="$2" owner="$3" generation="$4"
   local run_id="$5" candidate_source="$6" integration_target="$7" worktree="$8" task_contract="$9"

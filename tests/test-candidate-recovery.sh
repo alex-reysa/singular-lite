@@ -221,6 +221,16 @@ if python3 "$ROOT/engine/task_lifecycle.py" reserve --lease "$lease" --task TASK
     --imported-dir "$tmp/imported" >/dev/null 2>&1; then
   fail "mismatched repair successor reservation was accepted"
 fi
+lease_before_campaign_mismatch="$(shasum -a 256 "$lease" | awk '{print $1}')"
+if python3 "$ROOT/engine/task_lifecycle.py" reserve --lease "$lease" --task TASK-1107 \
+    --owner reconcile:RUN-OTHER-CAMPAIGN:TASK-1107 --run RUN-OTHER-CAMPAIGN \
+    --branch agent/original-contract --area brain --scope-json '[]' --base base \
+    --batch batch --worktree "$tmp/original-contract-worktree" \
+    --imported-dir "$tmp/imported" --campaign campaign:other >/dev/null 2>&1; then
+  fail "repair reservation accepted a mismatched campaign"
+fi
+[[ "$(shasum -a 256 "$lease" | awk '{print $1}')" == "$lease_before_campaign_mismatch" ]] \
+  || fail "campaign-mismatched repair reservation changed the lease"
 python3 "$ROOT/engine/task_lifecycle.py" reserve --lease "$lease" --task TASK-1107 \
   --owner reconcile:RUN-SCHEDULER:TASK-1107 --run RUN-SCHEDULER \
   --branch agent/original-contract --area brain --scope-json '[]' --base base \
@@ -232,7 +242,10 @@ d=json.load(open(sys.argv[1], encoding="utf-8"))
 assert d["runId"] == "RUN-REPAIR", d
 assert d["branch"] == "agent/repair", d
 assert d["worktree"] == sys.argv[2], d
-assert d["reservationRunId"] == "RUN-REPAIR", d
+assert d["reservationRunId"] == "RUN-SCHEDULER", d
+assert d["recoveryAuthorization"]["reservationRunId"] == "RUN-SCHEDULER", d
+assert d["recoveryAuthorization"]["reservationOwner"] == d["reservationOwner"], d
+assert d["recoveryAuthorization"]["reservationGeneration"] == d["reservationGeneration"], d
 assert "attemptLifecycle" not in d, d
 assert "terminalDisposition" not in d, d
 assert d["attemptHistory"][-1]["runId"] == "RUN-OLD", d
@@ -774,13 +787,37 @@ except ValueError:
 raise SystemExit(subprocess.call(sys.argv[marker + 1:]))
 PY
 chmod +x "$driver_engine/evidence_delivery.py"
+repair_scheduler_run=RUN-REPAIR-SCHEDULER
+repair_scheduler_owner="reconcile:$repair_scheduler_run:TASK-1202"
+repair_scheduler_generation="$("${real_env[@]}" python3 "$ROOT/engine/task_lifecycle.py" reserve \
+  --lease "$real_state/leases/TASK-1202.json" --task TASK-1202 \
+  --owner "$repair_scheduler_owner" --run "$repair_scheduler_run" \
+  --branch agent/repair-old --area brain --scope-json '["app2.txt"]' \
+  --base "$(git -C "$repo" rev-parse target)" --batch REPAIR-BATCH \
+  --worktree "$repo/.worktrees/TASK-1202" \
+  --imported-dir "$orch/packets/imported/TASK-1202" --campaign legacy \
+  --repo-root "$repo" --engine-source-fingerprint legacy)"
+"${real_env[@]}" python3 "$ROOT/engine/task_lifecycle.py" bind-dispatch \
+  --record "$real_state/dispatch/TASK-1202.json" --task TASK-1202 \
+  --run "$repair_scheduler_run" --pid 1 --pid-start fixture --pgid 0 \
+  --log "$tmp/repair-drive.out" --base "$(git -C "$repo" rev-parse target)" \
+  --batch REPAIR-BATCH --owner "$repair_scheduler_owner" \
+  --generation "$repair_scheduler_generation" --campaign legacy
 "${real_env[@]}" SINGULAR_PREFLIGHT_REQUIRE_ACCEPTANCE=0 \
   SINGULAR_RUNNER="$repair_runner" SINGULAR_AUDIT_VERIFY=0 \
   SINGULAR_WORKER_INFRA_MAX=0 SINGULAR_AUDIT_INFRA_MAX=0 \
   SINGULAR_AUDIT_VERIFY_INFRA_MAX=0 SINGULAR_EVIDENCE_INFRA_MAX=0 \
+  SINGULAR_RESERVATION_OWNER="$repair_scheduler_owner" \
+  SINGULAR_RESERVATION_GENERATION="$repair_scheduler_generation" \
   REPAIR_LAUNCH_RECORD="$tmp/repair-launch.record" \
   bash "$driver_engine/l1-drive.sh" TASK-1202 >"$tmp/repair-drive.out" 2>&1 \
   || fail "authorized repair driver failed: $(tail -20 "$tmp/repair-drive.out"); auditor: $(tail -30 "$real_state/runs/RUN-REPAIR-ZNEW/auditor-codex.log" 2>/dev/null); validation: $(cat "$real_state/runs/RUN-REPAIR-ZNEW/audit-validate.err" 2>/dev/null)"
+"${real_env[@]}" python3 "$ROOT/engine/task_lifecycle.py" finish \
+  --lease "$real_state/leases/TASK-1202.json" \
+  --record "$real_state/dispatch/TASK-1202.json" --task TASK-1202 \
+  --owner "$repair_scheduler_owner" --generation "$repair_scheduler_generation" \
+  --batch REPAIR-BATCH --reason driver-exit-0 --next-action integrate \
+  --reservation-run "$repair_scheduler_run" --campaign legacy
 IFS='|' read -r launched_run launched_worktree launched_branch <"$tmp/repair-launch.record"
 [[ "$launched_run" == RUN-REPAIR-ZNEW \
     && "$launched_worktree" == "$repo/.worktrees/repair-new" \

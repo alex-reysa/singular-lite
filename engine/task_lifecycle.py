@@ -237,6 +237,39 @@ def validate_recovery_authorization(lease: dict[str, Any], authority: dict[str, 
     return predecessor
 
 
+def repair_dispatch_eligible(lease: dict[str, Any], task_path: Path) -> bool:
+    """Return whether an accepted task has one unspent, exact repair frontier."""
+    authority = lease.get("recoveryAuthorization")
+    if not isinstance(authority, dict):
+        return False
+    if authority.get("action") != "repair" or authority.get("state") != "issued":
+        return False
+    if lease.get("status") != "ready" or lease.get("reservationOwner"):
+        return False
+    if authority.get("reservationOwner") or authority.get("reservationGeneration"):
+        return False
+    if authority.get("campaignBinding") != lease.get("campaignBinding", "legacy"):
+        return False
+    if not task_path.is_file() or sha256(task_path) != authority.get("taskContractSha256"):
+        return False
+    predecessor_run = str(authority.get("predecessorRunId", ""))
+    for field in ("attemptLifecycle", "terminalDisposition"):
+        value = lease.get(field)
+        if isinstance(value, dict) and str(value.get("runId", "")) != predecessor_run:
+            return False
+    try:
+        validate_recovery_authorization(lease, authority)
+    except LifecycleError:
+        return False
+    return True
+
+
+def check_repair_dispatch_eligible(args: argparse.Namespace) -> None:
+    if not repair_dispatch_eligible(read_object(Path(args.lease)), Path(args.task_contract)):
+        raise LifecycleError("repair is not dispatch eligible")
+    print("eligible")
+
+
 def read_object(path: Path, *, missing: bool = False) -> dict[str, Any]:
     if missing and not path.exists():
         return {}
@@ -379,8 +412,12 @@ def reserve(args: argparse.Namespace) -> None:
             and recovery.get("state") in {"issued", "claimed"}
             else None
         )
+        reservation_run = args.run
+        execution_run = args.run
         if repair is not None:
             validate_recovery_authorization(lease, repair)
+            if args.campaign != repair.get("campaignBinding"):
+                raise LifecycleError("reservation campaign does not match repair authority")
             exact = (
                 args.run == repair.get("successorRunId")
                 and args.branch == repair.get("successorBranch")
@@ -390,9 +427,28 @@ def reserve(args: argparse.Namespace) -> None:
             if not exact and not scheduler_override:
                 raise LifecycleError("reservation does not match the authorized repair successor")
             if scheduler_override:
-                args.run = str(repair["successorRunId"])
+                execution_run = str(repair["successorRunId"])
                 args.branch = str(repair["successorBranch"])
                 args.worktree = str(repair["successorWorktree"])
+        status = str(lease.get("status", ""))
+        current_owner = str(lease.get("reservationOwner", ""))
+        current_generation = max(
+            int(lease.get("reservationGeneration", 0) or 0),
+            int(lease.get("lastReservationGeneration", 0) or 0),
+        )
+        if repair is not None and repair.get("state") == "claimed":
+            same_reservation = (
+                status in ACTIVE
+                and current_owner == args.owner
+                and lease.get("reservationRunId") == reservation_run
+                and repair.get("reservationOwner") == args.owner
+                and repair.get("reservationGeneration") == current_generation
+                and repair.get("reservationRunId") == reservation_run
+            )
+            if same_reservation:
+                print(current_generation)
+                return
+            raise LifecycleError("claimed repair authority cannot reserve another execution")
         if isinstance(candidate, dict) and candidate.get("state") != "integrated":
             raise LifecycleError("durable accepted candidate requires integration recovery, not redispatch")
         imported_dir = Path(args.imported_dir)
@@ -410,7 +466,6 @@ def reserve(args: argparse.Namespace) -> None:
                     raise LifecycleError(
                         f"accepted packet {packet_path.name} requires integration, not redispatch"
                     )
-        status = str(lease.get("status", ""))
         continuation = lease.get("continuationAuthorization")
         continuation_issued = (
             continuation if isinstance(continuation, dict)
@@ -425,9 +480,16 @@ def reserve(args: argparse.Namespace) -> None:
             raise LifecycleError("continuation authority is not reservable")
         terminal = lease.get("terminalDisposition")
         attempt = lease.get("attemptLifecycle")
-        predecessor_attempt = isinstance(attempt, dict) and attempt.get("state") in {
-            "started", "terminal"
-        }
+        predecessor_run = str(repair.get("predecessorRunId", "")) if repair else ""
+        predecessor_attempt = (
+            isinstance(attempt, dict)
+            and attempt.get("state") in {"started", "terminal"}
+            and str(attempt.get("runId", "")) == predecessor_run
+        )
+        predecessor_terminal = (
+            isinstance(terminal, dict)
+            and str(terminal.get("runId", "")) == predecessor_run
+        )
         if continuation_issued is not None:
             exact_continuation = (
                 args.branch == continuation_issued.get("branch")
@@ -444,22 +506,20 @@ def reserve(args: argparse.Namespace) -> None:
             )
             if not exact_continuation:
                 raise LifecycleError("reservation does not match the one-shot continuation authority")
-        elif isinstance(terminal, dict) or predecessor_attempt:
+        elif isinstance(terminal, dict) or isinstance(attempt, dict):
             # A validated accepted-candidate repair is the other existing form
             # of explicit successor authority. Its predecessor terminal state
             # remains history, but must not force the unrelated partial-work
             # continuation protocol.
-            if repair is None:
+            if repair is None or not (
+                (not isinstance(attempt, dict) or predecessor_attempt)
+                and (not isinstance(terminal, dict) or predecessor_terminal)
+            ):
                 raise LifecycleError("terminal or started work requires explicit successor authority")
         if status in {"accepted", "integrated"}:
             raise LifecycleError(f"{status} work cannot be reserved for implementation")
-        current_owner = str(lease.get("reservationOwner", ""))
-        current_generation = max(
-            int(lease.get("reservationGeneration", 0) or 0),
-            int(lease.get("lastReservationGeneration", 0) or 0),
-        )
         if status in ACTIVE and current_owner:
-            if current_owner == args.owner and lease.get("reservationRunId") == args.run:
+            if current_owner == args.owner and lease.get("reservationRunId") == reservation_run:
                 print(current_generation)
                 return
             raise LifecycleError(f"reservation already owned by {current_owner}@{current_generation}")
@@ -510,12 +570,12 @@ def reserve(args: argparse.Namespace) -> None:
             "reservationBaseSha": args.base,
             "campaignBinding": args.campaign,
             "batchId": args.batch,
-            "runId": args.run,
+            "runId": execution_run,
             "worktree": args.worktree,
             "status": "planned",
             "reservationOwner": args.owner,
             "reservationGeneration": generation,
-            "reservationRunId": args.run,
+            "reservationRunId": reservation_run,
             "reservationDeadlineAt": (
                 datetime.now(timezone.utc) + timedelta(seconds=args.deadline_seconds)
             ).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -531,7 +591,14 @@ def reserve(args: argparse.Namespace) -> None:
                 "state": "reserved",
                 "reservationOwner": args.owner,
                 "reservationGeneration": generation,
-                "reservationRunId": args.run,
+                "reservationRunId": reservation_run,
+                "reservedAt": timestamp,
+            })
+        if repair is not None:
+            repair.update({
+                "reservationOwner": args.owner,
+                "reservationGeneration": generation,
+                "reservationRunId": reservation_run,
                 "reservedAt": timestamp,
             })
         print(generation)
@@ -662,6 +729,7 @@ def record_attempt(args: argparse.Namespace) -> None:
                     "failureClass": args.failure_class,
                     "action": args.terminal_action,
                     "runId": args.run,
+                    "reservationRunId": args.reservation_run,
                     "reservationOwner": args.owner,
                     "reservationGeneration": args.generation,
                     "campaignBinding": args.campaign,
@@ -1108,6 +1176,7 @@ def finish(args: argparse.Namespace) -> None:
                         "failureClass": failure_reason,
                         "action": next_action,
                         "runId": attempt.get("runId", ""),
+                        "reservationRunId": args.reservation_run,
                         "reservationOwner": args.owner,
                         "reservationGeneration": args.generation,
                         "campaignBinding": args.campaign,
@@ -1606,6 +1675,19 @@ def claim_recovery(args: argparse.Namespace) -> None:
             raise LifecycleError("recovery authorization action/run mismatch")
         if authority.get("campaignBinding") != args.campaign:
             raise LifecycleError("recovery authorization campaign mismatch")
+        if args.recovery_action == "repair":
+            if not args.owner or not args.generation or not args.reservation_run:
+                raise LifecycleError("repair claim requires its scheduler reservation identity")
+            exact_reservation = (
+                authority.get("reservationOwner") == args.owner
+                and authority.get("reservationGeneration") == args.generation
+                and authority.get("reservationRunId") == args.reservation_run
+                and reservation_matches(lease, args.owner, args.generation)
+                and lease.get("reservationRunId") == args.reservation_run
+                and lease.get("runId") == args.run
+            )
+            if not exact_reservation:
+                raise LifecycleError("repair claim does not match its scheduler reservation")
         predecessor = validate_recovery_authorization(lease, authority)
         claim_binding = {
             "authorizationId": args.authorization_id,
@@ -1898,7 +1980,15 @@ def parser() -> argparse.ArgumentParser:
     for flag in ("lease", "authorization_id", "head", "tree", "campaign", "run"):
         claim.add_argument("--" + flag.replace("_", "-"), required=True)
     claim.add_argument("--action", dest="recovery_action", choices=("repair", "regate"), required=True)
+    claim.add_argument("--owner", default="")
+    claim.add_argument("--generation", type=int, default=0)
+    claim.add_argument("--reservation-run", default="")
     claim.set_defaults(action=claim_recovery)
+
+    repair_eligible = commands.add_parser("repair-dispatch-eligible")
+    repair_eligible.add_argument("--lease", required=True)
+    repair_eligible.add_argument("--task-contract", required=True)
+    repair_eligible.set_defaults(action=check_repair_dispatch_eligible)
 
     tested = commands.add_parser("candidate-tested")
     for flag in (

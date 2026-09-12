@@ -5179,6 +5179,26 @@ for path in sorted(tasks_dir.glob("TASK-*.md")):
 PY
 }
 
+# Include accepted task contracts only when the lifecycle authority proves an
+# issued, unspent repair for their exact retained predecessor and task bytes.
+singular_list_dispatch_status_candidates() {
+  [[ -d "$SINGULAR_TASKS_DIR" ]] || return 0
+  local f status lease
+  while IFS= read -r f; do
+    [[ -n "$f" && "$(basename "$f")" != "TEMPLATE.md" ]] || continue
+    status="$(singular_task_field "$f" status 2>/dev/null || true)"
+    if [[ "$status" == "ready" ]]; then
+      echo "$f"
+      continue
+    fi
+    [[ "$status" == "accepted" ]] || continue
+    lease="$(singular_lease_path "$(singular_task_field "$f" taskId 2>/dev/null || true)")"
+    [[ -f "$lease" ]] || continue
+    python3 "$SCRIPT_DIR/task_lifecycle.py" repair-dispatch-eligible \
+      --lease "$lease" --task-contract "$f" >/dev/null 2>&1 && echo "$f"
+  done < <(find "$SINGULAR_TASKS_DIR" -maxdepth 1 -name 'TASK-*.md' -type f 2>/dev/null | sort)
+}
+
 # List ready task files after applying the legacy duplicate-dispatch policy.
 singular_list_ready_tasks() {
   local f
@@ -5207,7 +5227,16 @@ singular_select_dispatch_frontier() {
     while IFS= read -r f; do
       [[ -n "$f" ]] || continue
       [[ "$(basename "$f")" == "TEMPLATE.md" ]] && continue
-      printf '%s\t%s\n' "$f" "$(singular_task_json "$f")"
+      local_task_json="$(singular_task_json "$f")"
+      repair_eligible=0
+      if [[ "$(singular_task_field "$f" status 2>/dev/null || true)" == "accepted" ]]; then
+        lease="$(singular_lease_path "$(singular_task_field "$f" taskId 2>/dev/null || true)")"
+        if [[ -f "$lease" ]] && python3 "$SCRIPT_DIR/task_lifecycle.py" repair-dispatch-eligible \
+            --lease "$lease" --task-contract "$f" >/dev/null 2>&1; then
+          repair_eligible=1
+        fi
+      fi
+      printf '%s\t%s\t%s\n' "$f" "$repair_eligible" "$local_task_json"
     done < <(find "$SINGULAR_TASKS_DIR" -maxdepth 1 -name 'TASK-*.md' -type f 2>/dev/null | sort)
   )"
 
@@ -5231,9 +5260,10 @@ for raw in raw_lines:
     raw = raw.rstrip("\n")
     if not raw:
         continue
-    path, task_raw = raw.split("\t", 1)
+    path, repair_eligible, task_raw = raw.split("\t", 2)
     task = json.loads(task_raw)
     task["_path"] = path
+    task["_repairEligible"] = repair_eligible == "1"
     tasks.append(task)
 
 statuses = {t.get("taskId", ""): t.get("status", "") for t in tasks}
@@ -5301,7 +5331,9 @@ for task in sorted(tasks, key=lambda t: t.get("taskId", "")):
     task_id = task.get("taskId", "")
     if len(selected) >= limit:
         break
-    if task.get("status") != "ready":
+    if task.get("status") != "ready" and not (
+        task.get("status") == "accepted" and task.get("_repairEligible")
+    ):
         continue
     if os.environ.get("SINGULAR_SKIP_DUPLICATE_READY_TASKS", "1") == "1":
         # v2 (0.5.0): only OPEN non-ready twins and integrated twins suppress a

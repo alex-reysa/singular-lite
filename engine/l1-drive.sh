@@ -597,10 +597,9 @@ fi
 # the provider invocation boundary below. No provider process starts before
 # either recovery authority is claimed.
 if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
-  python3 "$SCRIPT_DIR/task_lifecycle.py" claim-recovery \
-    --lease "$lease_path" --authorization-id "${authorized_repair[0]}" \
-    --action repair --head "${authorized_repair[4]}" --tree "${authorized_repair[5]}" \
-    --campaign "$l1_campaign_binding" --run "${authorized_repair[1]}" >/dev/null || exit 2
+  singular_lifecycle_claim_repair "$task_id" "${authorized_repair[0]}" \
+    "${authorized_repair[1]}" "${authorized_repair[4]}" "${authorized_repair[5]}" \
+    >/dev/null || exit 2
 fi
 
 # ---- Outcome tracking + EXIT trap ----

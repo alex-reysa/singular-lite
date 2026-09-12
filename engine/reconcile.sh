@@ -374,7 +374,8 @@ PY
   # and never require rewriting the task lifecycle to a synthetic `leased`
   # status.
   mapfile -t ready_tasks < <(singular_list_status_ready_tasks)
-  dispatchable_probe_limit=${#ready_tasks[@]}
+  mapfile -t dispatch_status_candidates < <(singular_list_dispatch_status_candidates)
+  dispatchable_probe_limit=${#dispatch_status_candidates[@]}
   if [[ "$dispatchable_probe_limit" -gt 0 ]]; then
     mapfile -t dispatchable_tasks < <(singular_select_dispatch_frontier "$dispatchable_probe_limit")
   else
@@ -404,7 +405,8 @@ PY
     [[ "$promoted_now" =~ ^[0-9]+$ ]] || promoted_now=0
     gates_promoted_this_run=$((gates_promoted_this_run + promoted_now))
     mapfile -t ready_tasks < <(singular_list_status_ready_tasks)
-    dispatchable_probe_limit=${#ready_tasks[@]}
+    mapfile -t dispatch_status_candidates < <(singular_list_dispatch_status_candidates)
+    dispatchable_probe_limit=${#dispatch_status_candidates[@]}
     if [[ "$dispatchable_probe_limit" -gt 0 ]]; then
       mapfile -t dispatchable_tasks < <(singular_select_dispatch_frontier "$dispatchable_probe_limit")
     else
@@ -454,7 +456,8 @@ PY
     [[ "$planner_failures_this_run" =~ ^[0-9]+$ ]] || planner_failures_this_run=0
     [[ "$l1_import_rejections_this_run" =~ ^[0-9]+$ ]] || l1_import_rejections_this_run=0
     mapfile -t ready_tasks < <(singular_list_status_ready_tasks)
-    dispatchable_probe_limit=${#ready_tasks[@]}
+    mapfile -t dispatch_status_candidates < <(singular_list_dispatch_status_candidates)
+    dispatchable_probe_limit=${#dispatch_status_candidates[@]}
     if [[ "$dispatchable_probe_limit" -gt 0 ]]; then
       mapfile -t dispatchable_tasks < <(singular_select_dispatch_frontier "$dispatchable_probe_limit")
     else

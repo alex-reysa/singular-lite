@@ -112,16 +112,34 @@ case "$role" in
       : >"$output"
       exit 124
     fi
+    if [[ "${FROZEN_FIXTURE_MODE:-success}" == "crash-started" ]]; then
+      ancestor="$PPID"
+      while [[ "$ancestor" =~ ^[1-9][0-9]*$ && "$ancestor" -gt 1 ]]; do
+        command="$(ps -o command= -p "$ancestor" 2>/dev/null || true)"
+        if [[ "$command" == *"l1-drive.sh"* ]]; then
+          kill -KILL "$ancestor"
+          break
+        fi
+        ancestor="$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d '[:space:]')"
+      done
+      sleep 1
+      exit 137
+    fi
     mkdir -p "$worktree/internal/widget" "$worktree/.singular-evidence"
-    printf 'package widget\n// frozen campaign candidate\n' >"$worktree/internal/widget/parser.go"
+    branch="$(git -C "$worktree" branch --show-current)"
+    if [[ "$branch" == "agent/widget/TASK-0001-repair" ]]; then
+      printf 'package widget\n// authorized repair marker\n' >"$worktree/internal/widget/parser.go"
+    else
+      printf 'package widget\n// frozen campaign candidate\n' >"$worktree/internal/widget/parser.go"
+    fi
     [[ -f "$worktree/internal/widget/note.txt" ]] \
       || printf 'worker note\n' >"$worktree/internal/widget/note.txt"
     printf 'intentional red fixture\n' >"$worktree/.singular-evidence/red.log"
     printf 'green fixture\n' >"$worktree/.singular-evidence/green.log"
     printf 'regression fixture\n' >"$worktree/.singular-evidence/regression.log"
-    "$FROZEN_PYTHON" - "$output" "$run_id" "$worktree" <<'PY'
+    "$FROZEN_PYTHON" - "$output" "$run_id" "$worktree" "$branch" <<'PY'
 import datetime, json, sys
-out, run_id, worktree = sys.argv[1:]
+out, run_id, worktree, branch = sys.argv[1:]
 json.dump({
     "schema": "singular.orchestration.state-packet.v0",
     "packetId": run_id + "-packet",
@@ -131,7 +149,7 @@ json.dump({
     "role": "l2-developer",
     "status": "needs-review",
     "baseRef": "target",
-    "branch": "agent/widget/TASK-0001-frozen",
+    "branch": branch,
     "headSha": "uncommitted",
     "workspace": worktree,
     "ownedFiles": ["internal/widget/parser.go", "internal/widget/note.txt"],
@@ -166,9 +184,10 @@ PY
     # requested output, so derive it from that explicit output capability.
     host_report="$(dirname "$output")/audit-verification.json"
     [[ -f "$host_report" ]] || exit 96
-    "$FROZEN_PYTHON" - "$output" "$run_id" "$host_report" <<'PY'
+    branch="$(git -C "$worktree" branch --show-current)"
+    "$FROZEN_PYTHON" - "$output" "$run_id" "$host_report" "$branch" <<'PY'
 import json, sys
-out, run_id, report = sys.argv[1:]
+out, run_id, report, branch = sys.argv[1:]
 status = json.load(open(report, encoding="utf-8"))["outcome"]
 if status == "passed-with-acknowledged-baseline":
     status = "passed"
@@ -177,7 +196,7 @@ json.dump({
     "schema": "singular.orchestration.audit-verdict.v1",
     "taskId": "TASK-0001",
     "runId": run_id,
-    "branch": "agent/widget/TASK-0001-frozen",
+    "branch": branch,
     "verdict": "accepted",
     "evidenceReviewed": ["evidence-manifest.json", "audit-verification.json"],
     "verificationResults": [{
@@ -248,12 +267,21 @@ Forbidden files:
 
 - The deterministic widget regression is green.
 TASK
-  cat >"$FIXTURE_ROOT/strict-gate.sh" <<'GATE'
+cat >"$FIXTURE_ROOT/strict-gate.sh" <<'GATE'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]]
-[[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
-  "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]]
+if [[ -n "${SINGULAR_TEST_TASK_CONTRACT:-}" ]]; then
+  [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]]
+  [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
+    "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]]
+fi
+if [[ -z "${SINGULAR_TEST_TASK_CONTRACT:-}" \
+    && -f .frozen-repair-case \
+    && "$(cat internal/widget/parser.go 2>/dev/null || true)" != *"authorized repair marker"* ]]; then
+  printf '%s\n' '{"schema":"singular.orchestration.gate-observation.v0","failures":[{"signature":"repair:required","title":"authorized repair marker is missing"}]}' \
+    >"${SINGULAR_GATE_REPORT_FILE:?}"
+  exit 1
+fi
 printf '%s\n' '{"schema":"singular.orchestration.gate-observation.v0","failures":[]}' \
   >"${SINGULAR_GATE_REPORT_FILE:?}"
 GATE
@@ -627,6 +655,160 @@ PY
   echo "ok: frozen campaign publishes one accepted terminal attempt through real reconcile"
 }
 
+prepare_native_repair() {
+  local name="$1"
+  make_fixture "$name"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<'PY'
+import sys
+p=sys.argv[1]; text=open(p, encoding="utf-8").read()
+text=text.replace("Area: widget\n", "Area: widget\nRisk tier: high\n", 1)
+open(p, "w", encoding="utf-8").write(text)
+PY
+  : >"$FIXTURE_ROOT/.frozen-repair-case"
+  git -C "$FIXTURE_ROOT" add .frozen-repair-case docs/orchestration/tasks/TASK-0001.md
+  git -C "$FIXTURE_ROOT" commit -qm 'declare frozen repair fixture control'
+  start_campaign success
+
+  reconcile success "$name-predecessor-dispatch"
+  reconcile success "$name-predecessor-import"
+  assert_terminal_contract completed "" accepted
+  assert_eq "$(calls worker)" "1" "$name predecessor worker calls"
+  assert_eq "$(calls auditor)" "1" "$name predecessor auditor calls"
+
+  PREDECESSOR_RUN="$($PYTHON_BIN - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "accepted", d
+assert d["attemptLifecycle"]["state"] == "terminal", d
+print(d["attemptLifecycle"]["runId"])
+PY
+)"
+  PREDECESSOR_ATTEMPT_SHA="$(shasum -a 256 "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" | awk '{print $1}')"
+
+  local rc=0
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0001 --run-id "$name-integration-red" \
+    >"$scratch/$name-integration-red.log" 2>&1 || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "$name predecessor unexpectedly integrated"
+  REPAIR_FAILURE_ID="$($PYTHON_BIN - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+      "$PREDECESSOR_RUN" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); c=d["acceptedCandidate"]
+assert c["runId"] == sys.argv[2] and c["state"] == "integration-failed", d
+assert c["failures"][-1]["domain"] == "product", c
+print(c["failures"][-1]["failureId"])
+PY
+)"
+  REPAIR_RUN="RUN-$name-SUCCESSOR"
+  REPAIR_BRANCH="agent/widget/TASK-0001-repair"
+  REPAIR_WORKTREE="$FIXTURE_ROOT/.worktrees/TASK-0001-repair"
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/recover.sh" candidate TASK-0001 \
+    --action repair --successor-run "$REPAIR_RUN" --successor-branch "$REPAIR_BRANCH" \
+    --successor-worktree "$REPAIR_WORKTREE" --failure-id "$REPAIR_FAILURE_ID" \
+    >"$scratch/$name-authorize.log"
+  run_engine success "$PYTHON_BIN" "$ENGINE_HOME/engine/task_lifecycle.py" \
+    repair-dispatch-eligible \
+    --lease "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+    --task-contract "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" >/dev/null \
+    || fail "$name public repair was absent from the scheduler frontier"
+}
+
+assert_repair_scheduler_identity() {
+  local name="$1" expected_kind="$2"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+    "$FIXTURE_ROOT/.singular-state/dispatch/TASK-0001.json" \
+    "$PREDECESSOR_RUN" "$REPAIR_RUN" "$expected_kind" <<'PY'
+import json, sys
+lease=json.load(open(sys.argv[1], encoding="utf-8"))
+dispatch=json.load(open(sys.argv[2], encoding="utf-8"))
+predecessor, successor, kind=sys.argv[3:]
+authority=lease["recoveryAuthorization"]
+attempt=lease["attemptLifecycle"]
+assert authority["state"] == "claimed", lease
+assert lease["runId"] == successor == attempt["runId"], lease
+assert authority["reservationRunId"] == dispatch["runId"] == attempt["reservationRunId"], (lease, dispatch)
+assert authority["reservationOwner"] == lease.get("reservationOwner", lease.get("lastReservationOwner")), lease
+if kind == "outcome-unknown":
+    assert attempt["state"] == "started", attempt
+    assert lease["terminalDisposition"]["kind"] == kind, lease
+else:
+    assert attempt["state"] == "terminal" and attempt["disposition"] == kind, attempt
+assert any(x.get("runId") == predecessor for x in lease["attemptHistory"]), lease
+assert any(x.get("runId") == predecessor for x in lease["terminalDispositionHistory"]), lease
+PY
+}
+
+test_native_repair_scheduler() {
+  local name=repair-native
+  prepare_native_repair "$name"
+  reconcile success "$name-successor-dispatch"
+  reconcile success "$name-successor-import"
+  assert_repair_scheduler_identity "$name" completed
+  assert_eq "$(calls worker)" "2" "$name exactly one repair worker"
+  assert_eq "$(calls auditor)" "2" "$name exactly one repair auditor"
+
+  local merge_before
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0001 --run-id "$name-integration-green" \
+    >"$scratch/$name-integration-green.log" 2>&1 \
+    || fail "$name repair successor did not integrate: $(tail -30 "$scratch/$name-integration-green.log")"
+  merge_before="$($PYTHON_BIN - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["acceptedCandidate"]["mergeCommit"])
+PY
+)"
+  reconcile success "$name-restart-one"
+  reconcile success "$name-restart-two"
+  assert_eq "$(calls worker)" "2" "$name restart did not duplicate repair worker"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" "$merge_before" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "integrated", d
+assert d["recoveryAuthorization"]["state"] == "published", d
+assert d["acceptedCandidate"]["state"] == "integrated", d
+assert d["acceptedCandidate"]["mergeCommit"] == sys.argv[2], d
+PY
+  echo "ok: frozen native accepted predecessor repairs through scheduler and exact integration"
+}
+
+test_native_repair_started_crash() {
+  local name=repair-crash
+  prepare_native_repair "$name"
+  reconcile crash-started "$name-successor-crash"
+  sleep 2
+  reconcile success "$name-reap"
+  assert_repair_scheduler_identity "$name" outcome-unknown
+  assert_eq "$(calls worker)" "2" "$name crashed repair invoked once"
+  local generation
+  generation="$($PYTHON_BIN - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["reservationGeneration"])
+PY
+)"
+  reconcile success "$name-restart"
+  assert_eq "$(calls worker)" "2" "$name restart refused a second repair worker"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" "$generation" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["recoveryAuthorization"]
+assert d["status"] == "blocked", d
+assert d["reservationGeneration"] == int(sys.argv[2]), d
+assert a["state"] == "claimed", a
+assert d["attemptLifecycle"]["runId"] == a["successorRunId"], d
+PY
+  if run_engine success "$PYTHON_BIN" "$ENGINE_HOME/engine/task_lifecycle.py" reserve \
+      --lease "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" --task TASK-0001 \
+      --owner reconcile:ORIGIN-SECOND:TASK-0001 --run ORIGIN-SECOND \
+      --branch "$REPAIR_BRANCH" --area widget \
+      --scope-json '["internal/widget/parser.go","internal/widget/note.txt"]' \
+      --base "$(git -C "$FIXTURE_ROOT" rev-parse target)" --batch BATCH-SECOND \
+      --worktree "$REPAIR_WORKTREE" --imported-dir "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" \
+      --campaign "$(run_engine success "$BASH_BIN" -c '. "$1"; singular_campaign_binding' fixture "$ENGINE_HOME/engine/lib.sh")" \
+      --repo-root "$FIXTURE_ROOT" --engine-source-fingerprint legacy >/dev/null 2>&1; then
+    fail "$name claimed successor was admitted into a new generation"
+  fi
+  echo "ok: started repair crash stays outcome-unknown and cannot regenerate"
+}
+
 test_infra_exhaustion() {
   make_fixture infra
   start_campaign infra
@@ -688,10 +870,14 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     test_public_continuation_budget continuation-budget-exhausted 1
     ;;
   continuation-bootstrap) test_public_continuation_bootstrap_reissue ;;
+  repair) test_native_repair_scheduler ;;
+  repair-crash) test_native_repair_started_crash ;;
   continuation)
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
     test_public_continuation_bootstrap_reissue
+    test_native_repair_scheduler
+    test_native_repair_started_crash
     ;;
   all)
     test_success
