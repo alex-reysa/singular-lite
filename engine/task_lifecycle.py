@@ -16,6 +16,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -236,6 +237,39 @@ def validate_recovery_authorization(lease: dict[str, Any], authority: dict[str, 
     return predecessor
 
 
+def repair_dispatch_eligible(lease: dict[str, Any], task_path: Path) -> bool:
+    """Return whether an accepted task has one unspent, exact repair frontier."""
+    authority = lease.get("recoveryAuthorization")
+    if not isinstance(authority, dict):
+        return False
+    if authority.get("action") != "repair" or authority.get("state") != "issued":
+        return False
+    if lease.get("status") != "ready" or lease.get("reservationOwner"):
+        return False
+    if authority.get("reservationOwner") or authority.get("reservationGeneration"):
+        return False
+    if authority.get("campaignBinding") != lease.get("campaignBinding", "legacy"):
+        return False
+    if not task_path.is_file() or sha256(task_path) != authority.get("taskContractSha256"):
+        return False
+    predecessor_run = str(authority.get("predecessorRunId", ""))
+    for field in ("attemptLifecycle", "terminalDisposition"):
+        value = lease.get(field)
+        if isinstance(value, dict) and str(value.get("runId", "")) != predecessor_run:
+            return False
+    try:
+        validate_recovery_authorization(lease, authority)
+    except LifecycleError:
+        return False
+    return True
+
+
+def check_repair_dispatch_eligible(args: argparse.Namespace) -> None:
+    if not repair_dispatch_eligible(read_object(Path(args.lease)), Path(args.task_contract)):
+        raise LifecycleError("repair is not dispatch eligible")
+    print("eligible")
+
+
 def read_object(path: Path, *, missing: bool = False) -> dict[str, Any]:
     if missing and not path.exists():
         return {}
@@ -283,6 +317,88 @@ def reservation_matches(record: dict[str, Any], owner: str, generation: int) -> 
     )
 
 
+def git_output(worktree: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise LifecycleError((completed.stderr or completed.stdout).strip() or "git command failed")
+    return completed.stdout.strip()
+
+
+def git_is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def partial_paths(worktree: Path) -> tuple[list[str], list[str]]:
+    def names(*args: str) -> list[str]:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode:
+            raise LifecycleError(completed.stderr.decode(errors="replace").strip() or "git status failed")
+        return [item.decode("utf-8", errors="surrogateescape") for item in completed.stdout.split(b"\0") if item]
+
+    unstaged = names("diff", "--name-only", "-z")
+    staged = names("diff", "--cached", "--name-only", "-z")
+    untracked = names("ls-files", "--others", "--exclude-standard", "-z")
+    return sorted(set(unstaged + staged + untracked)), sorted(set(staged))
+
+
+def partial_snapshot(worktree: Path, paths: list[str] | None = None,
+                     staged_paths: list[str] | None = None) -> dict[str, Any]:
+    discovered, discovered_staged = partial_paths(worktree)
+    paths = discovered if paths is None else paths
+    staged_paths = discovered_staged if staged_paths is None else staged_paths
+    entries: dict[str, Any] = {}
+    for relative in paths:
+        candidate = worktree / relative
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            entries[relative] = {"kind": "missing"}
+            continue
+        mode = format(stat.S_IMODE(info.st_mode), "04o")
+        if stat.S_ISLNK(info.st_mode):
+            raw = os.readlink(candidate).encode("utf-8", errors="surrogateescape")
+            kind = "symlink"
+        elif stat.S_ISREG(info.st_mode):
+            raw = candidate.read_bytes()
+            kind = "file"
+        else:
+            raw = b""
+            kind = "other"
+        entries[relative] = {
+            "kind": kind,
+            "mode": mode,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    staged: dict[str, str] = {}
+    for relative in staged_paths:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "ls-files", "--stage", "--", relative],
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode:
+            raise LifecycleError("cannot snapshot staged partial work")
+        staged[relative] = completed.stdout.decode("utf-8", errors="surrogateescape")
+    value = {"paths": paths, "stagedPaths": staged_paths, "entries": entries, "staged": staged}
+    value["sha256"] = sha256_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
+    return value
+
+
 def reserve(args: argparse.Namespace) -> None:
     lease_path = Path(args.lease)
     with locked(lease_path, missing=True) as lease:
@@ -296,8 +412,12 @@ def reserve(args: argparse.Namespace) -> None:
             and recovery.get("state") in {"issued", "claimed"}
             else None
         )
+        reservation_run = args.run
+        execution_run = args.run
         if repair is not None:
             validate_recovery_authorization(lease, repair)
+            if args.campaign != repair.get("campaignBinding"):
+                raise LifecycleError("reservation campaign does not match repair authority")
             exact = (
                 args.run == repair.get("successorRunId")
                 and args.branch == repair.get("successorBranch")
@@ -307,9 +427,28 @@ def reserve(args: argparse.Namespace) -> None:
             if not exact and not scheduler_override:
                 raise LifecycleError("reservation does not match the authorized repair successor")
             if scheduler_override:
-                args.run = str(repair["successorRunId"])
+                execution_run = str(repair["successorRunId"])
                 args.branch = str(repair["successorBranch"])
                 args.worktree = str(repair["successorWorktree"])
+        status = str(lease.get("status", ""))
+        current_owner = str(lease.get("reservationOwner", ""))
+        current_generation = max(
+            int(lease.get("reservationGeneration", 0) or 0),
+            int(lease.get("lastReservationGeneration", 0) or 0),
+        )
+        if repair is not None and repair.get("state") == "claimed":
+            same_reservation = (
+                status in ACTIVE
+                and current_owner == args.owner
+                and lease.get("reservationRunId") == reservation_run
+                and repair.get("reservationOwner") == args.owner
+                and repair.get("reservationGeneration") == current_generation
+                and repair.get("reservationRunId") == reservation_run
+            )
+            if same_reservation:
+                print(current_generation)
+                return
+            raise LifecycleError("claimed repair authority cannot reserve another execution")
         if isinstance(candidate, dict) and candidate.get("state") != "integrated":
             raise LifecycleError("durable accepted candidate requires integration recovery, not redispatch")
         imported_dir = Path(args.imported_dir)
@@ -327,21 +466,99 @@ def reserve(args: argparse.Namespace) -> None:
                     raise LifecycleError(
                         f"accepted packet {packet_path.name} requires integration, not redispatch"
                     )
-        status = str(lease.get("status", ""))
+        continuation = lease.get("continuationAuthorization")
+        continuation_issued = (
+            continuation if isinstance(continuation, dict)
+            and continuation.get("state") == "issued"
+            else None
+        )
+        if (
+            isinstance(continuation, dict)
+            and continuation_issued is None
+            and repair is None
+        ):
+            raise LifecycleError("continuation authority is not reservable")
+        terminal = lease.get("terminalDisposition")
+        attempt = lease.get("attemptLifecycle")
+        predecessor_run = str(repair.get("predecessorRunId", "")) if repair else ""
+        predecessor_attempt = (
+            isinstance(attempt, dict)
+            and attempt.get("state") in {"started", "terminal"}
+            and str(attempt.get("runId", "")) == predecessor_run
+        )
+        predecessor_terminal = (
+            isinstance(terminal, dict)
+            and str(terminal.get("runId", "")) == predecessor_run
+        )
+        if continuation_issued is not None:
+            exact_continuation = (
+                args.branch == continuation_issued.get("branch")
+                and str(Path(args.worktree).resolve())
+                == str(Path(str(continuation_issued.get("worktree"))).resolve())
+                and args.campaign == continuation_issued.get("campaignBinding")
+                and args.engine_source_fingerprint
+                == continuation_issued.get("engineSourceFingerprint")
+                and git_is_ancestor(
+                    Path(args.repo_root),
+                    str(continuation_issued.get("targetHeadAtAuthorization", "")),
+                    args.base,
+                )
+            )
+            if not exact_continuation:
+                raise LifecycleError("reservation does not match the one-shot continuation authority")
+        elif isinstance(terminal, dict) or isinstance(attempt, dict):
+            # A validated accepted-candidate repair is the other existing form
+            # of explicit successor authority. Its predecessor terminal state
+            # remains history, but must not force the unrelated partial-work
+            # continuation protocol.
+            if repair is None or not (
+                (not isinstance(attempt, dict) or predecessor_attempt)
+                and (not isinstance(terminal, dict) or predecessor_terminal)
+            ):
+                raise LifecycleError("terminal or started work requires explicit successor authority")
         if status in {"accepted", "integrated"}:
             raise LifecycleError(f"{status} work cannot be reserved for implementation")
-        current_owner = str(lease.get("reservationOwner", ""))
-        current_generation = max(
-            int(lease.get("reservationGeneration", 0) or 0),
-            int(lease.get("lastReservationGeneration", 0) or 0),
-        )
         if status in ACTIVE and current_owner:
-            if current_owner == args.owner and lease.get("reservationRunId") == args.run:
+            if current_owner == args.owner and lease.get("reservationRunId") == reservation_run:
                 print(current_generation)
                 return
             raise LifecycleError(f"reservation already owned by {current_owner}@{current_generation}")
         generation = current_generation + 1
         timestamp = now()
+        # Admission has succeeded. Move the predecessor generation's immutable
+        # outcome aside before binding a fresh current generation. The guards
+        # above inspect these fields before they are archived, so history can
+        # never turn into implicit redispatch authority.
+        if isinstance(attempt, dict):
+            history = lease.setdefault("attemptHistory", [])
+            identity = (
+                attempt.get("reservationOwner"), attempt.get("reservationGeneration"),
+                attempt.get("runId"), attempt.get("state"),
+            )
+            if not any(
+                isinstance(item, dict) and (
+                    item.get("reservationOwner"), item.get("reservationGeneration"),
+                    item.get("runId"), item.get("state"),
+                ) == identity
+                for item in history
+            ):
+                history.append(copy.deepcopy(attempt))
+            lease.pop("attemptLifecycle", None)
+        if isinstance(terminal, dict):
+            history = lease.setdefault("terminalDispositionHistory", [])
+            identity = (
+                terminal.get("reservationOwner"), terminal.get("reservationGeneration"),
+                terminal.get("runId"), terminal.get("kind"),
+            )
+            if not any(
+                isinstance(item, dict) and (
+                    item.get("reservationOwner"), item.get("reservationGeneration"),
+                    item.get("runId"), item.get("kind"),
+                ) == identity
+                for item in history
+            ):
+                history.append(copy.deepcopy(terminal))
+            lease.pop("terminalDisposition", None)
         lease.update({
             "taskId": args.task,
             "branch": args.branch,
@@ -350,13 +567,15 @@ def reserve(args: argparse.Namespace) -> None:
             "fileScope": " ".join(json.loads(args.scope_json)),
             "ownedFiles": json.loads(args.scope_json),
             "baseSha": args.base,
+            "reservationBaseSha": args.base,
+            "campaignBinding": args.campaign,
             "batchId": args.batch,
-            "runId": args.run,
+            "runId": execution_run,
             "worktree": args.worktree,
             "status": "planned",
             "reservationOwner": args.owner,
             "reservationGeneration": generation,
-            "reservationRunId": args.run,
+            "reservationRunId": reservation_run,
             "reservationDeadlineAt": (
                 datetime.now(timezone.utc) + timedelta(seconds=args.deadline_seconds)
             ).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -367,6 +586,21 @@ def reserve(args: argparse.Namespace) -> None:
         lease.setdefault("retryCount", 0)
         lease.setdefault("maxRetries", int(os.environ.get("SINGULAR_MAX_RETRIES", "3")))
         lease.setdefault("productPassStarted", False)
+        if continuation_issued is not None:
+            continuation_issued.update({
+                "state": "reserved",
+                "reservationOwner": args.owner,
+                "reservationGeneration": generation,
+                "reservationRunId": reservation_run,
+                "reservedAt": timestamp,
+            })
+        if repair is not None:
+            repair.update({
+                "reservationOwner": args.owner,
+                "reservationGeneration": generation,
+                "reservationRunId": reservation_run,
+                "reservedAt": timestamp,
+            })
         print(generation)
 
 
@@ -377,6 +611,31 @@ def bind_dispatch(args: argparse.Namespace) -> None:
             record, args.owner, args.generation
         ):
             raise LifecycleError("dispatch record already belongs to another reservation")
+        same_generation = reservation_matches(record, args.owner, args.generation)
+        if record and not same_generation:
+            # Per-task dispatch files are reused. Preserve the complete prior
+            # generation record, including its terminal attempt and exit
+            # evidence, then remove only generation-local current fields.
+            prior_owner = str(record.get("reservationOwner", ""))
+            prior_generation = int(record.get("reservationGeneration", 0) or 0)
+            if prior_owner and prior_generation:
+                history = record.setdefault("dispatchHistory", [])
+                prior = {
+                    key: copy.deepcopy(value)
+                    for key, value in record.items()
+                    if key not in {"dispatchHistory", "_deleteRecord"}
+                }
+                if not any(
+                    isinstance(item, dict)
+                    and item.get("reservationOwner") == prior_owner
+                    and int(item.get("reservationGeneration", 0) or 0) == prior_generation
+                    for item in history
+                ):
+                    history.append(prior)
+            for key in (
+                "attemptLifecycle", "exitCode", "outcome", "reapedAt", "finishedAt"
+            ):
+                record.pop(key, None)
         record.update({
             "taskId": args.task,
             "runId": args.run,
@@ -390,7 +649,92 @@ def bind_dispatch(args: argparse.Namespace) -> None:
             "startedAt": now(),
             "reservationOwner": args.owner,
             "reservationGeneration": args.generation,
+            "campaignBinding": args.campaign,
         })
+
+
+def record_attempt(args: argparse.Namespace) -> None:
+    if args.state not in {"started", "terminal"}:
+        raise LifecycleError("invalid attempt lifecycle state")
+    if args.state == "terminal" and args.disposition not in {
+        "completed", "blocked", "campaign-mismatch", "retryable-failure"
+    }:
+        raise LifecycleError("invalid terminal disposition")
+    if args.state == "started" and (args.disposition or args.failure_class or args.terminal_action):
+        raise LifecycleError("started attempt cannot carry a terminal disposition")
+    lease_path = Path(args.lease)
+    record_path = Path(args.record)
+    with locked(record_path) as record:
+        if not reservation_matches(record, args.owner, args.generation):
+            raise LifecycleError("stale worker cannot publish attempt disposition")
+        if record.get("runId") != args.reservation_run:
+            raise LifecycleError("attempt reservation run does not match dispatch")
+        if record.get("campaignBinding", "legacy") != args.campaign:
+            raise LifecycleError("attempt campaign does not match dispatch")
+        with locked(lease_path) as lease:
+            if not reservation_matches(lease, args.owner, args.generation):
+                raise LifecycleError("attempt does not own the current lease")
+            if lease.get("reservationRunId") != args.reservation_run:
+                raise LifecycleError("attempt reservation run does not match lease")
+            if lease.get("campaignBinding", "legacy") != args.campaign:
+                raise LifecycleError("attempt campaign does not match lease")
+            previous = record.get("attemptLifecycle")
+            if isinstance(previous, dict):
+                same = (
+                    previous.get("taskId") == args.task
+                    and previous.get("runId") == args.run
+                    and previous.get("campaignBinding") == args.campaign
+                )
+                if not same:
+                    raise LifecycleError("another attempt already owns this dispatch")
+                if previous.get("state") == "terminal":
+                    if args.state == "terminal" and previous.get("disposition") == args.disposition:
+                        return
+                    raise LifecycleError("terminal attempt disposition is immutable")
+            timestamp = now()
+            value = {
+                "schema": "singular.orchestration.attempt-lifecycle.v0",
+                "taskId": args.task,
+                "runId": args.run,
+                "reservationRunId": args.reservation_run,
+                "reservationOwner": args.owner,
+                "reservationGeneration": args.generation,
+                "campaignBinding": args.campaign,
+                "state": args.state,
+                "updatedAt": timestamp,
+            }
+            if isinstance(previous, dict):
+                value["startedAt"] = previous.get("startedAt", timestamp)
+                if previous.get("continuationAuthorizationId"):
+                    value["continuationAuthorizationId"] = previous[
+                        "continuationAuthorizationId"
+                    ]
+            else:
+                value["startedAt"] = timestamp
+            if args.state == "terminal":
+                if not isinstance(previous, dict) or previous.get("state") != "started":
+                    raise LifecycleError("terminal attempt requires a started predecessor")
+                value.update({
+                    "disposition": args.disposition,
+                    "failureClass": args.failure_class,
+                    "action": args.terminal_action,
+                    "finishedAt": timestamp,
+                })
+            record["attemptLifecycle"] = copy.deepcopy(value)
+            lease["attemptLifecycle"] = copy.deepcopy(value)
+            if args.state == "terminal":
+                lease["terminalDisposition"] = {
+                    "schema": "singular.orchestration.terminal-disposition.v0",
+                    "kind": args.disposition,
+                    "failureClass": args.failure_class,
+                    "action": args.terminal_action,
+                    "runId": args.run,
+                    "reservationRunId": args.reservation_run,
+                    "reservationOwner": args.owner,
+                    "reservationGeneration": args.generation,
+                    "campaignBinding": args.campaign,
+                    "recordedAt": timestamp,
+                }
 
 
 def write_exit(args: argparse.Namespace) -> None:
@@ -417,6 +761,303 @@ def read_exit(args: argparse.Namespace) -> None:
     print(generation)
 
 
+def reconcile_orphan_reservation(args: argparse.Namespace) -> None:
+    lease_path = Path(args.lease)
+    record_path = Path(args.record)
+    if record_path.exists():
+        record = read_object(record_path)
+        if record.get("state") == "launched" and reservation_matches(
+            record, args.owner, args.generation
+        ):
+            raise LifecycleError("launched reservation must be finished by its dispatch owner")
+    with locked(lease_path) as lease:
+        existing = lease.get("terminalDisposition")
+        exact = {
+            "reservationOwner": args.owner,
+            "reservationGeneration": args.generation,
+            "reservationRunId": args.run,
+            "campaignBinding": args.campaign,
+            "reservationBaseSha": args.reservation_base,
+            "candidateSourceSha": args.candidate_source,
+            "worktree": str(Path(args.worktree).resolve()),
+        }
+        if isinstance(existing, dict) and existing.get("kind") == "orphan-reservation":
+            if all(existing.get(key) == value for key, value in exact.items()):
+                print(existing.get("reconciliationId", ""))
+                return
+            raise LifecycleError("reconciled orphan identity mismatch")
+        if not reservation_matches(lease, args.owner, args.generation):
+            raise LifecycleError("orphan reservation owner or generation mismatch")
+        if lease.get("reservationRunId") != args.run:
+            raise LifecycleError("orphan reservation run mismatch")
+        if lease.get("campaignBinding", "legacy") != args.campaign:
+            raise LifecycleError("orphan reservation campaign mismatch")
+        if lease.get("baseSha") != args.reservation_base:
+            raise LifecycleError("orphan reservation base mismatch")
+        if str(Path(str(lease.get("worktree", ""))).resolve()) != exact["worktree"]:
+            raise LifecycleError("orphan reservation worktree mismatch")
+        worktree = Path(exact["worktree"])
+        if git_output(worktree, "rev-parse", "HEAD") != args.candidate_source:
+            raise LifecycleError("orphan candidate source does not match the preserved worktree")
+        if str(lease.get("status", "")) not in ACTIVE:
+            raise LifecycleError("orphan reservation is no longer active")
+        timestamp = now()
+        identity = sha256_text(json.dumps(exact, sort_keys=True, separators=(",", ":")))
+        lease["status"] = "blocked"
+        lease["failureReason"] = "unlaunched-orphan-reservation"
+        lease["nextAction"] = "authorize an exact one-shot continuation or supersede"
+        lease["terminalDisposition"] = {
+            "schema": "singular.orchestration.terminal-disposition.v0",
+            "kind": "orphan-reservation",
+            **exact,
+            "reconciliationId": identity,
+            "recordedAt": timestamp,
+        }
+        lease["lastReservationOwner"] = args.owner
+        lease["lastReservationGeneration"] = max(
+            int(lease.get("lastReservationGeneration", 0) or 0), args.generation
+        )
+        lease.pop("reservationOwner", None)
+        lease.pop("reservationRunId", None)
+        lease.pop("reservationDeadlineAt", None)
+        lease["updatedAt"] = timestamp
+        print(identity)
+
+
+def authorize_continuation(args: argparse.Namespace) -> None:
+    lease_path = Path(args.lease)
+    authority_path = Path(args.authority)
+    task_path = Path(args.task_contract)
+    authority = read_object(authority_path)
+    if authority.get("schema") != "singular.orchestration.continuation-authority.v0":
+        raise LifecycleError("unsupported continuation authority schema")
+    expected = {
+        "taskId": args.expected_task,
+        "predecessorOwner": args.predecessor_owner,
+        "predecessorGeneration": args.predecessor_generation,
+        "predecessorRunId": args.predecessor_run,
+        "predecessorCampaignBinding": args.predecessor_campaign,
+        "predecessorReservationBaseSha": args.predecessor_reservation_base,
+        "candidateSourceSha": args.candidate_source,
+        "integrationTargetSha": args.integration_target,
+        "integrationTargetBranch": args.integration_target_branch,
+        "targetHeadAtAuthorization": args.target_head_at_authorization,
+        "engineSourceFingerprint": args.engine_source_fingerprint,
+        "campaignBinding": args.expected_campaign,
+        "worktree": str(Path(args.worktree).resolve()),
+    }
+    for key, value in expected.items():
+        observed = authority.get(key)
+        if key == "worktree":
+            observed = str(Path(str(observed)).resolve())
+        if observed != value:
+            raise LifecycleError(f"continuation authority {key} mismatch")
+    if authority.get("taskContractSha256") != sha256(task_path):
+        raise LifecycleError("continuation task contract changed before authorization")
+    worktree = Path(expected["worktree"])
+    if not worktree.is_dir():
+        raise LifecycleError("continuation worktree is missing")
+    top = Path(git_output(worktree, "rev-parse", "--show-toplevel")).resolve()
+    if top != worktree.resolve():
+        raise LifecycleError("continuation worktree identity mismatch")
+
+    with locked(lease_path) as lease:
+        if isinstance(lease.get("continuationAuthorization"), dict):
+            raise LifecycleError("one-shot continuation authority already exists")
+        terminal = lease.get("terminalDisposition")
+        if not isinstance(terminal, dict) or terminal.get("kind") != "orphan-reservation":
+            raise LifecycleError("continuation requires an exactly reconciled orphan reservation")
+        terminal_expected = {
+            "reservationOwner": args.predecessor_owner,
+            "reservationGeneration": args.predecessor_generation,
+            "reservationRunId": args.predecessor_run,
+            "campaignBinding": args.predecessor_campaign,
+            "reservationBaseSha": args.predecessor_reservation_base,
+            "candidateSourceSha": args.candidate_source,
+            "worktree": expected["worktree"],
+        }
+        if any(terminal.get(key) != value for key, value in terminal_expected.items()):
+            raise LifecycleError("continuation predecessor does not match orphan reconciliation")
+        if str(Path(str(lease.get("worktree", ""))).resolve()) != expected["worktree"]:
+            raise LifecycleError("continuation lease worktree mismatch")
+        if lease.get("branch") != authority.get("branch"):
+            raise LifecycleError("continuation branch mismatch")
+        before_head = git_output(worktree, "rev-parse", "HEAD")
+        if before_head != args.candidate_source:
+            raise LifecycleError("continuation candidate source is not the worktree head")
+        partial_before = partial_snapshot(worktree)
+        partial_after = partial_snapshot(
+            worktree, partial_before["paths"], partial_before["stagedPaths"]
+        )
+        if (partial_after["entries"], partial_after["staged"]) != (
+            partial_before["entries"], partial_before["staged"]
+        ):
+            raise LifecycleError("continuation authorization changed partial work bytes or staged identity")
+        timestamp = now()
+        durable = copy.deepcopy(authority)
+        durable.update({
+            "authorizationId": sha256(authority_path),
+            "authorityPath": str(authority_path),
+            "authoritySha256": sha256(authority_path),
+            "state": "issued",
+            "issuedAt": timestamp,
+            "partialSnapshotSha256": partial_before["sha256"],
+            "partialSnapshot": partial_after,
+            "additionalWorkerAttemptsAuthorized": 1,
+            "additionalWorkerAttemptsClaimed": 0,
+            "additionalWorkerAttemptsRemaining": 1,
+            "preparationFailureCount": 0,
+            "automaticPreparationRetriesRemaining": 1,
+            "predecessorAccounting": {
+                "retryCount": int(lease.get("retryCount", 0) or 0),
+                "maxRetries": int(lease.get("maxRetries", 0) or 0),
+                "productPassStarted": lease.get("productPassStarted") is True,
+                "productPassStartedRunId": str(lease.get("productPassStartedRunId", "") or ""),
+                "infrastructureAttempts": "retained-in-run-artifacts-usage-unknown",
+            },
+        })
+        lease["continuationAuthorization"] = durable
+        lease["status"] = "ready"
+        lease["nextAction"] = "reserve and claim the exact one-shot native continuation"
+        # The retained candidate deliberately stays at its original source.
+        # The separately bound executing source identifies the newer immutable
+        # engine/runtime driving it; integration later performs the ordinary
+        # exact-tree merge and gate against the then-current target.
+        lease["updatedAt"] = timestamp
+        print(durable["authorizationId"])
+
+
+def claim_continuation(args: argparse.Namespace) -> None:
+    lease_path = Path(args.lease)
+    record_path = Path(args.record)
+    task_path = Path(args.task_contract)
+    # This is the continuation's invocation boundary. Dispatch is locked first
+    # (the same order as record_attempt/finish), then the authority claim and
+    # started-attempt disposition are published together. A crash before this
+    # transaction leaves an unspent reserved authority; a crash after it leaves
+    # an owner-bound started attempt and therefore fails closed.
+    with locked(record_path) as record:
+        if not reservation_matches(record, args.owner, args.generation):
+            raise LifecycleError("continuation attempt does not own the dispatch")
+        if record.get("runId") != args.reservation_run:
+            raise LifecycleError("continuation reservation run does not match dispatch")
+        if record.get("campaignBinding", "legacy") != args.campaign:
+            raise LifecycleError("continuation campaign does not match dispatch")
+        if isinstance(record.get("attemptLifecycle"), dict):
+            raise LifecycleError("continuation dispatch already has an attempt")
+        with locked(lease_path) as lease:
+            authority = lease.get("continuationAuthorization")
+            if not isinstance(authority, dict) or authority.get("state") != "reserved":
+                raise LifecycleError("continuation authority is not reserved or was already consumed")
+            if authority.get("authorizationId") != args.authorization_id:
+                raise LifecycleError("continuation authorization id mismatch")
+            exact = (
+                authority.get("reservationOwner") == args.owner
+                and authority.get("reservationGeneration") == args.generation
+                and authority.get("reservationRunId") == args.reservation_run
+                and authority.get("campaignBinding") == args.campaign
+                and authority.get("candidateSourceSha") == args.candidate_source
+                and authority.get("integrationTargetSha") == args.integration_target
+                and authority.get("engineSourceFingerprint")
+                == args.engine_source_fingerprint
+                and str(Path(str(authority.get("worktree"))).resolve())
+                == str(Path(args.worktree).resolve())
+            )
+            if not exact or not reservation_matches(lease, args.owner, args.generation):
+                raise LifecycleError("continuation claim does not match the reserved execution")
+            if authority.get("taskContractSha256") != sha256(task_path):
+                raise LifecycleError("continuation task contract changed before claim")
+            worktree = Path(args.worktree)
+            if git_output(worktree, "rev-parse", "HEAD") != args.candidate_source:
+                raise LifecycleError("continuation candidate source changed before claim")
+            if not git_is_ancestor(
+                Path(args.repo_root),
+                str(authority.get("targetHeadAtAuthorization", "")),
+                args.reservation_base,
+            ):
+                raise LifecycleError("continuation target head is not an ancestor of the reservation base")
+            if lease.get("reservationBaseSha") != args.reservation_base:
+                raise LifecycleError("continuation reservation base changed before claim")
+            expected_snapshot = authority.get("partialSnapshot")
+            if not isinstance(expected_snapshot, dict):
+                raise LifecycleError("continuation partial snapshot is missing")
+            actual_snapshot = partial_snapshot(
+                worktree,
+                [str(item) for item in expected_snapshot.get("paths", [])],
+                [str(item) for item in expected_snapshot.get("stagedPaths", [])],
+            )
+            if (actual_snapshot["entries"], actual_snapshot["staged"]) != (
+                expected_snapshot.get("entries"), expected_snapshot.get("staged")
+            ):
+                raise LifecycleError("continuation partial work changed after authorization")
+            timestamp = now()
+            attempt = {
+                "schema": "singular.orchestration.attempt-lifecycle.v0",
+                "taskId": args.task,
+                "runId": args.run,
+                "reservationRunId": args.reservation_run,
+                "reservationOwner": args.owner,
+                "reservationGeneration": args.generation,
+                "campaignBinding": args.campaign,
+                "state": "started",
+                "continuationAuthorizationId": args.authorization_id,
+                "startedAt": timestamp,
+                "updatedAt": timestamp,
+            }
+            authority.update({
+                "state": "claimed",
+                "executionRunId": args.run,
+                "claimedAt": timestamp,
+                "additionalWorkerAttemptsClaimed": 1,
+                "additionalWorkerAttemptsRemaining": 0,
+            })
+            record["attemptLifecycle"] = copy.deepcopy(attempt)
+            lease["attemptLifecycle"] = copy.deepcopy(attempt)
+            lease["updatedAt"] = timestamp
+
+
+def rearm_continuation_preparation(args: argparse.Namespace) -> None:
+    """Rearm an unspent continuation after distinct host-repair evidence."""
+    evidence_path = Path(args.evidence).resolve()
+    if not evidence_path.is_file():
+        raise LifecycleError("continuation preparation recovery evidence is missing")
+    evidence_sha = sha256(evidence_path)
+    with locked(Path(args.lease)) as lease:
+        authority = lease.get("continuationAuthorization")
+        if not isinstance(authority, dict):
+            raise LifecycleError("missing continuation authority")
+        if authority.get("authorizationId") != args.authorization_id:
+            raise LifecycleError("continuation authorization id mismatch")
+        if authority.get("state") != "preparation-blocked":
+            raise LifecycleError("continuation preparation is not blocked")
+        if int(authority.get("additionalWorkerAttemptsClaimed", 0) or 0) != 0:
+            raise LifecycleError("claimed continuation cannot be rearmed")
+        if int(authority.get("additionalWorkerAttemptsRemaining", 0) or 0) != 1:
+            raise LifecycleError("continuation has no unspent worker allowance")
+        history = authority.setdefault("preparationRecoveryEvidence", [])
+        if any(
+            isinstance(item, dict) and item.get("sha256") == evidence_sha
+            for item in history
+        ):
+            raise LifecycleError("continuation preparation recovery evidence was already used")
+        timestamp = now()
+        history.append({
+            "path": str(evidence_path),
+            "sha256": evidence_sha,
+            "recordedAt": timestamp,
+        })
+        authority["state"] = "issued"
+        authority["preparationRearmCount"] = int(
+            authority.get("preparationRearmCount", 0) or 0
+        ) + 1
+        authority["lastPreparationRearmedAt"] = timestamp
+        lease["status"] = "ready"
+        lease["failureReason"] = ""
+        lease["nextAction"] = "reserve the same unspent continuation after host preparation repair"
+        lease["updatedAt"] = timestamp
+        print(authority["authorizationId"])
+
+
 def finish(args: argparse.Namespace) -> None:
     lease_path = Path(args.lease)
     record_path = Path(args.record)
@@ -428,6 +1069,10 @@ def finish(args: argparse.Namespace) -> None:
     with locked(record_path) as record:
         if not reservation_matches(record, args.owner, args.generation):
             raise LifecycleError("stale owner cannot finish this dispatch")
+        if record.get("runId") != args.reservation_run:
+            raise LifecycleError("stale reservation run cannot finish this dispatch")
+        if record.get("campaignBinding", "legacy") != args.campaign:
+            raise LifecycleError("stale campaign cannot finish this dispatch")
         if not lease_path.exists():
             return
         with locked(lease_path) as lease:
@@ -451,6 +1096,8 @@ def finish(args: argparse.Namespace) -> None:
                     "stale owner cannot finish successor lease "
                     f"{lease_owner}@{lease_generation}"
                 )
+            if lease.get("campaignBinding", "legacy") != args.campaign:
+                raise LifecycleError("dispatch campaign cannot finish a different lease campaign")
             # Native l1-drive currently rewrites compatibility lease fields and
             # therefore drops the reservation token. In that case the locked
             # dispatch token remains the CAS authority; task, branch, base and
@@ -460,6 +1107,81 @@ def finish(args: argparse.Namespace) -> None:
             if args.batch and lease.get("batchId") not in (None, "", args.batch):
                 raise LifecycleError("lease batch changed before reservation cleanup")
             status = str(lease.get("status", ""))
+            attempt = record.get("attemptLifecycle")
+            continuation = lease.get("continuationAuthorization")
+            if (
+                isinstance(continuation, dict)
+                and continuation.get("state") == "reserved"
+                and continuation.get("reservationOwner") == args.owner
+                and continuation.get("reservationGeneration") == args.generation
+                and continuation.get("reservationRunId") == args.reservation_run
+                and not isinstance(attempt, dict)
+            ):
+                # Preparation or pre-worker context assembly failed. Nothing
+                # consumed the separately authorized worker invocation, so
+                # make the exact authority reservable again without changing
+                # its predecessor accounting or partial-work snapshot.
+                timestamp = now()
+                failures = int(continuation.get("preparationFailureCount", 0) or 0) + 1
+                retries_remaining = max(
+                    0,
+                    int(continuation.get("automaticPreparationRetriesRemaining", 1) or 0) - 1,
+                )
+                continuation["preparationFailureCount"] = failures
+                continuation["automaticPreparationRetriesRemaining"] = retries_remaining
+                continuation["state"] = "issued" if failures == 1 else "preparation-blocked"
+                continuation["lastPreparationFailure"] = args.reason
+                continuation["lastPreparationFailureAt"] = timestamp
+                for key in (
+                    "reservationOwner", "reservationGeneration", "reservationRunId", "reservedAt"
+                ):
+                    continuation.pop(key, None)
+                lease["status"] = "ready" if failures == 1 else "blocked"
+                lease["failureReason"] = args.reason
+                lease["nextAction"] = (
+                    "retry the exact one-shot continuation after repairing host preparation"
+                    if failures == 1
+                    else "inspect the repeated preparation failure; explicit recovery is required"
+                )
+                lease["updatedAt"] = timestamp
+                lease["lastReservationOwner"] = args.owner
+                lease["lastReservationGeneration"] = max(
+                    int(lease.get("lastReservationGeneration", 0) or 0), args.generation
+                )
+                lease.pop("reservationOwner", None)
+                lease.pop("reservationRunId", None)
+                lease.pop("reservationDeadlineAt", None)
+                return
+            disposition = ""
+            failure_reason = args.reason
+            next_action = args.next_action
+            if isinstance(attempt, dict):
+                if (
+                    attempt.get("reservationRunId") != args.reservation_run
+                    or attempt.get("campaignBinding") != args.campaign
+                    or attempt.get("runId") != lease.get("runId")
+                ):
+                    raise LifecycleError("attempt disposition is not bound to the finishing lease")
+                if attempt.get("state") == "terminal":
+                    disposition = str(attempt.get("disposition", ""))
+                    failure_reason = str(attempt.get("failureClass", "") or args.reason)
+                    next_action = str(attempt.get("action", "") or args.next_action)
+                elif attempt.get("state") == "started":
+                    disposition = "outcome-unknown"
+                    failure_reason = "started-attempt-exited-without-terminal-disposition"
+                    next_action = "inspect preserved attempt artifacts and authorize an exact continuation"
+                    lease["terminalDisposition"] = {
+                        "schema": "singular.orchestration.terminal-disposition.v0",
+                        "kind": disposition,
+                        "failureClass": failure_reason,
+                        "action": next_action,
+                        "runId": attempt.get("runId", ""),
+                        "reservationRunId": args.reservation_run,
+                        "reservationOwner": args.owner,
+                        "reservationGeneration": args.generation,
+                        "campaignBinding": args.campaign,
+                        "recordedAt": now(),
+                    }
             if (
                 status == "planned"
                 and lease.get("productPassStarted") is False
@@ -470,9 +1192,14 @@ def finish(args: argparse.Namespace) -> None:
                 lease["_deleteRecord"] = True
                 return
             if status in ACTIVE:
-                lease["status"] = "failed"
-                lease["failureReason"] = args.reason
-                lease["nextAction"] = args.next_action
+                if disposition in {"blocked", "campaign-mismatch", "outcome-unknown"}:
+                    lease["status"] = "blocked"
+                elif disposition == "completed":
+                    pass
+                else:
+                    lease["status"] = "failed"
+                lease["failureReason"] = failure_reason
+                lease["nextAction"] = next_action
                 lease["updatedAt"] = now()
             lease["lastReservationOwner"] = args.owner
             lease["lastReservationGeneration"] = max(
@@ -948,6 +1675,19 @@ def claim_recovery(args: argparse.Namespace) -> None:
             raise LifecycleError("recovery authorization action/run mismatch")
         if authority.get("campaignBinding") != args.campaign:
             raise LifecycleError("recovery authorization campaign mismatch")
+        if args.recovery_action == "repair":
+            if not args.owner or not args.generation or not args.reservation_run:
+                raise LifecycleError("repair claim requires its scheduler reservation identity")
+            exact_reservation = (
+                authority.get("reservationOwner") == args.owner
+                and authority.get("reservationGeneration") == args.generation
+                and authority.get("reservationRunId") == args.reservation_run
+                and reservation_matches(lease, args.owner, args.generation)
+                and lease.get("reservationRunId") == args.reservation_run
+                and lease.get("runId") == args.run
+            )
+            if not exact_reservation:
+                raise LifecycleError("repair claim does not match its scheduler reservation")
         predecessor = validate_recovery_authorization(lease, authority)
         claim_binding = {
             "authorizationId": args.authorization_id,
@@ -1121,6 +1861,9 @@ def parser() -> argparse.ArgumentParser:
     for flag in ("lease", "task", "owner", "run", "branch", "area", "scope_json", "base", "batch", "worktree", "imported_dir"):
         reserve_p.add_argument("--" + flag.replace("_", "-"), required=True)
     reserve_p.add_argument("--deadline-seconds", type=int, default=14400)
+    reserve_p.add_argument("--campaign", default="legacy")
+    reserve_p.add_argument("--repo-root", default="")
+    reserve_p.add_argument("--engine-source-fingerprint", default="legacy")
     reserve_p.set_defaults(action=reserve)
 
     bind = commands.add_parser("bind-dispatch")
@@ -1129,7 +1872,17 @@ def parser() -> argparse.ArgumentParser:
     bind.add_argument("--pid", type=int, required=True)
     bind.add_argument("--pgid", type=int, default=0)
     bind.add_argument("--generation", type=int, required=True)
+    bind.add_argument("--campaign", default="legacy")
     bind.set_defaults(action=bind_dispatch)
+
+    attempt = commands.add_parser("record-attempt")
+    for flag in ("lease", "record", "task", "owner", "run", "reservation_run", "campaign", "state"):
+        attempt.add_argument("--" + flag.replace("_", "-"), required=True)
+    attempt.add_argument("--generation", type=int, required=True)
+    attempt.add_argument("--disposition", default="")
+    attempt.add_argument("--failure-class", default="")
+    attempt.add_argument("--action", dest="terminal_action", default="")
+    attempt.set_defaults(action=record_attempt)
 
     exit_p = commands.add_parser("write-exit")
     for flag in ("record", "exit_file", "owner"):
@@ -1144,7 +1897,7 @@ def parser() -> argparse.ArgumentParser:
     read_p.set_defaults(action=read_exit)
 
     finish_p = commands.add_parser("finish")
-    for flag in ("lease", "record", "task", "owner", "batch", "reason", "next_action"):
+    for flag in ("lease", "record", "task", "owner", "batch", "reason", "next_action", "reservation_run", "campaign"):
         finish_p.add_argument("--" + flag.replace("_", "-"), required=True)
     finish_p.add_argument("--generation", type=int, required=True)
     finish_p.set_defaults(action=finish)
@@ -1160,6 +1913,42 @@ def parser() -> argparse.ArgumentParser:
     finalize_p.add_argument("--generation", type=int, required=True)
     finalize_p.add_argument("--exit-code", type=int, required=True)
     finalize_p.set_defaults(action=finalize)
+
+    orphan = commands.add_parser("reconcile-orphan-reservation")
+    for flag in (
+        "lease", "record", "task", "owner", "run", "campaign",
+        "reservation_base", "candidate_source", "worktree",
+    ):
+        orphan.add_argument("--" + flag.replace("_", "-"), required=True)
+    orphan.add_argument("--generation", type=int, required=True)
+    orphan.set_defaults(action=reconcile_orphan_reservation)
+
+    continuation = commands.add_parser("authorize-continuation")
+    for flag in (
+        "lease", "authority", "task_contract", "expected_task", "expected_campaign",
+        "predecessor_owner", "predecessor_run", "predecessor_campaign",
+        "predecessor_reservation_base", "candidate_source", "integration_target",
+        "integration_target_branch", "target_head_at_authorization",
+        "engine_source_fingerprint", "worktree",
+    ):
+        continuation.add_argument("--" + flag.replace("_", "-"), required=True)
+    continuation.add_argument("--predecessor-generation", type=int, required=True)
+    continuation.set_defaults(action=authorize_continuation)
+
+    claim_cont = commands.add_parser("claim-continuation")
+    for flag in (
+        "lease", "record", "task", "task_contract", "authorization_id", "owner", "reservation_run",
+        "campaign", "candidate_source", "integration_target", "engine_source_fingerprint",
+        "repo_root", "reservation_base", "worktree", "run",
+    ):
+        claim_cont.add_argument("--" + flag.replace("_", "-"), required=True)
+    claim_cont.add_argument("--generation", type=int, required=True)
+    claim_cont.set_defaults(action=claim_continuation)
+
+    rearm_cont = commands.add_parser("rearm-continuation-preparation")
+    for flag in ("lease", "authorization_id", "evidence"):
+        rearm_cont.add_argument("--" + flag.replace("_", "-"), required=True)
+    rearm_cont.set_defaults(action=rearm_continuation_preparation)
 
     retain = commands.add_parser("retain-candidate")
     for flag in ("lease", "packet", "audit", "task_file", "task", "run", "branch", "head", "tree", "campaign", "acceptance_mode"):
@@ -1191,7 +1980,15 @@ def parser() -> argparse.ArgumentParser:
     for flag in ("lease", "authorization_id", "head", "tree", "campaign", "run"):
         claim.add_argument("--" + flag.replace("_", "-"), required=True)
     claim.add_argument("--action", dest="recovery_action", choices=("repair", "regate"), required=True)
+    claim.add_argument("--owner", default="")
+    claim.add_argument("--generation", type=int, default=0)
+    claim.add_argument("--reservation-run", default="")
     claim.set_defaults(action=claim_recovery)
+
+    repair_eligible = commands.add_parser("repair-dispatch-eligible")
+    repair_eligible.add_argument("--lease", required=True)
+    repair_eligible.add_argument("--task-contract", required=True)
+    repair_eligible.set_defaults(action=check_repair_dispatch_eligible)
 
     tested = commands.add_parser("candidate-tested")
     for flag in (
