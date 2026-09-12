@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-12T21:41:39Z — TASK-1104 — supersede
+
+- Run: `ORIGIN-20260912T214139Z-95697`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: Preserve exhausted native candidate and both unsuccessful audits; qualify corrected retained B3 implementation through transparent successor with fresh native review.
+
 ### 2026-09-12T18:47:38Z — TASK-1104 — escalate-parked
 
 - Run: `RUN-20260912T175349Z-25584`
