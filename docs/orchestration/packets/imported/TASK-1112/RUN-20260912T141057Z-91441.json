@@ -1,0 +1,154 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PACKET-RUN-20260912T141057Z-91441-TASK-1112",
+  "runId": "RUN-20260912T141057Z-91441",
+  "taskId": "TASK-1112",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "3543f0b36c6388dbb570ae3c2071a090e804f14d",
+  "branch": "codex/brain-rescue/TASK-1112",
+  "headSha": "a81f2a50dc99d5a6ae3052be61be35d2e0b6fd9c",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1112",
+  "ownedFiles": [
+    "engine/reconcile.sh",
+    "engine/autonomate.sh",
+    "engine/lib.sh",
+    "engine/doctor.py",
+    "engine/provider_resolver.py",
+    "engine/health_details.py",
+    "engine/ops.sh",
+    "engine/reconcile_index.py",
+    "plugin/scripts/singular_graph_server.py",
+    "plugin/scripts/test_singular_graph_server.py",
+    "plugin/scripts/singular_graph_ops.py",
+    "tests/test-incremental-reconcile.sh",
+    "tests/test-dynamic-dispatch.sh",
+    "tests/test-reconcile-low-disk.sh",
+    "tests/test-diagnostic-compatibility.sh",
+    "tests/test-config-loader.sh",
+    "tests/test-autonomate-progress-accounting.sh",
+    "tests/test-doctor-json.sh",
+    "tests/test-doctor-model-conformance.sh",
+    "tests/test-effective-config-parity.sh",
+    "README.md"
+  ],
+  "changedFiles": [
+    "engine/autonomate.sh",
+    "engine/doctor.py",
+    "engine/health_details.py",
+    "engine/lib.sh",
+    "engine/ops.sh",
+    "engine/provider_resolver.py",
+    "engine/reconcile.sh",
+    "engine/reconcile_index.py",
+    "plugin/scripts/singular_graph_server.py",
+    "plugin/scripts/test_singular_graph_server.py",
+    "tests/test-autonomate-progress-accounting.sh",
+    "tests/test-config-loader.sh",
+    "tests/test-diagnostic-compatibility.sh",
+    "tests/test-doctor-model-conformance.sh",
+    "tests/test-dynamic-dispatch.sh",
+    "tests/test-effective-config-parity.sh",
+    "tests/test-incremental-reconcile.sh",
+    "tests/test-reconcile-low-disk.sh"
+  ],
+  "commands": [
+    {
+      "cmd": "test -f tests/test-incremental-reconcile.sh && test -f tests/test-diagnostic-compatibility.sh && test -f tests/test-dynamic-dispatch.sh && test -f tests/test-reconcile-low-disk.sh && test -f tests/test-doctor-json.sh && test -f tests/test-effective-config-parity.sh && test -f tests/test-doctor-model-conformance.sh && test -f tests/test-ops-health.sh && test -f tests/test-config-loader.sh && test -f tests/test-console-server.sh && test -f tests/test-provider-resolver-parity.sh && test -f tests/test-dag-evaluation-diagnostics.sh && test -f tests/test-autonomate-progress-accounting.sh && test -f tests/test-campaign-freeze.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-incremental-reconcile.sh test-diagnostic-compatibility.sh test-dynamic-dispatch.sh test-reconcile-low-disk.sh test-doctor-json.sh test-effective-config-parity.sh test-doctor-model-conformance.sh test-ops-health.sh test-config-loader.sh test-console-server.sh test-provider-resolver-parity.sh test-dag-evaluation-diagnostics.sh test-autonomate-progress-accounting.sh test-campaign-freeze.sh",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "Completed in the foreground: 12 passed and 2 failed. The harness classified disposable-worktree registry access as host-required; failures were test-campaign-freeze.sh and sandboxed test-console-server.sh. The unchanged candidate has a separate authoritative actual-host 14/14 receipt."
+    }
+  ],
+  "tests": [
+    {
+      "name": "diagnostic correction host gate at rejected 9517 candidate",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "complete corrected candidate host gate",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "required TASK-1112 regression gate",
+      "phase": "regression",
+      "status": "failed",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "red-raw-process-capture",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "red-source-receipt",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/diagnostic-contract-v2/candidate-host-001/receipt.json"
+    },
+    {
+      "kind": "green-raw-process-capture",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "green-authoritative-host-receipt",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/diagnostic-contract-v2/candidate-host-002/receipt.json"
+    },
+    {
+      "kind": "candidate-source-provenance",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/diagnostic-contract-v2/root-committed-provenance-candidate.json"
+    },
+    {
+      "kind": "task-seed-and-18-file-hash-binding",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/diagnostic-native-onepass-20260912/seed-prepared.json"
+    },
+    {
+      "kind": "independent-actual-code-diagnosis",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/task1108-contract-correction/diagnostic-contract-escalation.json"
+    },
+    {
+      "kind": "reconciliation-red-raw-process-capture",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/task1108-contract-correction/reconciliation/red-001/test-incremental-reconcile.log"
+    },
+    {
+      "kind": "reconciliation-green-raw-process-capture",
+      "ref": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/task1108-contract-correction/reconciliation/green-actual-003/test-incremental-reconcile.log"
+    },
+    {
+      "kind": "fresh-sandbox-regression-capture",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260912T141057Z-91441/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A7-ONEPASS-20260912:sha256:7410de5e64f38dc6eefc9ce881c16c8fdb75cb6d9415d223f144e145762685e9:epoch:cf7e95121abf258373f8a73e123b79f131c893a18731790e"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260912T141057Z-91441/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260912T141057Z-91441/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260912T141057Z-91441/evidence-manifest.json"
+    }
+  ],
+  "blockers": [
+    {
+      "kind": "sandbox-infrastructure",
+      "detail": "The exact fresh regression gate could not pass two host-sensitive checks: disposable-worktree registry access was denied and the console-server suite produced 24 sandbox errors. No corrective product retry or source mutation was performed. The same verified candidate bytes retain the authoritative unchanged actual-host 14/14 result."
+    }
+  ],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-12T14:16:16Z"
+}
