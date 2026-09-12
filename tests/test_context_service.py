@@ -104,6 +104,67 @@ class ContextServiceTest(unittest.TestCase):
         with self.assertRaisesRegex(ContextError, "missing"):
             service.get(hit["ref"], version=hit["sourceSha256"], max_bytes=200)
 
+    def test_get_rejects_b1_ineligible_review_and_lifecycle_states(self) -> None:
+        manifest_path = self.repo / "brain" / "generated" / "KNOWLEDGE.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["entries"][0]["status"] = "superseded"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        lifecycle_service = self.service()
+        lifecycle_source = next(source for source in lifecycle_service.sources if source.kind == "brain")
+        self.assertIn("lifecycle_superseded", lifecycle_source.validity)
+        with self.assertRaisesRegex(ContextError, "ineligible"):
+            lifecycle_service.get(
+                lifecycle_source.ref,
+                version=lifecycle_source.source_hash,
+                max_bytes=200,
+            )
+
+        producer = ROOT / "vendor" / "singular-brain" / "engine" / "cli.mjs"
+        subprocess.run(
+            ["node", str(producer), "--config", str(self.repo / "brain" / "singular-brain.config.json"), "gen"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        document = self.repo / "brain" / "notes" / "late-fact.md"
+        document.write_text(document.read_text(encoding="utf-8") + "\nunreviewed change\n", encoding="utf-8")
+        review_service = self.service()
+        review_source = next(source for source in review_service.sources if source.kind == "brain")
+        self.assertIn("review_body_mismatch", review_source.validity)
+        with self.assertRaisesRegex(ContextError, "ineligible"):
+            review_service.get(
+                review_source.ref,
+                version=review_source.source_hash,
+                max_bytes=200,
+            )
+
+    def test_get_cursor_is_lossless_inside_long_multibyte_line(self) -> None:
+        code = self.repo / "src" / "selected.py"
+        prefix = code.read_bytes()
+        long_line = ('LONG_VALUE = "' + ("é" * 3000) + " UTF8-TAIL-991" + '"\n').encode("utf-8")
+        code.write_bytes(prefix + long_line)
+        start_line = prefix.count(b"\n") + 1
+        service = self.service()
+        source = next(source for source in service.sources if source.kind == "code")
+        pages: list[bytes] = []
+        cursor = None
+        for _ in range(40):
+            page = service.get(
+                source.ref,
+                version=source.source_hash,
+                start_line=start_line,
+                line_count=1,
+                max_bytes=257,
+                cursor=cursor,
+            )
+            pages.append(page["text"].encode("utf-8"))
+            cursor = page["continuationCursor"]
+            if cursor is None:
+                break
+            self.assertRegex(cursor, r"^byte:[0-9]+$")
+        else:
+            self.fail("lossless continuation did not terminate")
+        self.assertEqual(b"".join(pages), long_line)
+        self.assertIn("UTF8-TAIL-991", b"".join(pages).decode("utf-8"))
+
     def test_bundle_is_immutable_deterministic_and_budgeted(self) -> None:
         service = self.service()
         task = self.repo / "task.md"
@@ -123,6 +184,14 @@ class ContextServiceTest(unittest.TestCase):
         self.assertRegex(first["bundleId"], r"^sha256:[0-9a-f]{64}$")
         self.assertTrue(all("sourceSha256" in item and "excerptSha256" in item and "reasons" in item
                             for item in first["provenance"]))
+        for item in first["provenance"]:
+            source = Path(item["sourceLocation"]).read_bytes()
+            excerpt = source[item["range"]["startByte"]:item["range"]["endByte"]]
+            self.assertEqual(
+                item["excerptSha256"],
+                "sha256:" + hashlib.sha256(excerpt).hexdigest(),
+                item["ref"],
+            )
         explanation = service.explain(first)
         self.assertEqual(explanation["bundleId"], first["bundleId"])
         self.assertEqual(explanation["identity"], first["identity"])

@@ -25,6 +25,10 @@ late = root / "brain/notes/late-fact.md"
 late.write_text(late.read_text(encoding="utf-8").replace(
     "## Late Operations", "padding " * 800 + "\n\n## Late Operations"
 ), encoding="utf-8")
+code = root / "src/selected.py"
+code.write_text(code.read_text(encoding="utf-8") +
+                'LONG_VALUE = "' + ("é" * 3000) + ' UTF8-CLI-TAIL"\n',
+                encoding="utf-8")
 (root / "singular.config.json").write_text(json.dumps({
     "contextManifest": {
         "format": "singular-brain.manifest.v1",
@@ -60,6 +64,13 @@ read -r ref version < <(python3 -c 'import json,sys; d=json.load(sys.stdin); h=d
 page="$(context get --role implementer --ref "$ref" --version "$version" --section "Late Operations" --max-bytes 600)"
 python3 -c 'import json,sys; d=json.load(sys.stdin); assert "AURORA-TAIL-731" in d["text"]; assert d["range"]["startByte"] > 4000' <<<"$page"
 
+code_search="$(context search --role implementer --query UTF8-CLI-TAIL --max-bytes 300)"
+read -r code_ref code_version < <(python3 -c 'import json,sys; h=json.load(sys.stdin)["results"][0]; print(h["ref"], h["sourceSha256"])' <<<"$code_search")
+code_page_one="$(context get --role implementer --ref "$code_ref" --version "$code_version" --max-bytes 257)"
+code_cursor="$(python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["continuationCursor"].startswith("byte:"); print(d["continuationCursor"])' <<<"$code_page_one")"
+code_page_two="$(context get --role implementer --ref "$code_ref" --version "$code_version" --cursor "$code_cursor" --max-bytes 257)"
+python3 -c 'import json,sys; a=json.loads(sys.argv[1]); b=json.load(sys.stdin); assert a["range"]["endByte"] == b["range"]["startByte"]' "$code_page_one" <<<"$code_page_two"
+
 bundle="$tmp/published/context-bundle.json"
 context build --role implementer --phase implement --task "$project/task.md" \
   --query "cobalt rollback" --budget-bytes 10000 --output "$bundle" >/dev/null
@@ -92,6 +103,6 @@ context get --role implementer --ref "$ref" --version "$version" --max-bytes 100
   >/dev/null 2>"$tmp/tamper.err"
 tamper_rc=$?
 set -e
-[[ "$tamper_rc" -eq 2 ]] && grep -Eq 'modified|wrong-version|brain source is invalid' "$tmp/tamper.err"
+[[ "$tamper_rc" -eq 2 ]] && grep -Eq 'modified|wrong-version|ineligible|brain source is invalid' "$tmp/tamper.err"
 
 echo "context service e2e tests passed"

@@ -94,14 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "search":
             result = service.search(args.query, limit=args.limit, max_bytes=args.max_bytes)
         elif args.command == "get":
-            start_line = args.start_line
             if args.cursor:
-                if not re.fullmatch(r"line:[1-9][0-9]*", args.cursor):
-                    raise ContextError("cursor must have form line:<positive-integer>")
-                start_line = int(args.cursor.split(":", 1)[1])
+                if not re.fullmatch(r"(?:line:[1-9][0-9]*|byte:[0-9]+)", args.cursor):
+                    raise ContextError("cursor must be line:<positive-integer> or byte:<non-negative-integer>")
             result = service.get(
                 args.ref, version=args.version, section=args.section,
-                start_line=start_line, line_count=args.line_count, max_bytes=args.max_bytes,
+                start_line=args.start_line, line_count=args.line_count,
+                max_bytes=args.max_bytes, cursor=args.cursor,
             )
         elif args.command == "build":
             result = service.build(

@@ -445,18 +445,21 @@ class ContextService:
         start_line: int = 1,
         line_count: int | None = None,
         max_bytes: int = 4000,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             result = self._disabled(GET_SCHEMA)
             result.update({"ref": ref, "text": ""})
             return result
-        if not HASH_RE.match(version):
-            raise ContextError("wrong-version: version must be sha256:<64 lowercase hex>")
         if start_line < 1 or (line_count is not None and line_count < 1) or max_bytes < 0:
             raise ContextError("pagination values are outside their valid range")
         source = self._source(ref)
         if source.raw is None or source.validity == "missing":
             raise ContextError(f"missing source: {ref}: {source.path}")
+        if source.validity not in {"current", "current-reviewed"}:
+            raise ContextError(f"ineligible source reference under B1 policy: {ref}")
+        if not HASH_RE.match(version):
+            raise ContextError("wrong-version: version must be sha256:<64 lowercase hex>")
         if version != source.source_hash:
             raise ContextError(
                 f"wrong-version: {ref} snapshot is {source.source_hash}, requested {version}"
@@ -472,9 +475,12 @@ class ContextService:
             raise ContextError(
                 f"modified source: {ref}: expected {source.source_hash}, found {live_hash}"
             )
-        text = live.decode("utf-8", "replace")
+        try:
+            text = live.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContextError(f"source is not UTF-8 text: {ref}") from exc
         base_char = 0
-        selected = text
+        end_char = len(text)
         resolved_section: str | None = None
         if section:
             matches = list(HEADING_RE.finditer(text))
@@ -487,26 +493,56 @@ class ContextService:
                 raise ContextError(f"section not found in {ref}: {section}")
             match = matches[match_index]
             level = len(match.group(1))
-            end_char = len(text)
             for later in matches[match_index + 1:]:
                 if len(later.group(1)) <= level:
                     end_char = later.start()
                     break
             base_char = match.start()
-            selected = text[base_char:end_char]
             resolved_section = match.group(2).strip()
-        lines = selected.splitlines(keepends=True)
-        line_offset = min(start_line - 1, len(lines))
-        end_line = len(lines) if line_count is None else min(len(lines), line_offset + line_count)
-        page_text = "".join(lines[line_offset:end_line])
-        prior_text = selected[: len("".join(lines[:line_offset]))]
-        start_byte = len(text[:base_char].encode("utf-8")) + len(prior_text.encode("utf-8"))
-        page, truncated_bytes = _utf8_prefix(page_text.encode("utf-8"), max_bytes)
-        consumed_lines = page.decode("utf-8").count("\n")
-        if page and not page.endswith(b"\n"):
-            consumed_lines += 1
-        next_line = start_line + consumed_lines
-        has_more = truncated_bytes or end_line < len(lines)
+        section_start = len(text[:base_char].encode("utf-8"))
+        section_end = len(text[:end_char].encode("utf-8"))
+        selected = live[section_start:section_end]
+
+        if cursor and cursor.startswith("line:"):
+            if not re.fullmatch(r"line:[1-9][0-9]*", cursor):
+                raise ContextError("cursor must be line:<positive-integer> or byte:<non-negative-integer>")
+            start_line = int(cursor.split(":", 1)[1])
+            cursor = None
+        if cursor:
+            if not re.fullmatch(r"byte:[0-9]+", cursor):
+                raise ContextError("cursor must be line:<positive-integer> or byte:<non-negative-integer>")
+            start_byte = int(cursor.split(":", 1)[1])
+            if start_byte < section_start or start_byte > section_end:
+                raise ContextError("byte cursor is outside the selected source section")
+            try:
+                live[:start_byte].decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ContextError("byte cursor does not identify a UTF-8 boundary") from exc
+            relative_start = start_byte - section_start
+        else:
+            line_bytes = [line.encode("utf-8") for line in text[base_char:end_char].splitlines(keepends=True)]
+            line_offset = min(start_line - 1, len(line_bytes))
+            relative_start = sum(len(line) for line in line_bytes[:line_offset])
+            start_byte = section_start + relative_start
+
+        target_end = section_end
+        if line_count is not None:
+            position = relative_start
+            for _ in range(line_count):
+                newline = selected.find(b"\n", position)
+                if newline < 0:
+                    position = len(selected)
+                    break
+                position = newline + 1
+            target_end = section_start + position
+        requested = live[start_byte:target_end]
+        page, truncated_bytes = _utf8_prefix(requested, max_bytes)
+        if requested and not page:
+            raise ContextError("max-bytes is too small for the next UTF-8 code point")
+        end_byte = start_byte + len(page)
+        has_more = truncated_bytes or target_end < section_end
+        line_at_start = selected[:relative_start].count(b"\n") + 1
+        next_line = line_at_start + page.count(b"\n")
         return {
             "schema": GET_SCHEMA,
             "status": "ok",
@@ -522,11 +558,11 @@ class ContextService:
             "excerptSha256": _sha256(page),
             "range": {
                 "startByte": start_byte,
-                "endByte": start_byte + len(page),
-                "startLine": start_line,
+                "endByte": end_byte,
+                "startLine": line_at_start,
                 "nextLine": next_line if has_more else None,
             },
-            "continuationCursor": f"line:{next_line}" if has_more else None,
+            "continuationCursor": f"byte:{end_byte}" if has_more else None,
             "truncated": has_more,
             "reasons": ["exact_reference", "immutable_version_verified"] + (["heading_section"] if section else ["line_page"]),
             "provenance": source.provenance,
@@ -534,14 +570,17 @@ class ContextService:
         }
 
     @staticmethod
-    def _obligation_lines(source: Source) -> list[bytes]:
+    def _obligations(source: Source) -> list[tuple[int, int, bytes]]:
         if source.kind != "run" or source.raw is None:
             return []
-        return [
-            line.encode("utf-8")
-            for line in source.text.splitlines(keepends=True)
-            if OBLIGATION_RE.search(line)
-        ]
+        result: list[tuple[int, int, bytes]] = []
+        offset = 0
+        for line in source.raw.splitlines(keepends=True):
+            end = offset + len(line)
+            if OBLIGATION_RE.search(line.decode("utf-8", "replace")):
+                result.append((offset, end, line))
+            offset = end
+        return result
 
     def build(
         self,
@@ -605,47 +644,47 @@ class ContextService:
             raise ContextError(f"mandatory task source is not UTF-8: {task_path}") from exc
 
         task_ref = "task:" + task_path.relative_to(self.root).as_posix()
-        mandatory_parts: list[tuple[str, bytes, Source | None, list[str]]] = [(
+        mandatory_parts: list[tuple[str, bytes, Source | None, list[str], int, int, bytes]] = [(
             task_ref,
             (f"=== required-task:{task_ref} ===\n").encode() + task_raw + (b"" if task_raw.endswith(b"\n") else b"\n"),
             None,
             ["mandatory_task_contract", "constraints_and_acceptance"],
+            0,
+            len(task_raw),
+            task_raw,
         )]
         for source in self.sources:
-            for index, line in enumerate(self._obligation_lines(source), 1):
+            for index, (start, end, line) in enumerate(self._obligations(source), 1):
                 mandatory_parts.append((
                     f"{source.ref}#obligation-{index}",
                     (f"=== open-or-violated-obligation:{source.ref} ===\n").encode() + line,
                     source,
                     ["mandatory_open_or_violated_obligation"],
+                    start,
+                    end,
+                    line,
                 ))
-        mandatory_bytes = sum(len(part) for _, part, _, _ in mandatory_parts)
+        mandatory_bytes = sum(len(part) for _, part, _, _, _, _, _ in mandatory_parts)
         if mandatory_bytes > budget_bytes:
             raise ContextOverflow(
                 "mandatory-overflow: task constraints and open/violated obligations "
                 f"require {mandatory_bytes} UTF-8 bytes but budget is {budget_bytes}"
             )
 
-        prompt_parts = [part for _, part, _, _ in mandatory_parts]
+        prompt_parts = [part for _, part, _, _, _, _, _ in mandatory_parts]
         provenance: list[dict[str, Any]] = []
-        task_hash = _sha256(task_raw)
-        provenance.append({
-            "ref": task_ref, "kind": "task", "sourceLocation": str(task_path),
-            "sourceSha256": task_hash, "excerptSha256": _sha256(task_raw),
-            "range": {"startByte": 0, "endByte": len(task_raw)},
-            "reasons": mandatory_parts[0][3], "validity": "snapshot-read",
-            "priority": "mandatory",
-        })
-        for ref, part, source, reasons in mandatory_parts[1:]:
-            assert source is not None
-            marker = part.find(b"\n") + 1
-            excerpt = part[marker:]
-            source_start = (source.raw or b"").find(excerpt.rstrip(b"\n"))
+        for ref, _, source, reasons, source_start, source_end, excerpt in mandatory_parts:
+            is_task = source is None
             provenance.append({
-                "ref": ref, "kind": source.kind, "sourceLocation": str(source.path),
-                "sourceSha256": source.source_hash, "excerptSha256": _sha256(excerpt),
-                "range": {"startByte": max(0, source_start), "endByte": max(0, source_start) + len(excerpt.rstrip(b"\n"))},
-                "reasons": reasons, "validity": source.validity, "priority": "mandatory",
+                "ref": ref,
+                "kind": "task" if is_task else source.kind,
+                "sourceLocation": str(task_path if is_task else source.path),
+                "sourceSha256": _sha256(task_raw) if is_task else source.source_hash,
+                "excerptSha256": _sha256(excerpt),
+                "range": {"startByte": source_start, "endByte": source_end},
+                "reasons": reasons,
+                "validity": "snapshot-read" if is_task else source.validity,
+                "priority": "mandatory",
             })
 
         used = mandatory_bytes
@@ -653,7 +692,7 @@ class ContextService:
         omissions: list[dict[str, str]] = []
         query_text = query or task_raw.decode("utf-8")
         ranked: list[tuple[int, str, list[str], Source]] = []
-        mandatory_source_refs = {item.ref for item in self.sources if self._obligation_lines(item)}
+        mandatory_source_refs = {item.ref for item in self.sources if self._obligations(item)}
         for source in self.sources:
             if source.raw is None or source.validity not in {"current", "current-reviewed"}:
                 omissions.append({"ref": source.ref, "reason": source.validity})

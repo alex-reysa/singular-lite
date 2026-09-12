@@ -560,8 +560,12 @@ Search is deterministic exact-reference and lexical-token matching
 (`exact-lexical.v1`). It can miss synonyms and semantic paraphrases; no result
 is reported as an explicit abstention, never as proof that knowledge is absent.
 `get` requires the source SHA-256 returned by search and refuses missing,
-modified, or wrong-version sources. Heading and line/cursor pagination make
-late facts reachable beyond the default 4,000-byte excerpt.
+modified, wrong-version, review-ineligible, or lifecycle-ineligible sources.
+Heading and line/cursor pagination make late facts reachable beyond the
+default 4,000-byte excerpt. A truncated response returns an opaque
+`continuationCursor` such as `byte:4096`; replay that exact cursor to continue
+inside a long line without losing bytes. Byte cursors always identify UTF-8
+boundaries and are scoped to the requested section when `--section` is used.
 
 Build admits the complete task contract and open/violated run obligations
 before optional lexical matches. If mandatory bytes do not fit, it exits 3
