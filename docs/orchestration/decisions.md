@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-12T23:19:53Z — TASK-1113 — accept
+
+- Run: `RUN-20260912T230059Z-10345`
+- Branch: `codex/brain-rescue/TASK-1113`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
 ### 2026-09-12T21:57:02Z — TASK-1113 — escalate-infra
 
 - Run: `RUN-20260912T214257Z-96830`

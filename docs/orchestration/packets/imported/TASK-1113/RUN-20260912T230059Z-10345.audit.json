@@ -1,0 +1,66 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1113",
+  "runId": "RUN-20260912T230059Z-10345",
+  "branch": "codex/brain-rescue/TASK-1113",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "Authoritative task contract and prospective test_after_waiver",
+    "evidence-manifest.json",
+    "packet.json",
+    "audit-verification.json",
+    "Complete committed diff 884d5a5211eb6ce006ad99d7357772024cc8550a..07936aca623f2a3de2a206e8c2ef3e9cd817074a; SHA256 80aac3bd387898e68a8cb39a4dbd20d91000a9e8cdcc8369843baf5929f9f400",
+    "All 28 manifest-listed source hashes",
+    "schemas/orchestration/audit-verdict.v1.schema.json",
+    "worker-evidence/host-qualification/index.json",
+    "worker-evidence/host-qualification/dependency-reuse.json",
+    "worker-evidence/host-qualification/transport-red-receipt.json",
+    "worker-evidence/host-qualification/transport-red-classification.json",
+    "worker-evidence/host-qualification/policy-receipt-red-tests.log",
+    "worker-evidence/host-qualification/policy-host-receipt.json",
+    "worker-evidence/host-qualification/policy-host-tests.log",
+    "worker-evidence/host-qualification/console-host-receipt.json",
+    "worker-evidence/host-qualification/console-full.log",
+    "worker-evidence/host-qualification/rehydrate-host-receipt.json",
+    "worker-evidence/host-qualification/rehydrate-host-tests.log",
+    "worker-evidence/host-qualification/frozen-host-receipt.json",
+    "worker-evidence/host-qualification/frozen-host-test.log",
+    "worker-evidence/clean-context-service.log",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A10:sha256:32433b41ebae6e9128eba3c55785eaf203bd7a0e51afa46838cf650ec2b9598d:epoch:bddb11fc2d7dbd22d35df6216dc74f8091dfd2d0d9694950",
+    "reviewed-head-sha:07936aca623f2a3de2a206e8c2ef3e9cd817074a"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "SINGULAR_TEST_JOBS=2 bash tests/run.sh test-context-invocation-e2e.sh test-context-service-e2e.sh test-ctx-route-drive.sh test-l1-drive-paired-audit-hook.sh test-readonly-evidence-access.sh test-effective-config-parity.sh test-console-server.sh test-campaign-freeze.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "audit-verification.json",
+        "evidence-manifest.json",
+        "gate-check.log",
+        "worker-evidence/host-qualification/dependency-reuse.json"
+      ],
+      "rationale": "Authoritative host evidence binds the successful eight-suite gate to head 07936aca623f2a3de2a206e8c2ef3e9cd817074a and tree 9c71acf0c8317f8d4ce8b4f9c2658f7601287e03 with verified source integrity. Local source and diff hashes match. No tests were rerun by this auditor. AF_UNIX and worktree-registry failures remain infrastructure limitations, not product findings or passing executions."
+    }
+  ],
+  "commandsRun": [
+    "Read the compact evidence manifest and audit-verdict.v1 schema.",
+    "git status --short",
+    "git diff --stat 884d5a5211eb6ce006ad99d7357772024cc8550a HEAD",
+    "git merge-base HEAD codex/brain-integration",
+    "git rev-parse HEAD HEAD^{tree}",
+    "git diff 884d5a52 HEAD -- individually reviewed owned source, schema, documentation, and test paths",
+    "Read relevant implementation and test ranges using sed and rg.",
+    "Read bounded qualification artifacts through the prescribed evidence-show.sh entrypoint; index offsets 0, 2048, 4096, 6144, 8192 and dependency-reuse offsets 0, 2048.",
+    "Python read-only comparison of manifest source hashes, committed diff hash, ancestor AGENTS.md files, and target/worker changed-path overlap.",
+    "Initial Python heredoc inspection failed because the sandbox denied shell temporary-file creation; equivalent python3 -c inspection succeeded.",
+    "git diff --raw 765fcdf73958b368382c765eaaa158dbc461f1c4 HEAD",
+    "git diff --check 884d5a5211eb6ce006ad99d7357772024cc8550a HEAD"
+  ],
+  "findings": [
+    "Non-blocking evidence-reference defect: packet command 4 records the failed env -i invocation but references clean-context-service.log, which contains the successful command 5 rerun. The original failure remains explicitly recorded, but its raw output is not established by that reference. Acceptance does not rely on this command; independent host-bound qualification covers the suite.",
+    "Non-blocking whitespace issue: git diff --check exits 2 for an extra blank line at tests/test-context-invocation-e2e.sh:7."
+  ],
+  "requiredFixes": [],
+  "rationale": "The committed implementation satisfies the acceptance criteria on the reviewed evidence. All 28 changed paths are owned; forbidden paths are unchanged, the worktree is clean, and the authorized merge base is correct. Target changes have no overlapping paths. Driver coverage exercises initial planner/worker delivery, bounded retry references, changed/missing/revoked sources, fresh isolated audits, mandatory obligations, immutable prompt/event identity, transport restrictions, and aggregate budgets. Diagnostics share selected policy and workspace semantics. Frozen lifecycle evidence covers completion, exhaustion, drift, continuation, bootstrap, and crash handling. Reused results have unchanged source dependencies; console restoration has fresh 296-test evidence. The prospective waiver governs retained planner/doctor chronology; no historical red or acceptance is invented. Historical failures remain failures, and imported host commands are not attributed to the worker. No blocking product, scope, or foundation violation was established."
+}

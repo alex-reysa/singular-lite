@@ -1,0 +1,321 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PACKET-RUN-20260912T230059Z-10345-TASK-1113-L2",
+  "runId": "RUN-20260912T230059Z-10345",
+  "taskId": "TASK-1113",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "884d5a5211eb6ce006ad99d7357772024cc8550a",
+  "branch": "codex/brain-rescue/TASK-1113",
+  "headSha": "07936aca623f2a3de2a206e8c2ef3e9cd817074a",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1113",
+  "ownedFiles": [
+    "README.md",
+    "cli/singular",
+    "engine/campaign.sh",
+    "engine/campaign_manifest.py",
+    "engine/context_cli.py",
+    "engine/context_service.py",
+    "engine/ctx-paired-audit.sh",
+    "engine/ctx-planner-session.sh",
+    "engine/ctx-rehydrate-event.sh",
+    "engine/doctor.py",
+    "engine/evidence_delivery.py",
+    "engine/generate-tasks.sh",
+    "engine/l1-drive.sh",
+    "engine/l1-plan-node.sh",
+    "engine/lib.sh",
+    "engine/provider_resolver.py",
+    "plugin/scripts/singular_graph_server.py",
+    "plugin/scripts/test_singular_graph_server.py",
+    "schemas/context-bundle.v1.schema.json",
+    "schemas/orchestration/context-bundle.v1.schema.json",
+    "tests/test-campaign-freeze.sh",
+    "tests/test-context-invocation-e2e.sh",
+    "tests/test-context-service-e2e.sh",
+    "tests/test-decider-fastpath.sh",
+    "tests/test-effective-config-parity.sh",
+    "tests/test-frozen-campaign-terminal.sh",
+    "tests/test_context_invocation.py",
+    "tests/test_context_service.py",
+    "tests/test_evidence_delivery.py"
+  ],
+  "changedFiles": [
+    "README.md",
+    "cli/singular",
+    "engine/campaign.sh",
+    "engine/campaign_manifest.py",
+    "engine/context_cli.py",
+    "engine/context_service.py",
+    "engine/ctx-paired-audit.sh",
+    "engine/ctx-planner-session.sh",
+    "engine/ctx-rehydrate-event.sh",
+    "engine/doctor.py",
+    "engine/evidence_delivery.py",
+    "engine/generate-tasks.sh",
+    "engine/l1-drive.sh",
+    "engine/lib.sh",
+    "engine/provider_resolver.py",
+    "plugin/scripts/singular_graph_server.py",
+    "plugin/scripts/test_singular_graph_server.py",
+    "schemas/context-bundle.v1.schema.json",
+    "schemas/orchestration/context-bundle.v1.schema.json",
+    "tests/test-campaign-freeze.sh",
+    "tests/test-context-invocation-e2e.sh",
+    "tests/test-context-service-e2e.sh",
+    "tests/test-decider-fastpath.sh",
+    "tests/test-effective-config-parity.sh",
+    "tests/test-frozen-campaign-terminal.sh",
+    "tests/test_context_invocation.py",
+    "tests/test_context_service.py",
+    "tests/test_evidence_delivery.py"
+  ],
+  "commands": [
+    {
+      "cmd": "bash tests/test-context-invocation-e2e.sh > .singular-evidence/green.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/sandbox-af-unix-limitation.log",
+      "rationale": "Fresh sandbox qualification reached all 22 methods: 6 passed and 16 stopped at the explicit AF_UNIX bind capability probe with Operation not permitted. Raw output was preserved before green.log was assigned to the passing non-socket qualification."
+    },
+    {
+      "cmd": "python3 -m unittest -v tests.test_context_invocation.ContextInvocationTest.test_campaign_policy_projection_separates_invocation_identity_without_hiding_policy tests.test_context_invocation.ContextInvocationTest.test_admission_evidence_uses_verified_frozen_policy_projection tests.test_context_invocation.ContextInvocationTest.test_frozen_policy_config_is_distinct_from_invocation_workspace tests.test_context_invocation.ContextInvocationTest.test_shell_boundary_reports_structured_invalid_policy_without_launch tests.test_context_invocation.ContextInvocationTest.test_invocation_bundle_is_atomic_delta_bounded_and_revalidates tests.test_context_invocation.ContextInvocationTest.test_delta_obligation_provenance_preserves_offsets_and_budget_classes tests.test_context_invocation.ContextInvocationTest.test_invocation_snapshot_refuses_config_and_source_drift_and_freshly_reads_task tests.test_context_invocation.ContextInvocationTest.test_doctor_exposes_effective_context_policy_and_provenance tests.test_context_invocation.ContextInvocationTest.test_real_planner_driver_injects_bundle_and_feature_off_is_compatible tests.test_context_invocation.ContextInvocationTest.test_missing_configured_source_fails_before_planner_provider tests.test_context_invocation.ContextInvocationTest.test_planner_rc86_fresh_fallback_revalidates_changed_missing_and_revoked_sources > .singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Test-after-waiver exact-source qualification: 11 non-socket policy, planner, doctor, atomicity, bounded-delta, missing-source, and revalidation behaviors passed."
+    },
+    {
+      "cmd": "set -o pipefail; SINGULAR_TEST_JOBS=2 bash tests/run.sh test-context-invocation-e2e.sh test-context-service-e2e.sh test-ctx-route-drive.sh test-l1-drive-paired-audit-hook.sh test-readonly-evidence-access.sh test-effective-config-parity.sh test-console-server.sh test-campaign-freeze.sh 2>&1 | tee .singular-evidence/regression.log",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "The exact required aggregate gate was attempted in the foreground and stopped before product assertions because this sandbox cannot register a disposable worktree; its fallback rejects test_after_waiver tasks as non-strict-test-first."
+    },
+    {
+      "cmd": "env -i PATH=\"$PATH\" TMPDIR=\"${TMPDIR:-/tmp}\" LANG=\"${LANG:-C.UTF-8}\" bash tests/test-context-service-e2e.sh > .singular-evidence/clean-context-service.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/clean-context-service.log",
+      "rationale": "The eight Python tests passed, then the CLI wrapper correctly exposed that an empty environment omitted required HOME; the same suite was rerun with inherited system variables and only SINGULAR variables removed."
+    },
+    {
+      "cmd": "for name in ${(k)parameters[(I)SINGULAR_*]}; do unset \"$name\"; done; bash tests/test-context-service-e2e.sh > .singular-evidence/clean-context-service.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/clean-context-service.log",
+      "rationale": "Direct clean-policy regression passed: 8 unit tests and context-service end-to-end assertions."
+    },
+    {
+      "cmd": "for name in ${(k)parameters[(I)SINGULAR_*]}; do unset \"$name\"; done; bash tests/test-ctx-route-drive.sh > .singular-evidence/clean-ctx-route-drive.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/clean-ctx-route-drive.log",
+      "rationale": "Routing regression passed, including feature-off parity and reviewer independence."
+    },
+    {
+      "cmd": "for name in ${(k)parameters[(I)SINGULAR_*]}; do unset \"$name\"; done; bash tests/test-effective-config-parity.sh > .singular-evidence/clean-effective-config.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/clean-effective-config.log",
+      "rationale": "Effective-config parity passed after removing inherited campaign variables from the direct-test process."
+    },
+    {
+      "cmd": "shasum -a 256 -c .singular-evidence/source-hashes.sha256",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/source-hashes.sha256",
+      "rationale": "All 29 owned source and test paths retained their recorded hashes after qualification; no artificial source edit was made."
+    },
+    {
+      "cmd": "jq -e '.base == \"884d5a5211eb6ce006ad99d7357772024cc8550a\" and .candidate == \"07936aca623f2a3de2a206e8c2ef3e9cd817074a\" and (.segments | length == 5) and .changedPathCount == 28 and .ownedUnchangedPaths == [\"engine/l1-plan-node.sh\"]' .singular-evidence/diff-lineage/index.json && shasum -a 256 .singular-evidence/host-qualification/index.json .singular-evidence/diff-lineage/index.json .singular-evidence/precommitted-owned-changed-files.log .singular-evidence/source-hashes.sha256 .singular-evidence/red.log .singular-evidence/green.log .singular-evidence/sandbox-af-unix-limitation.log .singular-evidence/regression.log .singular-evidence/clean-context-service.log .singular-evidence/clean-ctx-route-drive.log .singular-evidence/clean-effective-config.log",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/diff-lineage/index.json",
+      "rationale": "Validated the exact five-segment base-to-candidate lineage, 28 changed owned paths, one unchanged owned path, and final evidence hashes."
+    }
+  ],
+  "tests": [
+    {
+      "name": "context invocation transport correction",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log",
+      "provenance": "Imported root-host pre-correction run on historical candidate d2b713502efa8585d22d7eaac481be8031e73f65 with test-only delta; not executed or reinterpreted by this worker."
+    },
+    {
+      "name": "context invocation non-socket behavioral qualification",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "context invocation real broker exact-source qualification",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/host-qualification/policy-host-tests.log",
+      "provenance": "Root-host result for source 765fcdf73958b368382c765eaaa158dbc461f1c4, inherited unchanged by candidate 07936aca according to dependency-reuse.json."
+    },
+    {
+      "name": "candidate 07936aca native eight-suite gate",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/prior-native-run/gate-check.log",
+      "provenance": "Imported root-host run RUN-20260912T214257Z-96830: 8/8 gate passed with source integrity verified. The run remained a historical failure because its dispatch lineage base was omitted before audit; this result is not acceptance for the current run."
+    },
+    {
+      "name": "console server candidate 07936aca",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/host-qualification/console-host-tests.log",
+      "provenance": "Root-host fresh result: 296/296 passed."
+    },
+    {
+      "name": "legacy rehydrate drivers",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/host-qualification/rehydrate-host-tests.log",
+      "provenance": "Root-host final exact-source result: 3/3 passed; intermediate author failures remain historical."
+    },
+    {
+      "name": "frozen campaign terminal lifecycle",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/host-qualification/frozen-host-test.log",
+      "provenance": "Root-host immutable source 765fcdf7 result; production source is byte/mode-identical in candidate 07936aca."
+    },
+    {
+      "name": "context service end-to-end",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/clean-context-service.log"
+    },
+    {
+      "name": "context routing drive",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/clean-ctx-route-drive.log"
+    },
+    {
+      "name": "effective config parity",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/clean-effective-config.log"
+    },
+    {
+      "name": "required canonical aggregate gate",
+      "phase": "regression",
+      "status": "environment-blocked",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "name": "sandbox real broker qualification",
+      "phase": "regression",
+      "status": "environment-blocked",
+      "logRef": ".singular-evidence/sandbox-af-unix-limitation.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "host-qualification-index",
+      "ref": ".singular-evidence/host-qualification/index.json",
+      "sha256": "362202fbe7172cfd7390904581872ce88528d58f76b268a0a5b736961f870bd8",
+      "candidate": "07936aca623f2a3de2a206e8c2ef3e9cd817074a",
+      "candidateTree": "9c71acf0c8317f8d4ce8b4f9c2658f7601287e03",
+      "hostOwner": "root"
+    },
+    {
+      "kind": "candidate-provenance",
+      "ref": ".singular-evidence/host-qualification/candidate-004.json"
+    },
+    {
+      "kind": "exact-dependency-reuse",
+      "ref": ".singular-evidence/host-qualification/dependency-reuse.json"
+    },
+    {
+      "kind": "base-to-candidate-diff-lineage",
+      "ref": ".singular-evidence/diff-lineage/index.json",
+      "sha256": "04da3ca00d07a8751a57da22e6d492bc094b4c0f6db2cb100d21a102a19557e9",
+      "note": "Five exact imported segments preserve base 884d5a52 through d2b71350, 831e1ae2, 453b08f0 and 765fcdf7 to candidate 07936aca without reinterpreting historical failures."
+    },
+    {
+      "kind": "precommitted-owned-changed-paths",
+      "ref": ".singular-evidence/precommitted-owned-changed-files.log",
+      "sha256": "c421105f88783210cce2305ec6bab5468ce6e222b127b4f6dd85a87b86c75877",
+      "note": "Complete 28-path owned diff inventory from explicit base 884d5a5211eb6ce006ad99d7357772024cc8550a; engine/l1-plan-node.sh is owned but unchanged."
+    },
+    {
+      "kind": "retained-source-hashes",
+      "ref": ".singular-evidence/source-hashes.sha256",
+      "sha256": "1a86b6f800c59ca64660e181b72302da2ab03224018aec6823dc1469a2c649f4"
+    },
+    {
+      "kind": "historical-red",
+      "ref": ".singular-evidence/red.log",
+      "sha256": "0415f73dd0b0c7e1a162299549618e1b07a6c04d7c9724eb187a25a60fe8dc45",
+      "note": "Exact imported root-host pre-correction transport red; not worker-executed."
+    },
+    {
+      "kind": "historical-red-classification",
+      "ref": ".singular-evidence/host-qualification/transport-red-classification.json"
+    },
+    {
+      "kind": "worker-green",
+      "ref": ".singular-evidence/green.log",
+      "sha256": "6b8a3473ead463ba52c1fba61f5cc13baa5571fd221a3c468637c9367d3daa84"
+    },
+    {
+      "kind": "sandbox-limitation",
+      "ref": ".singular-evidence/sandbox-af-unix-limitation.log",
+      "sha256": "3d7c4540df9ef98c6fb14ca52a351d34eb09db6cc285321897248a4ab0e12070",
+      "note": "Managed sandbox denied AF_UNIX bind with EPERM; capability failure is unavailable, not passed."
+    },
+    {
+      "kind": "canonical-gate-attempt",
+      "ref": ".singular-evidence/regression.log",
+      "sha256": "d5457999a73ee95cbf2030446ef3008e808aac032f4d235a4947e856c014c5f9"
+    },
+    {
+      "kind": "root-host-context-regression",
+      "ref": ".singular-evidence/host-qualification/policy-host-tests.log"
+    },
+    {
+      "kind": "root-host-console-regression",
+      "ref": ".singular-evidence/host-qualification/console-host-tests.log"
+    },
+    {
+      "kind": "root-host-rehydrate-regression",
+      "ref": ".singular-evidence/host-qualification/rehydrate-host-tests.log"
+    },
+    {
+      "kind": "root-host-frozen-regression",
+      "ref": ".singular-evidence/host-qualification/frozen-host-test.log"
+    },
+    {
+      "kind": "prior-native-gate-report",
+      "ref": ".singular-evidence/prior-native-run/gate-report.json",
+      "sha256": "d8f56483bb5fcd739ec79a406023599ffe7554f1451bf29060fccae956020942",
+      "note": "Historical RUN-20260912T214257Z-96830 gate passed 8/8 at candidate 07936aca; its run-status remains failed for the omitted dispatch base and is not overwritten or treated as acceptance."
+    },
+    {
+      "kind": "prior-native-failed-run-status",
+      "ref": ".singular-evidence/prior-native-run/run-status.json",
+      "sha256": "1836f7467938170199b52a7b201b2a64aa79c02cdeebfcecc9064a9b5f5992ed"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260912T230059Z-10345/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A10:sha256:32433b41ebae6e9128eba3c55785eaf203bd7a0e51afa46838cf650ec2b9598d:epoch:bddb11fc2d7dbd22d35df6216dc74f8091dfd2d0d9694950"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260912T230059Z-10345/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260912T230059Z-10345/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260912T230059Z-10345/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-12T23:08:20Z"
+}
