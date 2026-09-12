@@ -3073,41 +3073,37 @@ l1_candidate_signature() {
   } | shasum -a 256 | awk '{print $1}'
 }
 
-# Canonical product finding identity.  Ordering, whitespace, timestamps and
-# evidence-location churn do not manufacture a new repair opportunity.
+# Canonical audit-feedback identity shared by first-feedback eligibility and
+# repeated-feedback detection.  The worker ledger consumes strings from both
+# arrays with this item equivalence, so array placement, ordering, duplicates,
+# whitespace, case and backticks cannot manufacture a new repair opportunity.
 l1_normalized_findings_signature() {
   local record="$1"
   [[ -f "$record" ]] || return 0
   python3 - "$record" <<'PY' 2>/dev/null || true
 import hashlib
 import json
-import re
 import sys
 
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     raise SystemExit(0)
-findings = data.get("findings")
-if not isinstance(findings, list) or not findings:
+normalized = set()
+for field in ("findings", "requiredFixes"):
+    values = data.get(field)
+    if not isinstance(values, list):
+        continue
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        item = " ".join(value.replace("`", "").lower().split())
+        if item:
+            normalized.add(item)
+if not normalized:
     raise SystemExit(0)
-volatile = {
-    "createdAt", "updatedAt", "timestamp", "ts", "evidenceRefs",
-    "logRef", "artifactRef", "commandRef",
-}
-def normalize(value):
-    if isinstance(value, dict):
-        return {key: normalize(value[key]) for key in sorted(value)
-                if key not in volatile}
-    if isinstance(value, list):
-        items = [normalize(item) for item in value]
-        return sorted(items, key=lambda item: json.dumps(
-            item, sort_keys=True, separators=(",", ":")))
-    if isinstance(value, str):
-        return re.sub(r"\s+", " ", value).strip()
-    return value
-canonical = json.dumps(normalize(findings), sort_keys=True,
-                       separators=(",", ":"), ensure_ascii=False)
+canonical = json.dumps(sorted(normalized), separators=(",", ":"),
+                       ensure_ascii=False)
 print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
 PY
 }

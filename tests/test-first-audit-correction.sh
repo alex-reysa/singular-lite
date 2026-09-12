@@ -212,7 +212,9 @@ PY
       [[ "$call" == "2" ]] || exit 98
       [[ "$(<"$FIRST_AUDIT_COUNTERS/worker-retry-2")" == "1" ]] || exit 99
       grep -q 'FINDING_ALPHA: replace the seeded implementation' "$prompt" || exit 100
-      if [[ "${FIRST_AUDIT_MODE:?}" == "accept" ]]; then
+      if [[ "${FIRST_AUDIT_MODE:?}" == "accept" \
+          || "${FIRST_AUDIT_MODE:?}" == "required-fixes" \
+          || "${FIRST_AUDIT_MODE:?}" == "moved-repeat" ]]; then
         printf 'package widget\n// corrected after actionable audit feedback\n' \
           >"$worktree/internal/widget/parser.go"
       fi
@@ -267,27 +269,47 @@ print("passed" if status == "passed-with-acknowledged-baseline" else status)
 PY
 )"
     [[ "$status" == "passed" || "$status" == "not-rerun-evidence-verified" ]] || exit 102
-    verdict="needs-fix"
-    finding='FINDING_ALPHA: replace the seeded implementation'
-    if [[ "${FIRST_AUDIT_MODE:?}" == "accept" && "$call" -gt 1 ]]; then
-      verdict="accepted"
-      finding=""
-    elif [[ "${FIRST_AUDIT_MODE:?}" == "repeat" && "$call" -gt 1 ]]; then
-      finding='  FINDING_ALPHA:   replace the seeded implementation  '
-    fi
     FIRST_AUDIT_OUTPUT="$output" FIRST_AUDIT_STATUS="$status" \
-      FIRST_AUDIT_VERDICT="$verdict" FIRST_AUDIT_FINDING="$finding" \
+      FIRST_AUDIT_AUDITOR_CALL="$call" \
       "$FIRST_AUDIT_PYTHON" - <<'PY'
 import json
 import os
 
-finding = os.environ["FIRST_AUDIT_FINDING"]
+mode = os.environ["FIRST_AUDIT_MODE"]
+call = int(os.environ["FIRST_AUDIT_AUDITOR_CALL"])
+canonical = "FINDING_ALPHA: replace the seeded implementation"
+verdict = "needs-fix"
+findings = [canonical]
+required_fixes = [canonical]
+if mode in {"accept", "required-fixes"} and call > 1:
+    verdict = "accepted"
+    findings = []
+    required_fixes = []
+elif mode == "repeat" and call > 1:
+    findings = ["  FINDING_ALPHA:   replace the seeded implementation  "]
+    required_fixes = list(findings)
+elif mode == "blank-only":
+    findings = ["", "   ", "``"]
+    required_fixes = [" ` \t ` "]
+elif mode == "required-fixes":
+    findings = []
+    required_fixes = [canonical]
+elif mode == "moved-repeat":
+    if call == 1:
+        findings = []
+        required_fixes = [canonical]
+    else:
+        findings = ["  `finding_alpha`:   REPLACE the seeded implementation  "]
+        required_fixes = [
+            "`FINDING_ALPHA: replace the seeded implementation`",
+            " finding_alpha: replace the seeded implementation ",
+        ]
 record = {
     "schema": "singular.orchestration.audit-verdict.v1",
     "taskId": "TASK-0001",
     "runId": "fixture-run",
     "branch": "agent/widget/TASK-0001-frozen",
-    "verdict": os.environ["FIRST_AUDIT_VERDICT"],
+    "verdict": verdict,
     "evidenceReviewed": ["evidence-manifest.json", "audit-verification.json"],
     "verificationResults": [{
         "status": os.environ["FIRST_AUDIT_STATUS"],
@@ -297,9 +319,9 @@ record = {
         "rationale": "matches the exact host-derived classification",
     }],
     "commandsRun": [],
-    "findings": [finding] if finding else [],
-    "requiredFixes": [finding] if finding else [],
-    "rationale": "fresh actionable audit" if finding else "fresh accepted audit",
+    "findings": findings,
+    "requiredFixes": required_fixes,
+    "rationale": "fresh accepted audit" if verdict == "accepted" else "fresh audit feedback",
 }
 with open(os.environ["FIRST_AUDIT_OUTPUT"], "w", encoding="utf-8") as handle:
     json.dump(record, handle)
@@ -488,6 +510,35 @@ calls() {
   [[ -f "$path" ]] && cat "$path" || printf '0\n'
 }
 
+event_count() {
+  local event_type="$1"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/events.ndjson" "$event_type" <<'PY'
+import json
+import sys
+
+count = 0
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") == sys.argv[2]:
+            count += 1
+print(count)
+PY
+}
+
+identity_signature() {
+  local payload="$1" record
+  record="$(mktemp "$scratch/identity.XXXXXX")"
+  printf '%s\n' "$payload" >"$record"
+  "$BASH_BIN" -c '
+    source <(sed -n "/^l1_normalized_findings_signature()/,/^# ---- Decider-driven retry loop ----$/p" "$1" | sed "\$d")
+    l1_normalized_findings_signature "$2"
+  ' fixture "$ENGINE_HOME/engine/l1-drive.sh" "$record"
+}
+
 set_task_ready() {
   "$PYTHON_BIN" - "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<'PY'
 import re
@@ -615,6 +666,103 @@ test_corrected_after_fresh_audit() {
   echo "ok: frozen preseed -> no-edit -> fresh needs-fix -> charged correction -> fresh accept"
 }
 
+test_feedback_identity_contract() {
+  local canonical equivalent distinct blank invalid expected
+  canonical="$(identity_signature \
+    '{"findings":["  `FINDING_ALPHA`:   replace the seeded implementation  "],"requiredFixes":[]}')"
+  equivalent="$(identity_signature \
+    '{"findings":[" finding_alpha: REPLACE the seeded implementation "],"requiredFixes":["`FINDING_ALPHA: replace the seeded implementation`"," finding_alpha: replace the seeded implementation "]}')"
+  distinct="$(identity_signature \
+    '{"findings":[],"requiredFixes":["FINDING_BETA: replace the seeded implementation"]}')"
+  blank="$(identity_signature \
+    '{"findings":["","   ","``"],"requiredFixes":[" ` \t ` "]}')"
+  invalid="$(identity_signature \
+    '{"findings":[{"text":"FINDING_ALPHA: replace the seeded implementation"},1,true,["FINDING_ALPHA: replace the seeded implementation"]],"requiredFixes":[null]}')"
+  expected="470a78ca19f33d31aaf8f34e6d968396cd281c7684da373758bd3ca909b6f988"
+  assert_eq "$canonical" "$expected" "canonical feedback identity"
+  assert_eq "$equivalent" "$canonical" \
+    "array placement, duplicates, whitespace, case and backticks are identity-neutral"
+  [[ -n "$distinct" && "$distinct" != "$canonical" ]] \
+    || fail "distinct substantive feedback must have a distinct nonempty identity"
+  assert_eq "$blank" "" "blank-only feedback has no identity"
+  assert_eq "$invalid" "" "invalid item types cannot acquire feedback identity"
+  echo "ok: feedback identity matches the worker-ledger string contract"
+}
+
+test_blank_only_feedback_parks_without_repair() {
+  local name=blank-only
+  make_fixture "$name" blank-only 2 high
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "1" "$name worker calls"
+  assert_eq "$(calls auditor)" "1" "$name auditor calls"
+  local events
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.unchanged_candidate_parked"' \
+    "$name unchanged candidate terminal"
+  assert_not_contains "$events" '"type":"l1.actionable_audit_correction_eligible"' \
+    "$name blank feedback is not actionable"
+  assert_eq "$(event_count l1.product_repair_budget_consumed)" "0" \
+    "$name repair charge count"
+  assert_attempt_count 1
+  finish_and_prove_no_redispatch "$name" 1 1
+  assert_terminal_contract blocked audit-needs-fix escalate-parked 0
+  echo "ok: blank and backtick-only feedback parks without a correction charge"
+}
+
+test_required_fixes_only_correction() {
+  local name=required-fixes
+  make_fixture "$name" required-fixes 1 normal
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "2" "$name worker calls"
+  assert_eq "$(calls auditor)" "2" "$name auditor calls"
+  assert_eq "$(<"$FIXTURE_COUNTERS/worker-retry-2")" "1" \
+    "$name correction charged before worker"
+  grep -q 'FINDING_ALPHA: replace the seeded implementation' \
+    "$FIXTURE_COUNTERS/worker-prompt-2.md" \
+    || fail "$name requiredFixes text did not reach correcting worker"
+  local events
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.actionable_audit_correction_eligible"' \
+    "$name requiredFixes-only eligibility"
+  assert_contains "$events" '"type":"l1.task_accepted"' "$name accepted correction"
+  assert_eq "$(event_count l1.product_repair_budget_consumed)" "1" \
+    "$name repair charge count"
+  grep -q 'corrected after actionable audit feedback' \
+    "$FIXTURE_ROOT/.worktrees/TASK-0001/internal/widget/parser.go" \
+    || fail "$name corrected candidate bytes missing"
+  assert_attempt_count 2
+  finish_and_prove_no_redispatch "$name" 2 2
+  assert_terminal_contract completed "" accepted 1
+  echo "ok: requiredFixes-only feedback authorizes one charged correction and fresh acceptance"
+}
+
+test_moved_duplicate_feedback_stops_changed_candidate() {
+  local name=moved-repeat
+  make_fixture "$name" moved-repeat 2 high
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "2" "$name worker calls"
+  assert_eq "$(calls auditor)" "2" "$name auditor calls"
+  assert_eq "$(<"$FIXTURE_COUNTERS/worker-retry-2")" "1" \
+    "$name correction charged before second worker"
+  local events
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.identical_findings_parked"' \
+    "$name equivalent feedback repeat guard"
+  assert_contains "$events" '"candidateUnchanged":false' \
+    "$name changed corrective candidate classification"
+  assert_contains "$events" '"productRepairMax":2' \
+    "$name retained high-risk repair headroom"
+  assert_eq "$(event_count l1.product_repair_budget_consumed)" "1" \
+    "$name repair charge count"
+  grep -q 'corrected after actionable audit feedback' \
+    "$FIXTURE_ROOT/.worktrees/TASK-0001/internal/widget/parser.go" \
+    || fail "$name second worker did not change candidate bytes"
+  assert_attempt_count 2
+  finish_and_prove_no_redispatch "$name" 2 2
+  assert_terminal_contract blocked audit-needs-fix escalate-parked 1
+  echo "ok: moved and duplicated equivalent feedback parks a changed candidate before pass three"
+}
+
 test_max_zero_is_terminal() {
   local name=max-zero
   make_fixture "$name" repeat 0 normal
@@ -681,12 +829,20 @@ test_no_output_stays_fail_closed() {
 
 echo "NOTE: deterministic fixture provider; this test is not live unattended-provider evidence"
 case "${FIRST_AUDIT_CASE:-all}" in
+  identity) test_feedback_identity_contract ;;
   corrected) test_corrected_after_fresh_audit ;;
+  blank-only) test_blank_only_feedback_parks_without_repair ;;
+  required-fixes) test_required_fixes_only_correction ;;
+  moved-repeat) test_moved_duplicate_feedback_stops_changed_candidate ;;
   max-zero) test_max_zero_is_terminal ;;
   repeated) test_repeated_findings_stop_with_budget_left ;;
   no-output) test_no_output_stays_fail_closed ;;
   all)
+    test_feedback_identity_contract
     test_corrected_after_fresh_audit
+    test_blank_only_feedback_parks_without_repair
+    test_required_fixes_only_correction
+    test_moved_duplicate_feedback_stops_changed_candidate
     test_max_zero_is_terminal
     test_repeated_findings_stop_with_budget_left
     test_no_output_stays_fail_closed
