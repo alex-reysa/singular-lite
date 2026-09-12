@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-12T12:27:00Z — TASK-1108 — supersede
+
+- Run: `ORIGIN-20260912T122700Z-15735`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: Full-scope supervised continuation of preserved needs-fix candidate after independent diagnosis and host-verified correction; retain failed attempts and cumulative allowance
+
 ### 2026-09-12T11:06:31Z — TASK-1108 — escalate-parked
 
 - Run: `RUN-20260912T105132Z-55981`
