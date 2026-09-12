@@ -25,12 +25,20 @@ if [[ "${1:-}" == "candidate" ]]; then
   shift
   exec "$SCRIPT_DIR/ops.sh" recover-candidate "$@"
 fi
+if [[ "${1:-}" == "orphan-reservation" ]]; then
+  shift
+  exec "$SCRIPT_DIR/ops.sh" reconcile-orphan-reservation "$@"
+fi
+if [[ "${1:-}" == "continuation" ]]; then
+  shift
+  exec "$SCRIPT_DIR/ops.sh" authorize-continuation "$@"
+fi
 
 mode="scan"
 case "${1:-}" in
   --scan|"") mode="scan" ;;
   --prune) mode="prune" ;;
-  *) echo "usage: $0 [--scan|--prune|candidate TASK-XXXX ...]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--scan|--prune|candidate TASK-XXXX ...|orphan-reservation TASK-XXXX ...|continuation TASK-XXXX ...]" >&2; exit 2 ;;
 esac
 
 singular_ensure_state_dirs

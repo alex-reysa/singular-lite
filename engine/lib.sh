@@ -986,6 +986,33 @@ print(f"campaign:{campaign_id}:sha256:{hashlib.sha256(raw).hexdigest()}{epoch_su
 PY
 }
 
+# Return the source-byte fingerprint already sealed into the active campaign
+# manifest. Callers first run singular_campaign_verify_or_refuse, which proves
+# that the executing engine still has these exact bytes. Legacy repositories
+# have no frozen manifest and retain their explicit legacy identity.
+singular_campaign_engine_source_fingerprint() {
+  local manifest="${SINGULAR_CAMPAIGN_MANIFEST:-$SINGULAR_STATE_DIR/campaign/manifest.json}"
+  python3 - "$manifest" <<'PY'
+import json
+import os
+import re
+import sys
+
+manifest = sys.argv[1]
+if not os.path.isfile(manifest):
+    print("legacy")
+    raise SystemExit(0)
+try:
+    data = json.load(open(manifest, encoding="utf-8"))
+    fingerprint = str(data["engine"]["sourceFingerprint"])
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit(2)
+if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+    raise SystemExit(2)
+print(fingerprint)
+PY
+}
+
 _singular_campaign_binding_compare() {
   local expected="$1" entrypoint="${2:-control-plane}" phase="${3:-binding-check}"
   local actual="" event_json=""
@@ -5447,6 +5474,8 @@ for key in (
     "recoveryAuthorizations", "failureBudgets", "failureLimits",
     "reservationOwner", "reservationGeneration", "reservationRunId",
     "reservationDeadlineAt", "lastReservationOwner", "lastReservationGeneration",
+    "continuationAuthorization", "attemptLifecycle", "terminalDisposition",
+    "reservationBaseSha",
 ):
     if key in previous:
         data[key] = previous[key]

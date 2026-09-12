@@ -45,8 +45,15 @@ else
   finish_reason="driver-exit-$rc"
   finish_next="classify the bounded failure before retrying"
 fi
-singular_lifecycle_finish "$task_id" "$reservation_owner" "$reservation_generation" \
-  "$reservation_batch" "$finish_reason" "$finish_next" 2>/dev/null || true
+if ! singular_lifecycle_finish "$task_id" "$reservation_owner" "$reservation_generation" \
+    "$reservation_batch" "$finish_reason" "$finish_next" 2>/dev/null; then
+  # Keep the owner-bound exit/dispatch evidence for the reaper. A finish CAS
+  # failure is not permission to erase or generically reclassify the attempt.
+  singular_append_event "origin.dispatch_finish_deferred" \
+    "dispatch finish awaits owner-bound lifecycle reconciliation" \
+    "{\"taskId\":\"$task_id\",\"exitCode\":$rc,\"reservationOwner\":\"$reservation_owner\",\"reservationGeneration\":$reservation_generation}" \
+    2>/dev/null || true
+fi
 singular_lifecycle_exit_write "$task_id" "$rc" "$reservation_owner" \
   "$reservation_generation" 2>/dev/null || true
 

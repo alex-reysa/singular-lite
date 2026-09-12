@@ -9,24 +9,77 @@ SINGULAR_TASK_LIFECYCLE="${SINGULAR_TASK_LIFECYCLE:-$SCRIPT_DIR/task_lifecycle.p
 singular_lifecycle_reserve() {
   local task_id="$1" owner="$2" run_id="$3" branch="$4" area="$5"
   local owned_json="$6" base_sha="$7" batch_id="$8" worktree="$9"
+  local campaign_binding engine_source_fingerprint
+  campaign_binding="$(singular_campaign_binding 2>/dev/null || echo legacy)"
+  engine_source_fingerprint="$(singular_campaign_engine_source_fingerprint 2>/dev/null || true)"
+  [[ -n "$engine_source_fingerprint" ]] || return 2
   python3 "$SINGULAR_TASK_LIFECYCLE" reserve \
     --lease "$(singular_lease_path "$task_id")" --task "$task_id" \
     --owner "$owner" --run "$run_id" --branch "$branch" --area "$area" \
     --scope-json "$owned_json" --base "$base_sha" --batch "$batch_id" \
     --worktree "$worktree" --imported-dir "$SINGULAR_ORCH_DIR/packets/imported/$task_id" \
+    --campaign "$campaign_binding" --repo-root "$SINGULAR_ROOT" \
+    --engine-source-fingerprint "$engine_source_fingerprint" \
     --deadline-seconds "${SINGULAR_DISPATCH_DEADLINE_SECS:-14400}"
 }
 
 singular_lifecycle_dispatch_record_write() {
   local task_id="$1" run_id="$2" pid="$3" pid_start="$4" log="$5"
   local base_sha="$6" batch_id="$7" owner="$8" generation="$9" pgid=""
+  local campaign_binding
+  campaign_binding="$(singular_lease_field "$task_id" campaignBinding 2>/dev/null || echo legacy)"
   pgid="$(singular_pgid_of "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
   [[ "$pgid" =~ ^[0-9]+$ ]] || pgid=0
   python3 "$SINGULAR_TASK_LIFECYCLE" bind-dispatch \
     --record "$(singular_dispatch_record_path "$task_id")" --task "$task_id" \
     --run "$run_id" --pid "$pid" --pid-start "$pid_start" --pgid "$pgid" \
     --log "$log" --base "$base_sha" --batch "$batch_id" \
-    --owner "$owner" --generation "$generation"
+    --owner "$owner" --generation "$generation" --campaign "$campaign_binding"
+}
+
+singular_lifecycle_record_attempt() {
+  local task_id="$1" owner="$2" generation="$3" run_id="$4" state="$5"
+  local disposition="${6:-}" failure_class="${7:-}" action="${8:-}"
+  local record reservation_run campaign_binding
+  record="$(singular_dispatch_record_path "$task_id")"
+  local ticks=0
+  while [[ ! -f "$record" && "$ticks" -lt 20 ]]; do
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  reservation_run="$(singular_json_field "$record" runId 2>/dev/null || true)"
+  campaign_binding="$(singular_json_field "$record" campaignBinding 2>/dev/null || true)"
+  [[ -n "$reservation_run" && -n "$campaign_binding" ]] || return 1
+  python3 "$SINGULAR_TASK_LIFECYCLE" record-attempt \
+    --lease "$(singular_lease_path "$task_id")" --record "$record" \
+    --task "$task_id" --owner "$owner" --generation "$generation" \
+    --run "$run_id" --reservation-run "$reservation_run" \
+    --campaign "$campaign_binding" --state "$state" \
+    --disposition "$disposition" --failure-class "$failure_class" --action "$action"
+}
+
+singular_lifecycle_claim_continuation() {
+  local task_id="$1" authorization_id="$2" owner="$3" generation="$4"
+  local run_id="$5" candidate_source="$6" integration_target="$7" worktree="$8" task_contract="$9"
+  local record reservation_run reservation_base campaign_binding engine_source_fingerprint
+  record="$(singular_dispatch_record_path "$task_id")"
+  local ticks=0
+  while [[ ! -f "$record" && "$ticks" -lt 20 ]]; do
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  reservation_run="$(singular_json_field "$record" runId 2>/dev/null || true)"
+  reservation_base="$(singular_json_field "$record" baseSha 2>/dev/null || true)"
+  campaign_binding="$(singular_json_field "$record" campaignBinding 2>/dev/null || true)"
+  engine_source_fingerprint="$(singular_campaign_engine_source_fingerprint 2>/dev/null || true)"
+  [[ -n "$engine_source_fingerprint" ]] || return 2
+  python3 "$SINGULAR_TASK_LIFECYCLE" claim-continuation \
+    --lease "$(singular_lease_path "$task_id")" --task-contract "$task_contract" \
+    --authorization-id "$authorization_id" --owner "$owner" --generation "$generation" \
+    --reservation-run "$reservation_run" --campaign "$campaign_binding" \
+    --candidate-source "$candidate_source" --integration-target "$integration_target" \
+    --engine-source-fingerprint "$engine_source_fingerprint" --repo-root "$SINGULAR_ROOT" \
+    --reservation-base "$reservation_base" --worktree "$worktree" --run "$run_id"
 }
 
 singular_lifecycle_exit_write() {
@@ -46,11 +99,17 @@ singular_lifecycle_exit_write() {
 
 singular_lifecycle_finish() {
   local task_id="$1" owner="$2" generation="$3" batch="$4" reason="$5" next_action="$6"
+  local record reservation_run campaign_binding
+  record="$(singular_dispatch_record_path "$task_id")"
+  reservation_run="${7:-$(singular_json_field "$record" runId 2>/dev/null || true)}"
+  campaign_binding="${8:-$(singular_json_field "$record" campaignBinding 2>/dev/null || true)}"
+  [[ -n "$reservation_run" && -n "$campaign_binding" ]] || return 1
   python3 "$SINGULAR_TASK_LIFECYCLE" finish \
     --lease "$(singular_lease_path "$task_id")" \
-    --record "$(singular_dispatch_record_path "$task_id")" \
+    --record "$record" \
     --task "$task_id" --owner "$owner" --generation "$generation" \
-    --batch "$batch" --reason "$reason" --next-action "$next_action"
+    --batch "$batch" --reason "$reason" --next-action "$next_action" \
+    --reservation-run "$reservation_run" --campaign "$campaign_binding"
 }
 
 singular_lifecycle_legacy_finish() {
@@ -127,10 +186,10 @@ singular_lifecycle_reap_dispatches() {
         fi
         ec="${exit_data[0]}"; owner="${exit_data[1]}"; generation="${exit_data[2]}"
         case "$ec" in
-          0) outcome="ok"; reaped_ok=$((reaped_ok + 1)) ;;
-          2) outcome="refused"; reaped_refused=$((reaped_refused + 1)) ;;
-          3) outcome="terminal"; reaped_terminal=$((reaped_terminal + 1)) ;;
-          *) outcome="failed"; reaped_failures=$((reaped_failures + 1)) ;;
+          0) outcome="ok" ;;
+          2) outcome="refused" ;;
+          3) outcome="terminal" ;;
+          *) outcome="failed" ;;
         esac
         if [[ "$ec" -eq 0 ]]; then
           finish_reason="driver-returned-with-active-lease"
@@ -142,9 +201,24 @@ singular_lifecycle_reap_dispatches() {
         # The wrapper normally performs this transition. Repeating it here is
         # idempotent and closes the narrow spawn/record publication race where
         # a very fast wrapper could not yet verify its dispatch record.
-        singular_lifecycle_finish "$tid" "$owner" "$generation" "$batch" \
-          "$finish_reason" "$finish_next" 2>/dev/null || true
-        singular_lifecycle_dispatch_finalize "$tid" "$ec" "$outcome" "$owner" "$generation" || continue
+        if ! singular_lifecycle_finish "$tid" "$owner" "$generation" "$batch" \
+            "$finish_reason" "$finish_next" 2>/dev/null; then
+          # Keep the launched record and exit evidence intact. Finalizing after
+          # a failed lease CAS would discard the only actionable owner-bound
+          # evidence and could make a successor look safe to launch.
+          workers_running=$((workers_running + 1))
+          continue
+        fi
+        singular_lifecycle_dispatch_finalize "$tid" "$ec" "$outcome" "$owner" "$generation" || {
+          workers_running=$((workers_running + 1))
+          continue
+        }
+        case "$ec" in
+          0) reaped_ok=$((reaped_ok + 1)) ;;
+          2) reaped_refused=$((reaped_refused + 1)) ;;
+          3) reaped_terminal=$((reaped_terminal + 1)) ;;
+          *) reaped_failures=$((reaped_failures + 1)) ;;
+        esac
         singular_append_event "origin.dispatch_reaped" "dispatch reaped" \
           "{\"runId\":\"$run_id\",\"taskId\":\"$tid\",\"exitCode\":$ec,\"outcome\":\"$outcome\",\"reservationOwner\":\"$owner\",\"reservationGeneration\":$generation}"
         continue

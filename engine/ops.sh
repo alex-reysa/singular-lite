@@ -165,6 +165,222 @@ ops_unpark() {
   echo "unparked $task_id"
 }
 
+# --- reconcile orphan reservation / authorize one-shot continuation ----------
+ops_reconcile_orphan_reservation() {
+  local task_id="" owner="" generation="" predecessor_run="" predecessor_campaign=""
+  local reservation_base="" candidate_source="" worktree=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      TASK-*) task_id="$1"; shift ;;
+      --owner) owner="${2:-}"; shift 2 ;;
+      --generation) generation="${2:-}"; shift 2 ;;
+      --run) predecessor_run="${2:-}"; shift 2 ;;
+      --campaign) predecessor_campaign="${2:-}"; shift 2 ;;
+      --reservation-base) reservation_base="${2:-}"; shift 2 ;;
+      --candidate-source) candidate_source="${2:-}"; shift 2 ;;
+      --worktree) worktree="${2:-}"; shift 2 ;;
+      *) echo "usage: singular recover orphan-reservation TASK-XXXX --owner OWNER --generation N --run RUN --campaign BINDING --reservation-base SHA --candidate-source SHA --worktree PATH" >&2; return 2 ;;
+    esac
+  done
+  [[ -n "$task_id" && -n "$owner" && "$generation" =~ ^[1-9][0-9]*$ \
+      && -n "$predecessor_run" && -n "$predecessor_campaign" \
+      && "$reservation_base" =~ ^[0-9a-f]{40,64}$ \
+      && "$candidate_source" =~ ^[0-9a-f]{40,64}$ && -n "$worktree" ]] || {
+    echo "reconcile-orphan-reservation: complete exact predecessor identity is required" >&2
+    return 2
+  }
+  local lease task_file current_campaign op_run reconciliation_id
+  lease="$(singular_lease_path "$task_id")"
+  task_file="$SINGULAR_TASKS_DIR/$task_id.md"
+  [[ -f "$lease" && -f "$task_file" ]] || {
+    echo "reconcile-orphan-reservation: retained lease and trusted task contract are required" >&2
+    return 2
+  }
+  singular_campaign_verify_or_refuse ops reconcile-orphan-reservation || return 2
+  current_campaign="$(singular_campaign_binding)" || return 2
+  op_run="$(singular_run_id)"
+  singular_acquire_lock "$op_run" || { echo "reconcile-orphan-reservation: origin lock busy" >&2; return 2; }
+  trap "singular_release_lock '$op_run' 2>/dev/null || true" EXIT
+  reconciliation_id="$(python3 "$SCRIPT_DIR/task_lifecycle.py" reconcile-orphan-reservation \
+    --lease "$lease" --record "$(singular_dispatch_record_path "$task_id")" \
+    --task "$task_id" --owner "$owner" --generation "$generation" \
+    --run "$predecessor_run" --campaign "$predecessor_campaign" \
+    --reservation-base "$reservation_base" --candidate-source "$candidate_source" \
+    --worktree "$worktree")" || return 2
+  singular_append_event "recovery.orphan_reservation_reconciled" \
+    "unlaunched orphan reservation reconciled by exact compare-and-set" \
+    "{\"taskId\":\"$task_id\",\"reconciliationId\":\"$reconciliation_id\",\"predecessorRunId\":\"$predecessor_run\",\"predecessorOwner\":\"$owner\",\"predecessorGeneration\":$generation,\"predecessorCampaignBinding\":\"$predecessor_campaign\",\"reservationBaseSha\":\"$reservation_base\",\"candidateSourceSha\":\"$candidate_source\",\"reconciledByCampaign\":\"$current_campaign\"}" || true
+  echo "reconciliationId=$reconciliation_id"
+  echo "nextAction=review the preserved worktree, then authorize one exact continuation"
+}
+
+ops_authorize_continuation() {
+  local task_id="" predecessor_owner="" predecessor_generation="" predecessor_run=""
+  local predecessor_campaign="" predecessor_reservation_base="" candidate_source=""
+  local integration_target="" worktree=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      TASK-*) task_id="$1"; shift ;;
+      --predecessor-owner) predecessor_owner="${2:-}"; shift 2 ;;
+      --predecessor-generation) predecessor_generation="${2:-}"; shift 2 ;;
+      --predecessor-run) predecessor_run="${2:-}"; shift 2 ;;
+      --predecessor-campaign) predecessor_campaign="${2:-}"; shift 2 ;;
+      --predecessor-reservation-base) predecessor_reservation_base="${2:-}"; shift 2 ;;
+      --candidate-source) candidate_source="${2:-}"; shift 2 ;;
+      --integration-target) integration_target="${2:-}"; shift 2 ;;
+      --worktree) worktree="${2:-}"; shift 2 ;;
+      *) echo "usage: singular recover continuation TASK-XXXX --predecessor-owner OWNER --predecessor-generation N --predecessor-run RUN --predecessor-campaign BINDING --predecessor-reservation-base SHA --candidate-source SHA --integration-target SHA --worktree PATH" >&2; return 2 ;;
+    esac
+  done
+  [[ -n "$task_id" && -n "$predecessor_owner" \
+      && "$predecessor_generation" =~ ^[1-9][0-9]*$ && -n "$predecessor_run" \
+      && -n "$predecessor_campaign" \
+      && "$predecessor_reservation_base" =~ ^[0-9a-f]{40,64}$ \
+      && "$candidate_source" =~ ^[0-9a-f]{40,64}$ \
+      && "$integration_target" =~ ^[0-9a-f]{40,64}$ && -n "$worktree" ]] || {
+    echo "authorize-continuation: complete predecessor, integration target, and worktree identity are required" >&2
+    return 2
+  }
+  local lease task_file current_campaign engine_source_fingerprint op_run branch authority_dir authority_file
+  local task_json gate_cmd target_branch target_head preflight_reasons authorization_id
+  lease="$(singular_lease_path "$task_id")"
+  task_file="$SINGULAR_TASKS_DIR/$task_id.md"
+  [[ -f "$lease" && -f "$task_file" ]] || {
+    echo "authorize-continuation: retained lease and trusted task contract are required" >&2
+    return 2
+  }
+  [[ "$(singular_task_field "$task_file" status 2>/dev/null || true)" == "ready" ]] || {
+    echo "authorize-continuation: task must remain ready for native prerequisite checks" >&2
+    return 2
+  }
+  task_json="$(singular_task_json "$task_file")" || return 2
+  gate_cmd="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gateCommand", ""))')"
+  target_branch="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("targetBranch", ""))')"
+  [[ -n "$gate_cmd" ]] || gate_cmd="$SINGULAR_DEFAULT_GATE_CMD"
+  [[ -n "$target_branch" ]] || target_branch="$SINGULAR_TARGET_BRANCH"
+  if ! preflight_reasons="$(singular_task_preflight "$task_json" "$gate_cmd" "$target_branch" 1)"; then
+    echo "authorize-continuation: task preflight failed:" >&2
+    printf '%s\n' "$preflight_reasons" >&2
+    return 2
+  fi
+  if ! python3 - "$task_file" "$SINGULAR_TASKS_DIR" <<'PY' >/dev/null 2>&1
+import json, pathlib, re, subprocess, sys
+task, tasks_dir = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+text = task.read_text(encoding="utf-8")
+match = re.search(r"^Depends on:\s*(.*?)\s*$", text, re.MULTILINE | re.I)
+if not match:
+    raise SystemExit(0)
+raw = match.group(1).strip().strip("`")
+try:
+    deps = json.loads(raw)
+except Exception:
+    deps = re.findall(r"TASK-[0-9]+", raw)
+for dep in deps or []:
+    dep_path = tasks_dir / f"{dep}.md"
+    dep_text = dep_path.read_text(encoding="utf-8")
+    status = re.search(r"^Status:\s*(.*?)\s*$", dep_text, re.MULTILINE | re.I)
+    if not status or status.group(1).strip().strip("`").lower() != "integrated":
+        raise SystemExit(1)
+PY
+  then
+    echo "authorize-continuation: task dependencies are not integrated" >&2
+    return 2
+  fi
+  singular_campaign_verify_or_refuse ops authorize-continuation || return 2
+  current_campaign="$(singular_campaign_binding)" || return 2
+  engine_source_fingerprint="$(singular_campaign_engine_source_fingerprint)" || return 2
+  branch="$(singular_lease_field "$task_id" branch 2>/dev/null || true)"
+  [[ -n "$branch" ]] || { echo "authorize-continuation: lease branch is missing" >&2; return 2; }
+  git -C "$SINGULAR_ROOT" rev-parse --verify "$candidate_source^{commit}" >/dev/null 2>&1 \
+      && git -C "$SINGULAR_ROOT" rev-parse --verify "$predecessor_reservation_base^{commit}" >/dev/null 2>&1 \
+      && git -C "$SINGULAR_ROOT" rev-parse --verify "$integration_target^{commit}" >/dev/null 2>&1 || {
+    echo "authorize-continuation: predecessor, candidate, or integration target is not a local commit" >&2
+    return 2
+  }
+  target_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify "$target_branch^{commit}" 2>/dev/null)" || {
+    echo "authorize-continuation: task target branch is not a local commit" >&2
+    return 2
+  }
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$integration_target" "$target_head" 2>/dev/null || {
+    echo "authorize-continuation: integration target is not an ancestor of the task target branch" >&2
+    return 2
+  }
+  op_run="$(singular_run_id)"
+  singular_acquire_lock "$op_run" || { echo "authorize-continuation: origin lock busy" >&2; return 2; }
+  trap "singular_release_lock '$op_run' 2>/dev/null || true" EXIT
+  authority_dir="$SINGULAR_STATE_DIR/recovery-authority/$task_id"
+  authority_file="$authority_dir/continuation.json"
+  mkdir -p "$authority_dir"
+  [[ ! -e "$authority_file" ]] || {
+    echo "authorize-continuation: one-shot authority evidence already exists" >&2
+    return 2
+  }
+  if ! python3 - "$authority_file" "$task_file" "$task_id" "$predecessor_owner" \
+      "$predecessor_generation" "$predecessor_run" "$predecessor_campaign" \
+      "$predecessor_reservation_base" "$candidate_source" "$integration_target" \
+      "$target_branch" "$target_head" "$engine_source_fingerprint" \
+      "$current_campaign" "$branch" "$worktree" <<'PY'
+import hashlib, json, os, pathlib, sys
+(output, task_contract, task_id, owner, generation, predecessor_run,
+ predecessor_campaign, predecessor_reservation_base, candidate_source,
+ integration_target, integration_target_branch, target_head_at_authorization,
+ engine_source_fingerprint, campaign, branch, worktree) = sys.argv[1:17]
+task_sha = hashlib.sha256(pathlib.Path(task_contract).read_bytes()).hexdigest()
+record = {
+    "schema": "singular.orchestration.continuation-authority.v0",
+    "taskId": task_id,
+    "predecessorOwner": owner,
+    "predecessorGeneration": int(generation),
+    "predecessorRunId": predecessor_run,
+    "predecessorCampaignBinding": predecessor_campaign,
+    "predecessorReservationBaseSha": predecessor_reservation_base,
+    "candidateSourceSha": candidate_source,
+    "integrationTargetSha": integration_target,
+    "integrationTargetBranch": integration_target_branch,
+    "targetHeadAtAuthorization": target_head_at_authorization,
+    "engineSourceFingerprint": engine_source_fingerprint,
+    "campaignBinding": campaign,
+    "branch": branch,
+    "worktree": str(pathlib.Path(worktree).resolve()),
+    "taskContractSha256": task_sha,
+    "authorizedBy": "origin-ops",
+    "additionalWorkerAttemptsAuthorized": 1,
+    "predecessorInfrastructureUsage": "retained-in-run-artifacts-usage-unknown",
+}
+with open(output + ".tmp", "x", encoding="utf-8") as handle:
+    json.dump(record, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(output + ".tmp", output)
+PY
+  then
+    rm -f "$authority_file" 2>/dev/null || true
+    return 2
+  fi
+  if ! authorization_id="$(python3 "$SCRIPT_DIR/task_lifecycle.py" authorize-continuation \
+      --lease "$lease" --authority "$authority_file" --task-contract "$task_file" \
+      --expected-task "$task_id" --expected-campaign "$current_campaign" \
+      --predecessor-owner "$predecessor_owner" \
+      --predecessor-generation "$predecessor_generation" \
+      --predecessor-run "$predecessor_run" --predecessor-campaign "$predecessor_campaign" \
+      --predecessor-reservation-base "$predecessor_reservation_base" \
+      --candidate-source "$candidate_source" --integration-target "$integration_target" \
+      --integration-target-branch "$target_branch" \
+      --target-head-at-authorization "$target_head" \
+      --engine-source-fingerprint "$engine_source_fingerprint" \
+      --worktree "$worktree")"; then
+    rm -f "$authority_file" 2>/dev/null || true
+    return 2
+  fi
+  "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision authorize-continuation \
+    --rationale "one-shot continuation $authorization_id preserves predecessor accounting and partial bytes" \
+    --run "$op_run" --branch "$branch" --authority origin >/dev/null 2>&1 || true
+  singular_append_event "recovery.continuation_authorized" \
+    "host authorized one exact preserved-worktree continuation" \
+    "{\"taskId\":\"$task_id\",\"authorizationId\":\"$authorization_id\",\"predecessorRunId\":\"$predecessor_run\",\"predecessorCampaignBinding\":\"$predecessor_campaign\",\"predecessorReservationBaseSha\":\"$predecessor_reservation_base\",\"campaignBinding\":\"$current_campaign\",\"engineSourceFingerprint\":\"$engine_source_fingerprint\",\"candidateSourceSha\":\"$candidate_source\",\"integrationTargetSha\":\"$integration_target\",\"integrationTargetBranch\":\"$target_branch\",\"targetHeadAtAuthorization\":\"$target_head\",\"additionalWorkerAttemptsAuthorized\":1,\"predecessorInfrastructureUsage\":\"retained-in-run-artifacts-usage-unknown\"}" || true
+  echo "authorizationId=$authorization_id"
+  echo "nextAction=run native reconcile once under campaign $current_campaign; the target may advance only as a descendant of $integration_target while candidate $candidate_source remains preserved"
+}
+
 # --- recover-candidate ---------------------------------------------------------
 # Mint recovery authority only from the locked host operations surface. The
 # lifecycle helper validates every predecessor binding again before changing
@@ -1572,6 +1788,8 @@ ops_report() {
 case "$verb" in
   supersede)     ops_supersede "$@" ;;
   unpark)        ops_unpark "$@" ;;
+  reconcile-orphan-reservation) ops_reconcile_orphan_reservation "$@" ;;
+  authorize-continuation) ops_authorize_continuation "$@" ;;
   recover-candidate) ops_recover_candidate "$@" ;;
   clear-backoff) singular_planner_backoff_clear ;;
   breaker)       ops_breaker "$@" ;;
@@ -1585,6 +1803,6 @@ case "$verb" in
   ask)           ops_ask "$@" ;;
   report)        ops_report "$@" ;;
   *)
-    echo "usage: ops.sh supersede|unpark|recover-candidate|clear-backoff|breaker|stop|resume|wake|gates|health|gc|plan|ask|report ..." >&2
+    echo "usage: ops.sh supersede|unpark|reconcile-orphan-reservation|authorize-continuation|recover-candidate|clear-backoff|breaker|stop|resume|wake|gates|health|gc|plan|ask|report ..." >&2
     exit 2 ;;
 esac
