@@ -1,0 +1,67 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1103",
+  "runId": "RUN-20260912T172947Z-37339",
+  "branch": "codex/brain-rescue/TASK-1103",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json",
+    "Host-delivered packet.json",
+    "Host-delivered audit-verification.json",
+    "reaudit-diff-attempt-2.patch",
+    "worker-evidence/red.log",
+    "Manifest green, regression and gate log excerpts",
+    "Committed implementation, CLI integration, schemas, fixtures and tests at faf6dc46624a9b8ca115c07ac6f110631ed18a56",
+    "Git status, changed paths and target-branch history",
+    "schemas/orchestration/audit-verdict.v1.schema.json",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A9:sha256:3fff9b15bf7a16bc34423b03a413aeb09624a144d87ac2245708100624ed472d:epoch:be15c59b8196351aa1c0138bf5b62125b295f137ec0356d2",
+    "reviewed-head-sha:faf6dc46624a9b8ca115c07ac6f110631ed18a56"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "test -f tests/test-context-service-e2e.sh && test -f tests/test-brain-ingestion-e2e.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-context-service-e2e.sh test-brain-ingestion-e2e.sh",
+      "exitCode": 0,
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-check.log",
+        "evidence-manifest.json"
+      ],
+      "rationale": "The authoritative host report binds successful gate evidence to committed head faf6dc46624a9b8ca115c07ac6f110631ed18a56 and verifies source integrity. Both selected suites passed. Tests were not rerun during this audit. The worker's earlier exit 2 was a Git-registry infrastructure limitation, not a product failure."
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "python3 -m unittest tests/test_context_service.py; bash tests/test-context-service-e2e.sh",
+      "evidenceRefs": [
+        "worker-evidence/red.log",
+        "worker-evidence/green.log",
+        "reaudit-diff-attempt-2.patch"
+      ],
+      "rationale": "Corrective red evidence shows two assertion failures and one unsupported-cursor error across seven tests; green evidence reports all seven tests and public CLI coverage passing. Regression assertions cover excluded lifecycle/review states, exact reconstruction of a long multibyte line through bounded continuation, and every bundle excerpt hash matching its declared source slice."
+    }
+  ],
+  "commandsRun": [
+    "Read compact evidence manifest and audit-verdict schema.",
+    "git status --short",
+    "git rev-parse HEAD codex/brain-integration",
+    "git merge-base HEAD codex/brain-integration",
+    "git diff --name-only 39d94f186536b7d25a3548cd44407084bad92f29 HEAD",
+    "git log --oneline 39d94f186536b7d25a3548cd44407084bad92f29..codex/brain-integration",
+    "git diff --name-only 39d94f186536b7d25a3548cd44407084bad92f29 codex/brain-integration",
+    "Used evidence-show.sh for bounded corrective-diff excerpts and the F1 red-log failure.",
+    "Read relevant implementation, CLI, schema and test sections using sed, cat and rg.",
+    "Python hash verification via heredoc failed because zsh could not create a temporary file in the read-only sandbox.",
+    "Retried hash verification using python3 -B -c: all 13 manifest file hashes matched; both bundle schema copies were byte-identical."
+  ],
+  "findings": [],
+  "requiredFixes": [],
+  "findingsStatus": {
+    "f-0597f3b62bf3": "resolved",
+    "f-2d64be24576b": "resolved",
+    "f-79cd724b155b": "resolved",
+    "f-8752d85d159c": "resolved",
+    "f-dce526a45ddf": "resolved",
+    "f-f0d27fb3ccd2": "resolved"
+  },
+  "rationale": "All six finding IDs are resolved by the reviewed fixes and regression evidence. Get rejects B1-ineligible sources before returning metadata or content; UTF-8 byte cursors preserve truncated-line suffixes; obligation ranges and hashes derive from identical raw bytes. Existing coverage supports deterministic bundles, mandatory-budget overflow, atomic publication, read-only retrieval, containment, feature-off behavior and distinct concurrent worktree snapshots. All changed files are owned, the worktree is clean, and implementation hashes match the manifest. Target drift consists only of two control-state commits modifying orchestration documents outside this implementation. No blocking scope, consistency or foundation violations were identified."
+}

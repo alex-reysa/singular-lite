@@ -1,0 +1,135 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PACKET-RUN-20260912T172947Z-37339-TASK-1103-ATTEMPT-2",
+  "runId": "RUN-20260912T172947Z-37339",
+  "taskId": "TASK-1103",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "39d94f186536b7d25a3548cd44407084bad92f29",
+  "branch": "codex/brain-rescue/TASK-1103",
+  "headSha": "faf6dc46624a9b8ca115c07ac6f110631ed18a56",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1103",
+  "ownedFiles": [
+    "engine/context_service.py",
+    "engine/context_cli.py",
+    "cli/singular",
+    "schemas/context-bundle.v1.schema.json",
+    "schemas/orchestration/context-bundle.v1.schema.json",
+    "tests/test-context-service-e2e.sh",
+    "tests/test_context_service.py",
+    "tests/fixtures/context-service/",
+    "README.md"
+  ],
+  "changedFiles": [
+    "README.md",
+    "cli/singular",
+    "engine/context_cli.py",
+    "engine/context_service.py",
+    "schemas/context-bundle.v1.schema.json",
+    "schemas/orchestration/context-bundle.v1.schema.json",
+    "tests/fixtures/context-service/brain/notes/late-fact.md",
+    "tests/fixtures/context-service/brain/singular-brain.config.json",
+    "tests/fixtures/context-service/runs/RUN-fixture/runner-result.json",
+    "tests/fixtures/context-service/src/selected.py",
+    "tests/fixtures/context-service/task.md",
+    "tests/test-context-service-e2e.sh",
+    "tests/test_context_service.py"
+  ],
+  "commands": [
+    {
+      "cmd": "python3 -m unittest tests/test_context_service.py > .singular-evidence/red.log 2>&1",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Expected corrective red: seven tests exposed B1-ineligible get access, unsupported lossless byte continuation, and obligation excerpt hash/range disagreement."
+    },
+    {
+      "cmd": "bash tests/test-context-service-e2e.sh > .singular-evidence/green.log 2>&1",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Corrective green: seven direct tests and generated-corpus public CLI coverage passed, including opaque byte-cursor advancement."
+    },
+    {
+      "cmd": "test -f tests/test-context-service-e2e.sh && test -f tests/test-brain-ingestion-e2e.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-context-service-e2e.sh test-brain-ingestion-e2e.sh > .singular-evidence/regression.log 2>&1",
+      "exitCode": 2,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "Both selected regression tests passed; the harness returned 2 because this sandbox cannot write the shared Git worktree registry."
+    }
+  ],
+  "tests": [
+    {
+      "name": "tests/test_context_service.py",
+      "phase": "red",
+      "status": "failed-as-expected",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "tests/test_context_service.py",
+      "phase": "green",
+      "status": "passed-7-tests",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "tests/test-context-service-e2e.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-context-service-e2e.sh and test-brain-ingestion-e2e.sh",
+      "phase": "regression",
+      "status": "host-required",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "corrective-test-first-red",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "corrective-green",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "regression",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "b1-eligibility-fix",
+      "ref": "engine/context_service.py"
+    },
+    {
+      "kind": "lossless-pagination-and-source-slice-tests",
+      "ref": "tests/test_context_service.py"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260912T172947Z-37339/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A9:sha256:3fff9b15bf7a16bc34423b03a413aeb09624a144d87ac2245708100624ed472d:epoch:be15c59b8196351aa1c0138bf5b62125b295f137ec0356d2"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260912T172947Z-37339/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260912T172947Z-37339/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260912T172947Z-37339/evidence-manifest.json"
+    }
+  ],
+  "blockers": [
+    {
+      "code": "host-required:git-registry-write",
+      "detail": "The required regression harness reports 2 passed, 0 failed, but exits 2 because this sandbox cannot create its disposable Git worktree."
+    }
+  ],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-12T17:49:19Z"
+}
