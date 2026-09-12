@@ -103,8 +103,13 @@ PY
 doctor_json() {
   (
     cd "$repo"
-    env HOME="$doctor_home" PATH="$doctor_bin:$PATH" \
+    env -i HOME="$doctor_home" PATH="$doctor_bin:$PATH" \
       SINGULAR_ENGINE_HOME="$ROOT" XAI_API_KEY=test-key \
+      SINGULAR_JSON_CONFIG_FILE="$repo/singular.config.json" \
+      GROK_MOCK_VERSION="${GROK_MOCK_VERSION:-}" \
+      GROK_MOCK_LISTING_BROKEN="${GROK_MOCK_LISTING_BROKEN:-}" \
+      SINGULAR_CODEX_BIN="${SINGULAR_CODEX_BIN:-}" \
+      OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}" \
       "$@" bash "$ROOT/cli/singular" doctor --json
   )
 }
@@ -167,7 +172,7 @@ check_field "$report" model.availability 'check["details"]["cache"] == "hit"'
 #    is what stops dispatch the way a dead runner does.
 write_config grok-build
 rc=0
-report="$(doctor_json)" || rc=$?
+report="$(SINGULAR_CODEX_BIN="$doctor_bin/codex" doctor_json)" || rc=$?
 [[ "$rc" -ne 0 ]] || { echo "a nonexistent model must fail doctor" >&2; exit 1; }
 check_field "$report" model.availability 'check["status"] == "fail"'
 check_field "$report" model.availability '"provider-runs" in check["requiredFor"]'
@@ -317,5 +322,49 @@ check_field "$report" model.availability '"openrouter/openai/gpt-5" in check["re
 or_config "openrouter/auto"
 report="$(OPENROUTER_API_KEY=test-key doctor_json)"
 check_field "$report" model.availability 'check["status"] == "pass"'
+
+# 10. Codex's local models_cache.json is an opportunistic, potentially stale
+# inventory, not an exhaustive provider catalog. The Astra adoption incident
+# had gpt-6-astra omitted here while a native Astra/medium fixture canary
+# succeeded. Omission is therefore unknown evidence, never a fabricated
+# provider rejection and never conclusive unavailability.
+cat >"$doctor_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "codex-cli 9.0.0"; exit 0 ;;
+  "login status") echo "Logged in"; exit 0 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$doctor_bin/codex"
+python3 - "$repo/singular.config.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["runner"] = "codex-run.sh"
+data["env"] = {
+    "SINGULAR_CODEX_MODEL": "gpt-6-astra",
+    "SINGULAR_CODEX_L2_REASONING_EFFORT": "medium",
+}
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
+PY
+mkdir -p "$doctor_home/.codex"
+cat >"$doctor_home/.codex/models_cache.json" <<'JSON'
+{
+  "fetched_at":"2026-09-01T00:00:00Z",
+  "client_version":"9.0.0",
+  "models":[{"slug":"gpt-5.6-sol"}]
+}
+JSON
+rc=0
+report="$(SINGULAR_CODEX_BIN="$doctor_bin/codex" doctor_json)" || rc=$?
+[[ "$rc" -eq 0 ]] || { echo "Codex cache omission must not become provider rejection" >&2; exit 1; }
+check_field "$report" model.availability 'check["status"] == "warn"'
+check_field "$report" model.availability 'check["details"]["evidenceStatus"] == "cache-omission"'
+check_field "$report" model.availability 'check["details"]["inventoryProvenance"] == "codex-local-cache"'
+check_field "$report" model.availability 'check["details"]["inventoryComplete"] is False'
+check_field "$report" model.availability 'check["details"]["providerRejected"] is False'
+check_field "$report" model.availability '"gpt-6-astra" in check["details"]["missing"].values()'
+check_field "$report" model.availability '"incomplete" in check["message"]'
 
 echo "PASS: test-doctor-model-conformance"

@@ -35,10 +35,12 @@ from provider_resolver import (
     ConfigResolutionError,
     JsonConfigResolution,
     codex_role_settings,
+    effective_configuration,
     load_json_config,
     resolve_json_config,
     resolve_provider_bin,
 )
+from health_details import collect_lifecycle
 
 
 CHECK_SCHEMA = "singular.doctor-report.v1"
@@ -282,6 +284,7 @@ class Doctor:
         except OSError:
             self.engine_version = ""
         self.runtime_env = dict(os.environ)
+        self.effective_config_projection: dict[str, Any] | None = None
         self.runner: Path | None = None
         self.provider: str | None = None
         self.provider_bin: Path | None = None
@@ -797,7 +800,8 @@ class Doctor:
             return
         script = r'''
 source "$1/engine/lib.sh" >/dev/null || exit $?
-exec "$2" -c 'import json,os; print(json.dumps(dict(os.environ),separators=(",",":")))'
+projection="$(singular_effective_configuration_json)" || exit $?
+exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.environ),"projection":json.loads(sys.argv[1])},separators=(",",":")))' "$projection"
 '''
         env = dict(os.environ)
         env["SINGULAR_ROOT"] = str(self.repo)
@@ -821,9 +825,11 @@ exec "$2" -c 'import json,os; print(json.dumps(dict(os.environ),separators=(",",
             return
         try:
             data = json.loads(result.stdout)
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not isinstance(data.get("environment"), dict):
                 raise ValueError("environment record is not an object")
-            self.runtime_env = {str(k): str(v) for k, v in data.items()}
+            self.runtime_env = {str(k): str(v) for k, v in data["environment"].items()}
+            projection = data.get("projection")
+            self.effective_config_projection = projection if isinstance(projection, dict) else None
             self.add(
                 "runtime.config-load",
                 "pass",
@@ -1937,6 +1943,25 @@ singular_json_config_to_env "$2"
         if missing:
             details["missing"] = missing
             shown = ", ".join(f"{name}={value}" for name, value in sorted(missing.items()))
+            if provider == "codex":
+                details.update({
+                    "evidenceStatus": "cache-omission",
+                    "inventoryProvenance": "codex-local-cache",
+                    "inventoryComplete": False,
+                    "providerRejected": False,
+                })
+                self.add(
+                    "model.availability",
+                    "warn",
+                    f"configured Codex model is omitted from an incomplete local inventory: {shown}",
+                    required_for=("provider-runs", "selected-provider"),
+                    remediation=(
+                        "Refresh the Codex inventory or run a bounded native canary; "
+                        "only a provider response can establish rejection."
+                    ),
+                    details=details,
+                )
+                return
             self.add(
                 "model.availability",
                 "fail",
@@ -2027,9 +2052,25 @@ singular_json_config_to_env "$2"
 
     def codex_inventory(self) -> tuple[set[str], str, str, dict[str, Any]]:
         cache = self.codex_cache_path()
-        details: dict[str, Any] = {"provider": "codex", "cachePath": str(cache)}
+        details: dict[str, Any] = {
+            "provider": "codex",
+            "cachePath": str(cache),
+            "inventoryProvenance": "codex-local-cache",
+            "inventoryComplete": False,
+            "providerRejected": False,
+        }
         try:
             data = json.loads(cache.read_text(encoding="utf-8"))
+            fetched = data.get("fetched_at") or data.get("fetchedAt")
+            if fetched:
+                details["fetchedAt"] = str(fetched)
+                try:
+                    observed = dt.datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+                    details["inventoryStale"] = (
+                        dt.datetime.now(dt.UTC) - observed
+                    ).total_seconds() > MODEL_LISTING_TTL_SEC
+                except (TypeError, ValueError):
+                    details["inventoryStale"] = True
             slugs = {
                 str(item.get("slug"))
                 for item in data.get("models", [])
@@ -3447,6 +3488,20 @@ singular_json_config_to_env "$2"
             "ok": failed == 0,
             "repo": str(self.repo) if self.repo else None,
             "engine": str(self.engine),
+            "effectiveConfiguration": (
+                self.effective_config_projection
+                or effective_configuration(self.repo, self.runtime_env, environment_is_effective=True)
+                if self.repo
+                else None
+            ),
+            "lifecycle": (
+                collect_lifecycle(
+                    Path(self.runtime_env.get("SINGULAR_TASKS_DIR", self.repo / "docs/orchestration/tasks")),
+                    Path(self.runtime_env.get("SINGULAR_STATE_DIR", self.repo / ".singular-state")),
+                )
+                if self.repo
+                else None
+            ),
             # Additive: the primary diagnosis every "skip" entry points back to,
             # or null. Readers that predate it see the same schema id and the
             # same checks[] they always did.

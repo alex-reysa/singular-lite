@@ -21,6 +21,7 @@ Stdlib only, no engine imports — mirrors engine/capability_policy.py.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 import json
 import os
@@ -86,6 +87,117 @@ CODEX_ROLE_EFFORT_DEFAULT = {
     "supervisor": "high",
     "integrator": "high",
 }
+DIAGNOSTIC_ROLES = (
+    "planner", "implementer", "auditor", "critic", "decider",
+    "supervisor", "integrator",
+)
+DIAGNOSTIC_SETTING_KEYS = (
+    "SINGULAR_MAX_CONCURRENT", "SINGULAR_MAX_DISPATCH", "SINGULAR_MAX_L1_CONCURRENT",
+    "SINGULAR_ENABLE_L1_PARALLEL", "SINGULAR_L1_TASKS_PER_NODE",
+    "SINGULAR_L2_SLICE_BUDGET", "SINGULAR_L2_SLICE_BUDGET_MAX",
+    "SINGULAR_MAX_RETRIES", "SINGULAR_MAX_CONSEC_FAILS", "SINGULAR_MAX_HOURS",
+    "SINGULAR_MIN_DISK_GB", "SINGULAR_L1_STALE_MINUTES",
+    "SINGULAR_PLANNER_BACKOFF_SECONDS", "SINGULAR_PLANNER_QUOTA_BACKOFF_SECONDS",
+    "SINGULAR_PLANNER_OVERLOAD_BACKOFF_SECONDS", "SINGULAR_OVERLOAD_WAIT_BUDGET",
+    "SINGULAR_AUTO_INTEGRATE", "SINGULAR_PUSH", "SINGULAR_GENERATE", "SINGULAR_SLEEP",
+    "SINGULAR_SUPERVISOR_INTERVAL_MIN", "SINGULAR_TARGET_BRANCH",
+    "SINGULAR_PAIRED_AUDIT_PCT", "SINGULAR_CTX_PACKET", "SINGULAR_CTX_ROUTING",
+    "SINGULAR_CTX_ARTIFACT_SCAN", "SINGULAR_PLAN_CRITIQUE", "SINGULAR_PLANNER_SESSION",
+    "SINGULAR_AREA_PATHS", "SINGULAR_AREA_PREFIX",
+)
+
+# Safe runtime values consumed by provider discovery after the trusted shell
+# configuration pass.  Credential values are deliberately excluded: this
+# projection may cross a subprocess stdout boundary.  Presence of credentials
+# remains a property of the console service environment and provider probes.
+DIAGNOSTIC_PROVIDER_RUNTIME_KEYS = (
+    "SINGULAR_CODEX_BIN", "SINGULAR_CLAUDE_BIN", "SINGULAR_GEMINI_BIN",
+    "SINGULAR_OPENCODE_BIN", "SINGULAR_CURSOR_BIN", "SINGULAR_OPENROUTER_BIN",
+    "SINGULAR_GROK_BIN",
+)
+
+
+def _provider_specs(env: Mapping[str, str]) -> dict[str, Any]:
+    """Load the shipped adapter registry without importing mutable runtime code."""
+    configured = str(env.get("SINGULAR_ENGINE_HOME", "") or "").strip()
+    path = (Path(configured) / "engine/providers.json") if configured else Path(__file__).with_name("providers.json")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    providers = value.get("providers") if isinstance(value, dict) else None
+    return providers if isinstance(providers, dict) else {}
+
+
+def _runner_identity(
+    root: Path, env: Mapping[str, str], raw_runner: str
+) -> tuple[str, str | None, dict[str, Any]]:
+    """Normalize the selected runner and prove its shipped provider identity."""
+    specs = _provider_specs(env)
+    adapters = {
+        str(spec.get("adapter")): name
+        for name, spec in specs.items()
+        if isinstance(spec, dict) and spec.get("adapter")
+    }
+    configured_home = str(env.get("SINGULAR_ENGINE_HOME", "") or "").strip()
+    engine_dir = (
+        Path(configured_home).expanduser() / "engine"
+        if configured_home
+        else Path(__file__).resolve().parent
+    ).resolve()
+    selected = Path(raw_runner).expanduser()
+    if len(selected.parts) == 1:
+        selected = engine_dir / selected
+    elif not selected.is_absolute():
+        selected = root / selected
+    selected = selected.resolve()
+    provider = adapters.get(selected.name) if selected.parent == engine_dir else None
+    return str(selected), provider, specs
+
+
+def _provider_role_settings(
+    env: Mapping[str, str], provider: str, role: str, default_model: str
+) -> dict[str, str | None]:
+    """Format only settings the selected shipped adapter actually consumes."""
+    if provider == "codex":
+        return codex_role_settings(env, role, default_model)
+    effective_role = normalize_codex_role(role)
+    prefix = provider.upper().replace("-", "_")
+    global_model_key = f"SINGULAR_{prefix}_MODEL"
+    global_effort_key = f"SINGULAR_{prefix}_EFFORT"
+    role_suffix = {
+        "implementer": "L2", "planner": "PLANNER", "auditor": "AUDITOR",
+        "decider": "DECIDER",
+    }.get(effective_role)
+    role_model_key = f"SINGULAR_{prefix}_{role_suffix}_MODEL" if role_suffix else ""
+    role_effort_key = f"SINGULAR_{prefix}_{role_suffix}_EFFORT" if role_suffix else ""
+    # Gemini/OpenCode/Cursor/OpenRouter expose only their flat model setting.
+    supports_role_settings = provider in {"claude", "grok"}
+    model_key = role_model_key if supports_role_settings and role_model_key in env else global_model_key
+    model_raw = str(env.get(model_key, "") or "").strip()
+    model = model_raw or default_model or None
+    model_source = model_key if model_key in env else "provider-default"
+    if supports_role_settings:
+        effort_key = role_effort_key if role_effort_key and role_effort_key in env else global_effort_key
+        effort_raw = str(env.get(effort_key, "") or "").strip()
+        effort_defaults = {
+            "claude": {"implementer": "medium", "planner": "xhigh", "auditor": "xhigh"},
+            "grok": {"implementer": "medium", "planner": "high", "auditor": "high"},
+        }
+        effort = effort_raw or effort_defaults.get(provider, {}).get(effective_role)
+        effort_source = effort_key if effort_key in env else ("runner-default" if effort else None)
+    else:
+        effort = effort_source = None
+    return {
+        "role": effective_role,
+        "model": model,
+        "modelSource": model_source,
+        "reasoningEffort": effort,
+        "reasoningEffortSource": effort_source,
+        "requestedServiceTier": None,
+        "serviceTierSource": None,
+        "providerObservedServiceTier": None,
+    }
 
 
 class ConfigResolutionError(ValueError):
@@ -111,7 +223,8 @@ def resolve_json_config(repo: Path | str, env: Mapping[str, str]) -> JsonConfigR
         path = Path(selected).expanduser()
         if not path.is_absolute():
             path = root / path
-        return JsonConfigResolution(path=path.resolve(), source="selector")
+        source = "default" if env.get("SINGULAR_JSON_CONFIG_SOURCE") == "default" else "selector"
+        return JsonConfigResolution(path=path.resolve(), source=source)
     return JsonConfigResolution(path=root / "singular.config.json", source="default")
 
 
@@ -190,6 +303,120 @@ def codex_role_settings(
         # Codex JSONL does not currently attest the queue actually used.
         "providerObservedServiceTier": None,
     }
+
+
+def effective_configuration(
+    repo: Path | str,
+    env: Mapping[str, str],
+    *,
+    environment_is_effective: bool = False,
+) -> dict[str, Any]:
+    """Return the shared read-only effective configuration diagnostic."""
+    root = Path(repo).resolve()
+    resolution = resolve_json_config(root, env)
+    if resolution.source == "default" and not resolution.path.exists():
+        config, status, error = {}, "absent", ""
+    else:
+        try:
+            config, resolution = load_json_config(root, env)
+            status, error = "ok", ""
+        except ConfigResolutionError as exc:
+            config, status, error = {}, "error", str(exc)
+    effective_env = {str(key): str(value) for key, value in env.items()}
+    config_env = config.get("env") if isinstance(config.get("env"), dict) else {}
+    if not environment_is_effective:
+        for key, value in config_env.items():
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                effective_env[str(key)] = str(value)
+
+    def consumer_path(key: str, fallback: str) -> str:
+        raw = str(effective_env.get(key, "") or "").strip()
+        path = Path(raw).expanduser() if raw else root / fallback
+        if not path.is_absolute():
+            path = root / path
+        return str(path.resolve())
+
+    def layer_path(key: str, fallback: Path) -> str:
+        raw = str(effective_env.get(key, "") or "").strip()
+        path = Path(raw).expanduser() if raw else fallback
+        if not path.is_absolute():
+            path = root / path
+        return str(path.resolve())
+
+    runner_raw = str(
+        effective_env.get("SINGULAR_RUNNER")
+        or config_env.get("SINGULAR_RUNNER")
+        or config.get("runner")
+        or "codex-run.sh"
+    )
+    runner, provider, specs = _runner_identity(root, effective_env, runner_raw)
+    if provider:
+        spec = specs.get(provider) if isinstance(specs.get(provider), dict) else {}
+        model_spec = spec.get("model") if isinstance(spec.get("model"), dict) else {}
+        default_model = str(model_spec.get("default") or "")
+        provider_roles = DIAGNOSTIC_ROLES if provider == "codex" else (
+            "planner", "implementer", "auditor", "decider"
+        )
+        roles = {
+            role: _provider_role_settings(effective_env, provider, role, default_model)
+            for role in provider_roles
+        }
+    else:
+        roles = {
+            role: {
+                "role": normalize_codex_role(role),
+                "model": None,
+                "modelSource": None,
+                "reasoningEffort": None,
+                "reasoningEffortSource": None,
+                "requestedServiceTier": None,
+                "serviceTierSource": None,
+                "providerObservedServiceTier": None,
+            }
+            for role in DIAGNOSTIC_ROLES
+        }
+    result: dict[str, Any] = {
+        "schema": "singular.effective-configuration.v1",
+        "configuration": {
+            "path": str(resolution.path),
+            "source": resolution.source,
+            "status": status,
+        },
+        "configurationLayers": {
+            "json": str(resolution.path),
+            "shell": layer_path("SINGULAR_CONFIG_FILE", root / "singular.config.sh"),
+            "local": layer_path(
+                "SINGULAR_LOCAL_CONFIG_FILE",
+                Path(consumer_path("SINGULAR_STATE_DIR", ".singular-state")) / "config.local.sh",
+            ),
+            "engine": layer_path(
+                "SINGULAR_ENGINE_HOME", Path(__file__).resolve().parent.parent),
+        },
+        "runner": runner,
+        "provider": provider or "unknown",
+        "targetBranch": str(effective_env.get("SINGULAR_TARGET_BRANCH") or "") or None,
+        "paths": {
+            "root": str(root),
+            "tasks": consumer_path("SINGULAR_TASKS_DIR", "docs/orchestration/tasks"),
+            "state": consumer_path("SINGULAR_STATE_DIR", ".singular-state"),
+        },
+        "roles": roles,
+        "settings": {
+            key: effective_env[key] if key in effective_env else None
+            for key in DIAGNOSTIC_SETTING_KEYS
+        },
+        "providerRuntime": {
+            "searchPath": effective_env.get("PATH", ""),
+            "executables": {
+                key: effective_env[key]
+                for key in DIAGNOSTIC_PROVIDER_RUNTIME_KEYS
+                if key in effective_env
+            },
+        },
+    }
+    if error:
+        result["configuration"]["message"] = error
+    return result
 
 
 @dataclass(frozen=True)
@@ -300,3 +527,21 @@ def resolve_provider_bin(provider: str, binary: str,
 def resolve_codex_bin(env: Mapping[str, str]) -> ProviderResolution:
     """Convenience wrapper — the parity target for singular_resolve_codex_bin."""
     return resolve_provider_bin("codex", "codex", env)
+
+
+def _main() -> None:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    effective = sub.add_parser("effective-config")
+    effective.add_argument("--repo", type=Path, required=True)
+    effective.add_argument("--environment-effective", action="store_true")
+    args = parser.parse_args()
+    if args.command == "effective-config":
+        print(json.dumps(effective_configuration(
+            args.repo, os.environ,
+            environment_is_effective=args.environment_effective,
+        ), separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    _main()

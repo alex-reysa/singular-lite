@@ -10,6 +10,8 @@ app.js); the backend exposes a small read-only JSON API.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import copy
 import datetime as dt
 import hashlib
 import importlib.util
@@ -517,9 +519,13 @@ def _selected_json_config(
 
 
 def _configured_path(repo: Path, env_key: str, fallback: str) -> Path:
-    cfg, _resolution, _error = _selected_json_config(repo)
-    cfg_env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
-    raw = str(cfg_env.get(env_key) or "").strip()
+    effective = _effective_configuration_view(repo)
+    configuration = effective.get("configuration") or {}
+    if (configuration.get("status") == "error"
+            and configuration.get("reason") != "configuration-not-initialized"):
+        raise ConfigurationUnavailable(configuration)
+    path_key = "state" if env_key == "SINGULAR_STATE_DIR" else "tasks"
+    raw = str((effective.get("paths") or {}).get(path_key) or "").strip()
     if not raw:
         return repo / fallback
     path = Path(raw).expanduser()
@@ -1842,6 +1848,7 @@ def collect_snapshot(repo: Path) -> dict[str, Any]:
         "l1Leases": l1_leases,
         "l2Tasks": l2_tasks,
         "agents": agents,
+        "lifecycle": collect_lifecycle_view(repo),
         "loop": _snapshot_loop_liveness(repo),
         "summary": {
             "tasksTotal": len(tasks),
@@ -3497,6 +3504,306 @@ class _ComputeCache:
             self._slots.clear()
 
 
+class ConfigurationUnavailable(RuntimeError):
+    """A read cannot select durable paths from the current generation."""
+
+    def __init__(self, configuration: dict[str, Any]) -> None:
+        super().__init__(str(configuration.get("message") or "configuration unavailable"))
+        self.configuration = configuration
+
+
+_CONFIGURATION_LOCK = threading.RLock()
+
+
+def _diagnostic_bash() -> str | None:
+    configured = str(os.environ.get("SINGULAR_BASH_BIN") or "").strip()
+    if configured:
+        return str(Path(configured).expanduser())
+    pinned = Path("/opt/homebrew/bin/bash")
+    if pinned.is_file():
+        return str(pinned)
+    return shutil.which("bash")
+
+
+def _diagnostic_infrastructure_path(selected_bash: str | None) -> str:
+    """PATH used only while loading lib.sh, never for provider discovery."""
+    candidates = [
+        str(Path(sys.executable).resolve().parent),
+        str(Path(selected_bash).resolve().parent) if selected_bash else "",
+        "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+    ]
+    return os.pathsep.join(dict.fromkeys(p for p in candidates if p and Path(p).is_dir()))
+
+
+def _compute_effective_configuration(repo: Path) -> dict[str, Any]:
+    """Ask lib.sh for its safe, already-resolved diagnostic projection once."""
+    repo = Path(repo).resolve()
+    lib = _engine_file("lib.sh")
+    if lib is not None:
+        selected_bash = _diagnostic_bash()
+        if selected_bash:
+            env = dict(os.environ)
+            env["SINGULAR_ROOT"] = str(repo)
+            env["SINGULAR_ENGINE_HOME"] = str(lib.parent.parent)
+            infrastructure_path = _diagnostic_infrastructure_path(selected_bash)
+            try:
+                proc = subprocess.run(
+                    [
+                        selected_bash, "-c",
+                        '_singular_provider_path="$PATH"; PATH="$2"; export PATH; '
+                        'source "$1" >/dev/null || exit $?; '
+                        'if [[ "$PATH" == "$2" ]]; then PATH="$_singular_provider_path"; export PATH; fi; '
+                        'singular_effective_configuration_json "$3"',
+                        "_", str(lib), infrastructure_path, str(Path(sys.executable).resolve()),
+                    ],
+                    cwd=str(repo), env=env, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=12, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                selected = str(os.environ.get("SINGULAR_JSON_CONFIG_FILE") or "").strip()
+                selected_path = Path(selected).expanduser() if selected else repo / "singular.config.json"
+                if not selected_path.is_absolute():
+                    selected_path = repo / selected_path
+                return {
+                    "schema": "singular.effective-configuration.v1",
+                    "configuration": {
+                        "path": str(selected_path.resolve()),
+                        "source": "selector" if selected else "default",
+                        "status": "error",
+                        "message": f"effective configuration projection unavailable: {type(exc).__name__}: {exc}",
+                    },
+                    "runner": None, "provider": "unknown", "roles": {}, "settings": {},
+                    "paths": {"root": str(repo), "tasks": str(repo / TASKS_DIR_REL), "state": str(repo / STATE_DIR_REL)},
+                }
+            if proc.returncode == 0:
+                try:
+                    value = json.loads(proc.stdout)
+                    if isinstance(value, dict):
+                        return value
+                except json.JSONDecodeError:
+                    pass
+            selected = str(os.environ.get("SINGULAR_JSON_CONFIG_FILE") or "").strip()
+            selected_path = Path(selected).expanduser() if selected else repo / "singular.config.json"
+            if not selected_path.is_absolute():
+                selected_path = repo / selected_path
+            return {
+                "schema": "singular.effective-configuration.v1",
+                "configuration": {
+                    "path": str(selected_path.resolve()),
+                    "source": "selector" if selected else "default",
+                    "status": "error",
+                    "message": f"effective configuration projection failed for {selected_path.resolve()} (exit {proc.returncode})",
+                },
+                "runner": None, "provider": "unknown", "roles": {}, "settings": {},
+                "paths": {"root": str(repo), "tasks": str(repo / TASKS_DIR_REL), "state": str(repo / STATE_DIR_REL)},
+            }
+    return {
+        "schema": "singular.effective-configuration.v1",
+        "configuration": {"status": "error", "message": "engine lib.sh unavailable"},
+        "runner": None, "provider": "unknown", "roles": {}, "settings": {},
+        "paths": {"root": str(repo), "tasks": str(repo / TASKS_DIR_REL), "state": str(repo / STATE_DIR_REL)},
+    }
+
+
+def _environment_digest() -> str:
+    """Bind every startup environment value without exposing any of them."""
+    digest = hashlib.sha256()
+    for key, value in sorted(os.environ.items()):
+        digest.update(key.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        digest.update(value.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _configuration_file_identity(label: str, raw_path: Any) -> dict[str, Any]:
+    path = Path(str(raw_path)).expanduser() if raw_path else None
+    identity: dict[str, Any] = {"label": label, "path": str(path) if path else None,
+                                "status": "absent", "mode": None, "sha256": None}
+    if path is None:
+        return identity
+    try:
+        if not path.exists():
+            return identity
+        identity["mode"] = path.stat().st_mode & 0o7777
+        if not path.is_file():
+            identity["status"] = "not-file"
+            return identity
+        identity["status"] = "file"
+        identity["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return identity
+    except OSError as exc:
+        identity["status"] = f"error:{type(exc).__name__}"
+        return identity
+
+
+def _configuration_bindings(view: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    layers = view.get("configurationLayers") if isinstance(view.get("configurationLayers"), dict) else {}
+    runner = view.get("runner")
+    lib = _engine_file("lib.sh")
+    loaded_engine = lib.parent if lib is not None else None
+    selected_home = Path(str(layers["engine"])) if layers.get("engine") else None
+    selected_engine = selected_home / "engine" if selected_home else None
+    paths: list[tuple[str, Any]] = [
+        ("json", layers.get("json")),
+        ("shell", layers.get("shell")),
+        ("local", layers.get("local")),
+        ("loaded-engine-lib", lib),
+        ("loaded-health-details", loaded_engine / "health_details.py" if loaded_engine else None),
+        ("selected-engine-lib", selected_engine / "lib.sh" if selected_engine else None),
+        ("provider-resolver", selected_engine / "provider_resolver.py" if selected_engine else None),
+        ("provider-registry", selected_engine / "providers.json" if selected_engine else None),
+        ("runner", runner),
+        ("bash", _diagnostic_bash()),
+        ("python", Path(sys.executable).resolve()),
+    ]
+    runtime = view.get("providerRuntime") if isinstance(view.get("providerRuntime"), dict) else {}
+    executables = runtime.get("executables") if isinstance(runtime, dict) else {}
+    if isinstance(executables, dict):
+        paths.extend((f"provider-executable:{key}", value)
+                     for key, value in sorted(executables.items()))
+    return tuple(_configuration_file_identity(label, path) for label, path in paths)
+
+
+def _configuration_generation_id(env_digest: str,
+                                 bindings: tuple[dict[str, Any], ...]) -> str:
+    payload = json.dumps({"environment": env_digest, "files": bindings},
+                         sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _uninitialized_configuration(root: Path) -> dict[str, Any]:
+    return {
+        "schema": "singular.effective-configuration.v1",
+        "configuration": {
+            "status": "error", "reason": "configuration-not-initialized",
+            "message": "trusted configuration has not been initialized; start or restart the console",
+            "restartRequired": True,
+        },
+        "generation": {"id": None, "status": "uninitialized", "restartRequired": True},
+        "runner": None, "provider": "unknown", "roles": {}, "settings": {},
+        # Legacy direct library callers retain deterministic layout. The HTTP and
+        # one-shot entrypoints always initialize before any collector runs.
+        "paths": {"root": str(root), "tasks": str(root / TASKS_DIR_REL),
+                  "state": str(root / STATE_DIR_REL)},
+    }
+
+
+class _ConfigurationSnapshots:
+    """Trusted startup snapshots with subprocess-free input validation."""
+
+    def __init__(self) -> None:
+        self._snapshots: dict[str, dict[str, Any]] = {}
+        self._local = threading.local()
+
+    def initialize(self, repo: Path, *, force: bool = False) -> dict[str, Any]:
+        root = Path(repo).resolve()
+        key = str(root)
+        with _CONFIGURATION_LOCK:
+            if not force and key in self._snapshots:
+                return self._snapshots[key]["view"]
+            environment = _environment_digest()
+            view = _compute_effective_configuration(root)
+            bindings = _configuration_bindings(view)
+            generation_id = _configuration_generation_id(environment, bindings)
+            view = copy.deepcopy(view)
+            view["generation"] = {
+                "id": generation_id,
+                "status": "current",
+                "restartRequired": False,
+                "boundInputCount": len(bindings) + 1,
+            }
+            self._snapshots[key] = {
+                "view": view, "environment": environment, "bindings": bindings,
+            }
+            return view
+
+    def _changed_view(self, snapshot: dict[str, Any], changed: list[dict[str, Any]]) -> dict[str, Any]:
+        previous = snapshot["view"]
+        details = [
+            {"label": item["label"], "path": item.get("path"),
+             "previousStatus": item.get("previousStatus"),
+             "currentStatus": item.get("currentStatus")}
+            for item in changed
+        ]
+        generation = dict(previous.get("generation") or {})
+        generation.update({"status": "changed", "restartRequired": True})
+        return {
+            "schema": "singular.effective-configuration.v1",
+            "configuration": {
+                "status": "error", "reason": "configuration-changed",
+                "message": "configuration inputs changed; restart the console or apply settings again",
+                "restartRequired": True, "changedInputs": details,
+            },
+            "generation": generation,
+            "runner": None, "provider": "unknown", "targetBranch": None,
+            "roles": {}, "settings": {}, "paths": {}, "providerRuntime": {},
+        }
+
+    def get(self, repo: Path) -> dict[str, Any]:
+        requested = Path(repo)
+        root = requested.resolve()
+        key = str(root)
+        pinned = getattr(self._local, "pinned", None)
+        if pinned and key in pinned:
+            return pinned[key]
+        with _CONFIGURATION_LOCK:
+            snapshot = self._snapshots.get(key)
+            if snapshot is None:
+                return _uninitialized_configuration(requested)
+            changed: list[dict[str, Any]] = []
+            if _environment_digest() != snapshot["environment"]:
+                changed.append({"label": "environment", "path": None,
+                                "previousStatus": "bound", "currentStatus": "changed"})
+            current = _configuration_bindings(snapshot["view"])
+            for before, after in zip(snapshot["bindings"], current):
+                if before != after:
+                    changed.append({"label": before["label"], "path": after.get("path"),
+                                    "previousStatus": before.get("status"),
+                                    "currentStatus": after.get("status")})
+            return self._changed_view(snapshot, changed) if changed else snapshot["view"]
+
+    @contextlib.contextmanager
+    def pin(self, repo: Path):
+        root = Path(repo).resolve()
+        key = str(root)
+        view = self.get(root)
+        prior = getattr(self._local, "pinned", None)
+        pinned = dict(prior or {})
+        pinned[key] = view
+        self._local.pinned = pinned
+        try:
+            yield view
+        finally:
+            self._local.pinned = prior
+
+    def invalidate(self) -> None:
+        with _CONFIGURATION_LOCK:
+            self._snapshots.clear()
+
+_EFFECTIVE_CONFIGURATION_CACHE = _ConfigurationSnapshots()
+
+
+def initialize_configuration(repo: Path, *, force: bool = False) -> dict[str, Any]:
+    """Execute the trusted startup boundary and atomically publish its view."""
+    global TARGET_BRANCH
+    view = _EFFECTIVE_CONFIGURATION_CACHE.initialize(Path(repo), force=force)
+    configuration = view.get("configuration") or {}
+    if configuration.get("status") != "error" and view.get("targetBranch"):
+        TARGET_BRANCH = str(view["targetBranch"])
+    return view
+
+
+def _effective_configuration_view(repo: Path) -> dict[str, Any]:
+    return _EFFECTIVE_CONFIGURATION_CACHE.get(Path(repo))
+
+
+def _pinned_configuration_call(repo: Path, function, *args, **kwargs):
+    """Run one complete top-level collection against exactly one generation."""
+    with _EFFECTIVE_CONFIGURATION_CACHE.pin(repo):
+        return function(*args, **kwargs)
+
+
 def _events_path(repo: Path) -> Path:
     return state_path(repo, EVENTS_LOG_REL)
 
@@ -4420,30 +4727,10 @@ _CONFIG_DERIVED_ENV = {
 
 
 def _engine_env_value(repo: Path, key: str) -> str | None:
-    """One engine env knob, resolved from the repo's files. Read-only.
-
-    Precedence mirrors collect_config: `.singular-state/.env` (whitelisted to this
-    key, so secrets are never parsed) > singular.config.json env{} > the
-    structured config field engine/lib.sh derives the same variable from. The
-    console's OWN process environment is deliberately not consulted: the console
-    observes the repo's configuration, it is not a participant in the loop's
-    shell, and inheriting a stray export would make it report a cap the engine
-    would never use."""
-    override = parse_env_overrides(repo, {key}).get(key)
-    if override not in (None, ""):
-        return override
-    cfg, _resolution, _error = _selected_json_config(repo)
-    cfg = cfg if isinstance(cfg, dict) else {}
-    config_env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
-    value = config_env.get(key)
-    if isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value) != "":
-        return str(value)
-    derive = _CONFIG_DERIVED_ENV.get(key)
-    if derive is not None:
-        derived = derive(cfg)
-        if derived not in (None, ""):
-            return str(derived)
-    return None
+    """One engine knob from the pinned lib.sh-resolved generation."""
+    settings = _effective_configuration_view(repo).get("settings") or {}
+    value = settings.get(key) if isinstance(settings, dict) else None
+    return str(value) if value is not None else None
 
 
 def _l1_area_scopes(repo: Path, areas: Any) -> dict[str, list[str]]:
@@ -4724,7 +5011,8 @@ def collect_overview(repo: Path) -> dict[str, Any]:
         "pulse": pulse,
         "frontierActivity": frontier_activity,
         "inputs": inputs,
-        "settings": collect_settings(repo),
+        "settings": _overlay_config_env(repo, collect_settings(repo)),
+        "generation": _effective_configuration_view(repo).get("generation") or {},
         "loop": loop,
     }
 
@@ -5305,10 +5593,48 @@ _CONFIG_FLAG_KEYS = (("ctxPacket", "SINGULAR_CTX_PACKET"),
 
 def collect_config(repo: Path) -> dict[str, Any]:
     """Resolved per-role model/effort + limits/flags for the Agents surface.
-    Precedence mirrors the engine: .singular-state/.env override (whitelisted
-    keys only — secrets are never read) > singular.config.json env{} > the
-    runner script's fallback default. Read-only."""
+    Values come only from the trusted lib.sh startup generation; this collector
+    neither parses another configuration layer nor launches a subprocess."""
     repo = repo.resolve()
+    effective = _effective_configuration_view(repo)
+    settings = effective.get("settings") if isinstance(effective.get("settings"), dict) else {}
+    roles: dict[str, Any] = {}
+    for role, raw in (effective.get("roles") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        roles[str(role)] = {
+            "model": raw.get("model"),
+            "effort": raw.get("reasoningEffort"),
+            "reasoningEffort": raw.get("reasoningEffort"),
+            "requestedServiceTier": raw.get("requestedServiceTier"),
+            "providerObservedServiceTier": raw.get("providerObservedServiceTier"),
+            "source": {
+                "model": raw.get("modelSource"),
+                "modelTier": "runner-default" if raw.get("modelSource") == "provider-default" else "effective",
+                "effort": raw.get("reasoningEffortSource"),
+                "effortTier": "runner-default" if raw.get("reasoningEffortSource") == "runner-default" else "effective",
+                "serviceTier": raw.get("serviceTierSource"),
+            },
+        }
+    configuration = effective.get("configuration") if isinstance(effective.get("configuration"), dict) else {"status": "error"}
+    def projected(pairs: tuple) -> dict[str, Any]:
+        return {name: settings.get(key) for name, key in pairs}
+    return {
+        "schema": "singular.codex.config.v0",
+        "generatedAt": utc_now(),
+        "ok": configuration.get("status") not in {"error"},
+        "configuration": configuration,
+        "generation": effective.get("generation") or {},
+        "runner": effective.get("runner"),
+        "provider": effective.get("provider") or "unknown",
+        "roles": roles,
+        "limits": projected(_CONFIG_LIMIT_KEYS),
+        "flags": projected(_CONFIG_FLAG_KEYS),
+        "paths": effective.get("paths") or {},
+    }
+
+    # Legacy static resolution retained below as documentation for older
+    # adapters; all live consumers return through the authoritative view above.
     cfg, config_resolution, config_error = _selected_json_config(repo)
     if config_error:
         return {
@@ -5437,7 +5763,19 @@ def collect_config(repo: Path) -> dict[str, Any]:
     }
 
 
-_CONFIG_CACHE = _ComputeCache(collect_config, 30.0)
+class _LiveConfigurationView:
+    """Compatibility facade: generation storage, not a second TTL authority."""
+
+    def get(self, key: str, compute_arg: Path) -> dict[str, Any]:
+        return collect_config(compute_arg)
+
+    def invalidate(self) -> None:
+        # Settings refreshes the authoritative snapshot explicitly. There is no
+        # independent config cache to clear.
+        return None
+
+
+_CONFIG_CACHE = _LiveConfigurationView()
 
 
 def load_config_view(repo: Path) -> dict[str, Any]:
@@ -5627,55 +5965,57 @@ def apply_settings_changes(repo: Path, changes: Any) -> tuple[int, dict[str, Any
         if not ok:
             return 400, {"error": result, "key": key}
         normalized[key] = result
-    cfg_path = repo / "singular.config.json"
-    obj = read_json(cfg_path, None)
-    if not isinstance(obj, dict):
-        return 409, {"error": "no singular.config.json — initialize the repo first"}
-    env = obj.get("env")
-    if not isinstance(env, dict):
-        env = {}
-        obj["env"] = env
-    for key, value in normalized.items():
-        if value == "":
-            env.pop(key, None)  # revert to default
-        else:
-            env[key] = value
-    _atomic_write_text(cfg_path, json.dumps(obj, indent=2) + "\n")
-    _CONFIG_CACHE.invalidate()
-    _OVERVIEW_CACHE.invalidate()
-    # A runner switch (SINGULAR_RUNNER) or model/timeout change moves the config-
-    # derived provider fields (activeRunner/isDefaultRunner/roles), so drop the
-    # 60s providers cache too — the next /api/providers reflects the write.
-    _PROVIDERS_CACHE.invalidate()
-    return 200, {
-        "ok": True,
-        "applied": normalized,
-        "appliesAt": {k: _settings_applies_at(k) for k in normalized},
-        "config": collect_config(repo),
-        "settings": _overlay_config_env(repo, collect_settings(repo)),
-    }
+    selected = str(os.environ.get("SINGULAR_JSON_CONFIG_FILE") or "").strip()
+    cfg_path = Path(selected).expanduser() if selected else repo / "singular.config.json"
+    if not cfg_path.is_absolute():
+        cfg_path = repo / cfg_path
+    # Readers use this same lock while validating their generation. They either
+    # observe the complete old generation or the complete refreshed one, never
+    # the atomic file swap paired with stale in-memory consumers.
+    with _CONFIGURATION_LOCK:
+        obj = read_json(cfg_path, None)
+        if not isinstance(obj, dict):
+            return 409, {"error": "no singular.config.json — initialize the repo first"}
+        env = obj.get("env")
+        if not isinstance(env, dict):
+            env = {}
+            obj["env"] = env
+        for key, value in normalized.items():
+            if value == "":
+                env.pop(key, None)  # revert to default
+            else:
+                env[key] = value
+        _atomic_write_text(cfg_path, json.dumps(obj, indent=2) + "\n")
+        # The POST is the one authorized post-startup shell resolution boundary.
+        # It resolves exactly once and publishes TARGET_BRANCH with every other
+        # consumer in the replacement generation.
+        initialize_configuration(repo, force=True)
+        _CONFIG_CACHE.invalidate()
+        _OVERVIEW_CACHE.invalidate()
+        _PROVIDERS_CACHE.invalidate()
+        response = {
+            "ok": True,
+            "applied": normalized,
+            "appliesAt": {k: _settings_applies_at(k) for k in normalized},
+            "config": collect_config(repo),
+            "settings": _overlay_config_env(repo, collect_settings(repo)),
+        }
+    return 200, response
 
 
 def _overlay_config_env(repo: Path, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Overlay singular.config.json env{} onto collect_settings rows.
-
-    collect_settings (byte-pinned; untouched) only knows .env + shell defaults,
-    but the engine's authoritative layer — and the target POST /api/settings
-    writes to — is config env{}. Without this overlay the System panel shows
-    stale defaults for keys the config actually sets, and saved edits never
-    appear to land. A .env row keeps source "env"; otherwise a config-set key
-    wins over the shell default and reads source "config"."""
-    cfg, _resolution, _error = _selected_json_config(repo)
-    config_env = cfg.get("env") if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict) else {}
-    if not config_env:
+    """Overlay the pinned lib.sh-resolved settings onto display metadata."""
+    effective = _effective_configuration_view(repo)
+    settings = effective.get("settings") if isinstance(effective.get("settings"), dict) else {}
+    if not settings:
         return groups
     for group in groups:
         for item in group.get("items") or []:
             key = item.get("envKey")
-            if key in config_env and item.get("source") != "env":
-                item["value"] = str(config_env[key])
-                item["source"] = "config"
-                item["overridden"] = True
+            if key in settings and settings[key] is not None:
+                item["value"] = str(settings[key])
+                item["source"] = "effective"
+                item["overridden"] = str(settings[key]) != str(item.get("default"))
                 # `value` just changed, so the derived boolValue must follow it.
                 _apply_bool_value(item)
     return groups
@@ -5686,11 +6026,13 @@ def collect_settings_view(repo: Path) -> dict[str, Any]:
     overlaid) plus an appliesAt map for every whitelisted (writable) key, so
     the UI can label when a change lands."""
     whitelist, _kinds = _settings_write_spec()
+    effective = _effective_configuration_view(repo)
     return {
         "schema": "singular.codex.settings.v0",
         "generatedAt": utc_now(),
         "groups": _overlay_config_env(repo, collect_settings(repo)),
         "appliesAt": {k: _settings_applies_at(k) for k in sorted(whitelist)},
+        "generation": effective.get("generation") or {},
     }
 
 
@@ -6091,16 +6433,16 @@ def _provider_quota(pid: str, installed: bool, home: Path) -> dict[str, Any]:
 
 _PROVIDER_RESOLVER_CACHE: dict[str, Any] = {}
 _PROVIDER_RESOLVER_LOCK = threading.Lock()
+_HEALTH_DETAILS_MODULE: Any = None
+_HEALTH_DETAILS_LOCK = threading.Lock()
 
 
 def _load_provider_resolver():
     """Import engine/provider_resolver.py in-process (never a subprocess).
 
-    The console daemon never sources lib.sh — cli/singular execs it with only
-    SINGULAR_ENGINE_HOME — so it used to resolve providers with a bare
-    shutil.which over its own PATH. That is how the Providers card came to
-    report an unauthenticated /opt/homebrew/bin/codex while the orchestration
-    was driving a different Codex entirely.
+    The console's trusted startup snapshot supplies the resolved runner and safe
+    executable overrides. Importing the resolver here avoids a second shell
+    pass while retaining the engine's executable rules.
 
     Returns None on a plugin-only checkout; the caller then degrades to the old
     PATH-only behaviour and marks the result non-authoritative.
@@ -6132,27 +6474,80 @@ def _load_provider_resolver():
         return module
 
 
-def _provider_resolution_env(repo: Path, env: dict[str, str]) -> dict[str, str]:
-    """The environment the ENGINE would see, not the console's own.
+def _load_health_details():
+    """Load the engine's shared read-only lifecycle projector."""
+    global _HEALTH_DETAILS_MODULE
+    with _HEALTH_DETAILS_LOCK:
+        if _HEALTH_DETAILS_MODULE is not None:
+            return _HEALTH_DETAILS_MODULE
+        path = _engine_file("health_details.py")
+        if path is None:
+            return None
+        name = "_singular_health_details"
+        try:
+            engine_dir = str(path.parent)
+            if engine_dir not in sys.path:
+                sys.path.insert(0, engine_dir)
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                return None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            _HEALTH_DETAILS_MODULE = module
+        except Exception:
+            sys.modules.pop(name, None)
+            return None
+        return _HEALTH_DETAILS_MODULE
 
-    engine/lib.sh evals `export K=V` for every singular.config.json env{} key
-    AFTER the process environment exists, so config WINS. os.environ alone is
-    not sufficient — that asymmetry is the split-brain itself.
 
-    Known residual gap: singular.config.sh and .singular-state/config.local.sh are
-    shell files sourced after env{}, and the console does not eval shell. If one
-    of those sets SINGULAR_CODEX_BIN the console can still disagree, which is why
-    the payload carries `authoritative`.
-    """
+def collect_lifecycle_view(repo: Path) -> dict[str, Any]:
+    repo = Path(repo).resolve()
+    effective = _effective_configuration_view(repo)
+    configuration = effective.get("configuration") or {}
+    if configuration.get("status") == "error" and configuration.get("reason") == "configuration-changed":
+        return {
+            "schema": "singular.orchestration.lifecycle-diagnostics.v1",
+            "configuration": configuration,
+            "generation": effective.get("generation") or {},
+            "paths": {}, "active": [], "activeCount": 0, "phaseCounts": {},
+            "implementersActive": 0, "candidates": [], "preservedAttempts": [],
+            "unknownRecords": [{"kind": "configuration", "record": "startup-snapshot",
+                                "status": "changed", "restartRequired": True}],
+            "sources": {"runs": "unknown", "leases": "unknown", "tasks": "unknown"},
+        }
+    paths = effective.get("paths") if isinstance(effective.get("paths"), dict) else {}
+    tasks = Path(str(paths.get("tasks") or repo / TASKS_DIR_REL))
+    state = Path(str(paths.get("state") or repo / STATE_DIR_REL))
+    module = _load_health_details()
+    if module is not None and hasattr(module, "collect_lifecycle"):
+        result = module.collect_lifecycle(tasks, state)
+        if isinstance(result, dict):
+            result["generation"] = effective.get("generation") or {}
+        return result
+    return {
+        "schema": "singular.orchestration.lifecycle-diagnostics.v1",
+        "paths": {"tasks": str(tasks), "state": str(state)},
+        "active": [], "activeCount": 0, "phaseCounts": {},
+        "implementersActive": 0, "candidates": [], "preservedAttempts": [],
+        "unknownRecords": [{"kind": "projector", "record": "health_details.py", "status": "missing"}],
+        "sources": {"runs": "unknown", "leases": "unknown", "tasks": "unknown"},
+        "generation": effective.get("generation") or {},
+    }
+
+
+def _provider_resolution_env(repo: Path, env: dict[str, str], *,
+                             use_snapshot_path: bool = True) -> dict[str, str]:
+    """Overlay safe provider values from the trusted startup generation."""
     merged = dict(env)
-    cfg = read_json(repo / "singular.config.json", None)
-    cfg_env = cfg.get("env") if isinstance(cfg, dict) else None
-    if isinstance(cfg_env, dict):
-        for key, value in cfg_env.items():
-            # SINGULAR_BASH_BIN is bootstrap-only and skipped by lib.sh too.
-            if key == "SINGULAR_BASH_BIN" or not isinstance(value, (str, int, float)):
-                continue
-            merged[str(key)] = str(value)
+    runtime = _effective_configuration_view(repo).get("providerRuntime") or {}
+    if use_snapshot_path and isinstance(runtime, dict) and "searchPath" in runtime:
+        merged["PATH"] = str(runtime["searchPath"])
+    executables = runtime.get("executables") if isinstance(runtime, dict) else {}
+    if isinstance(executables, dict):
+        for key, value in executables.items():
+            if isinstance(value, str):
+                merged[str(key)] = value
     return merged
 
 
@@ -6209,13 +6604,14 @@ def _probe_provider(spec: dict[str, Any], env: dict[str, str], home: Path,
     return out
 
 
-def _active_runner(repo: Path) -> str:
+def _active_runner(repo: Path) -> str | None:
     """Basename of the runner the engine would launch: config env{} SINGULAR_RUNNER
     (wins in engine/lib.sh) > top-level "runner" > engine default codex-run.sh."""
-    cfg, _resolution, _error = _selected_json_config(repo)
-    env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
-    runner = env.get("SINGULAR_RUNNER") or cfg.get("runner") or "codex-run.sh"
-    return os.path.basename(str(runner))
+    effective = _effective_configuration_view(repo)
+    if (effective.get("configuration") or {}).get("status") == "error":
+        return None
+    runner = effective.get("runner")
+    return os.path.basename(str(runner)) if runner else None
 
 
 def _provider_session_stats(repo: Path) -> dict[str, dict[str, Any]]:
@@ -6263,12 +6659,43 @@ def _provider_session_stats(repo: Path) -> dict[str, dict[str, Any]]:
     return stats
 
 
-def _compute_providers(repo: Path, env: dict[str, str], home: Path) -> dict[str, Any]:
+def _compute_providers(repo: Path, env: dict[str, str], home: Path, *,
+                       use_snapshot_path: bool = True) -> dict[str, Any]:
     repo = Path(repo)
     checked_at = utc_now()
     engine_dir = _engine_dir(env)
     active_runner = _active_runner(repo)
     cfg = collect_config(repo)                 # pure-FS; reuses the runner->provider fix
+    if not cfg.get("ok"):
+        configuration = cfg.get("configuration") or {}
+        message = str(configuration.get("message") or "configuration unavailable")
+        providers = []
+        for spec in PROVIDERS:
+            providers.append({
+                "id": spec["id"], "name": spec["name"], "binary": spec["binary"],
+                "installed": None, "path": None, "version": None,
+                "authStatus": "unknown", "authMethod": None, "email": None, "plan": None,
+                "loginCommand": spec.get("loginCommand"),
+                "envKeys": list(spec.get("envKeys", [])), "envKeyPresent": {},
+                "runnerScript": spec["runnerScript"],
+                "runnerPresent": (engine_dir / spec["runnerScript"]).is_file(),
+                "isDefaultRunner": False, "roles": [], "lastUsedAt": None,
+                "lastExitCode": None, "recentSessions": 0, "checkedAt": checked_at,
+                "status": "unknown", "message": message,
+                "resolution": {"source": "none", "outcome": "configuration-unavailable",
+                               "overrideKey": None, "configuredPath": None,
+                               "message": message, "authoritative": False},
+                "quota": {"available": False, "reason": "configuration-unavailable"},
+            })
+        return {
+            "schema": "singular.providers.v0", "checkedAt": checked_at,
+            "repo": str(repo), "activeProvider": "unknown", "activeRunner": None,
+            "configuration": configuration, "generation": cfg.get("generation") or {},
+            "providers": providers,
+            "summary": {"ready": 0, "warning": 0, "error": 1, "missing": 0,
+                        "misconfigured": 0, "attention": 1,
+                        "message": message},
+        }
     active_provider = cfg.get("provider")
     active_roles = sorted(cfg.get("roles", {}).keys())
     session_stats = _provider_session_stats(repo)
@@ -6276,7 +6703,8 @@ def _compute_providers(repo: Path, env: dict[str, str], home: Path) -> dict[str,
     # pool, so six worker threads cannot race exec_module and every probe sees
     # the same config-layered environment the engine would.
     resolver = _load_provider_resolver()
-    resolve_env = _provider_resolution_env(repo, env)
+    resolve_env = _provider_resolution_env(
+        repo, env, use_snapshot_path=use_snapshot_path)
     with ThreadPoolExecutor(max_workers=6) as pool:
         probes = list(pool.map(
             lambda spec: _probe_provider(spec, resolve_env, home, resolver=resolver),
@@ -6285,7 +6713,8 @@ def _compute_providers(repo: Path, env: dict[str, str], home: Path) -> dict[str,
     for spec, probe in zip(PROVIDERS, probes):
         pid = spec["id"]
         probe["runnerPresent"] = (engine_dir / spec["runnerScript"]).is_file()
-        probe["isDefaultRunner"] = spec["runnerScript"] == active_runner
+        probe["isDefaultRunner"] = (
+            pid == active_provider and spec["runnerScript"] == active_runner)
         probe["roles"] = list(active_roles) if pid == active_provider else []
         st = session_stats.get(pid, {})
         probe["lastUsedAt"] = st.get("lastUsedAt")
@@ -6303,6 +6732,7 @@ def _compute_providers(repo: Path, env: dict[str, str], home: Path) -> dict[str,
         "repo": str(repo),
         "activeProvider": active_provider,
         "activeRunner": active_runner,
+        "generation": cfg.get("generation") or {},
         "providers": providers,
         "summary": {
             "ready": ready, "warning": counts.get("warning", 0),
@@ -6329,7 +6759,8 @@ def collect_providers(repo: Path, refresh: bool = False, *,
     repo = Path(repo).resolve()
     if env is not None or home is not None:
         return _compute_providers(repo, env if env is not None else os.environ,
-                                  Path(home) if home is not None else Path.home())
+                                  Path(home) if home is not None else Path.home(),
+                                  use_snapshot_path=False)
     if refresh:
         _PROVIDERS_CACHE.invalidate()
     return _PROVIDERS_CACHE.get(str(repo), repo)
@@ -6632,11 +7063,8 @@ def _load_supervisor_briefing(repo: Path) -> dict[str, Any] | None:
 
 
 def _supervisor_config(repo: Path) -> dict[str, Any]:
-    """{intervalMin, enabled} from config env SINGULAR_SUPERVISOR_INTERVAL_MIN
-    (0/unset/invalid = disabled — matches the engine's inert default). Pure FS."""
-    cfg = read_json(repo / "singular.config.json", None)
-    env = cfg.get("env") if isinstance(cfg, dict) and isinstance(cfg.get("env"), dict) else {}
-    raw = env.get("SINGULAR_SUPERVISOR_INTERVAL_MIN")
+    """{intervalMin, enabled} from the pinned effective generation."""
+    raw = _engine_env_value(repo, "SINGULAR_SUPERVISOR_INTERVAL_MIN")
     try:
         interval = int(str(raw).strip()) if raw not in (None, "") else 0
     except (ValueError, TypeError):
@@ -6648,6 +7076,7 @@ def _supervisor_config(repo: Path) -> dict[str, Any]:
 def collect_home(repo: Path) -> dict[str, Any]:
     """The landing digest. Read-only; pure filesystem (no subprocesses)."""
     repo = repo.resolve()
+    effective = _effective_configuration_view(repo)
     now = dt.datetime.now(dt.UTC)
 
     # --- activity rollup + last-activity from the shared events index ---------
@@ -6816,6 +7245,7 @@ def collect_home(repo: Path) -> dict[str, Any]:
         "loop": loop,
         "briefing": briefing,
         "supervisor": supervisor,
+        "generation": effective.get("generation") or {},
     }
 
 
@@ -7551,6 +7981,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        with _EFFECTIVE_CONFIGURATION_CACHE.pin(self.repo):
+            try:
+                self._do_GET()
+            except ConfigurationUnavailable as exc:
+                self.send_json({"error": "configuration unavailable",
+                                "configuration": exc.configuration}, 409)
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
         route = parsed.path
         if route == "/":
@@ -7779,7 +8217,11 @@ class Handler(BaseHTTPRequestHandler):
                 # Surfaced so a disabled security control cannot be silently
                 # off: SINGULAR_CONSOLE_REDACT=0 is answerable without a browser.
                 "redaction": REDACT_ENABLED,
+                "lifecycle": collect_lifecycle_view(self.repo),
             })
+            return
+        if route == "/api/lifecycle":
+            self.send_json(collect_lifecycle_view(self.repo))
             return
         self.send_json({"error": "not found"}, 404)
 
@@ -7861,6 +8303,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(resp, status)
 
     def do_POST(self) -> None:
+        # Settings is the explicit mutation/refresh boundary and therefore must
+        # not inherit the pre-write generation pin. Other writes use one pinned
+        # generation for their complete path selection and guard checks.
+        if urlparse(self.path).path == "/api/settings":
+            self._do_POST()
+            return
+        with _EFFECTIVE_CONFIGURATION_CACHE.pin(self.repo):
+            try:
+                self._do_POST()
+            except ConfigurationUnavailable as exc:
+                self.send_json({"error": "configuration unavailable",
+                                "configuration": exc.configuration}, 409)
+
+    def _do_POST(self) -> None:
         # Write routes only: /api/settings, /api/ask, /api/report. Everything else
         # 404s. Archived plans are read-only mini-repos: reject any write scoped to
         # one before touching live state.
@@ -7897,6 +8353,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dag", action="store_true", help="Print the full DAG view JSON (nodes+gates+tasks+edges) and exit")
     parser.add_argument("--timeline", action="store_true", help="Print the execution timeline JSON (task intervals+gates+cycles) and exit")
     parser.add_argument("--config", action="store_true", help="Print the resolved per-role runner config JSON and exit")
+    parser.add_argument("--lifecycle", action="store_true", help="Print retained-candidate and lifecycle diagnostics JSON and exit")
     parser.add_argument("--providers", action="store_true", help="Print the runtime provider/runtime status JSON and exit")
     parser.add_argument("--prompts", action="store_true", help="Print the role prompt library JSON and exit")
     parser.add_argument("--prompt", help="Print one prompt's content JSON (e.g. auditor.md) and exit")
@@ -7939,69 +8396,79 @@ def main(argv: list[str] | None = None) -> int:
     if not repo.exists():
         print(f"repo not found: {repo}", file=sys.stderr)
         return 2
-    global TARGET_BRANCH
-    TARGET_BRANCH = load_repo_target_branch(repo)
+    initialize_configuration(repo, force=True)
     # Resolve the console adapter once at startup (repo > engine-shipped >
     # built-in, per key). With no adapter resolvable this is a no-op and the
     # console behaves exactly as before.
     apply_console_adapter(load_console_adapter(repo, os.environ.get("SINGULAR_ENGINE_HOME")))
     if args.task:
-        detail = collect_task_detail(repo, args.task)
+        detail = _pinned_configuration_call(repo, collect_task_detail, repo, args.task)
         if detail is None:
             print(f"task not found: {args.task}", file=sys.stderr)
             return 3
         print(json.dumps(detail, indent=2))
         return 0
     if args.snapshot:
-        print(json.dumps(collect_snapshot(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_snapshot, repo), indent=2))
         return 0
     if args.sessions:
-        print(json.dumps(slice_sessions(collect_sessions(repo), SESSION_RETURN_LIMIT), indent=2))
+        sessions = _pinned_configuration_call(repo, collect_sessions, repo)
+        print(json.dumps(slice_sessions(sessions, SESSION_RETURN_LIMIT), indent=2))
         return 0
     if args.session:
-        data = read_session(repo, args.session.strip("/"), None, SESSION_LINE_LIMIT_DEFAULT, None, False)
+        data = _pinned_configuration_call(
+            repo, read_session, repo, args.session.strip("/"), None,
+            SESSION_LINE_LIMIT_DEFAULT, None, False)
         if data is None:
             print(f"session not found: {args.session}", file=sys.stderr)
             return 3
         print(json.dumps(data, indent=2))
         return 0
     if args.node:
-        detail = collect_node_detail(repo, args.node.strip("/"))
+        detail = _pinned_configuration_call(
+            repo, collect_node_detail, repo, args.node.strip("/"))
         if detail is None:
             print(f"node not found: {args.node}", file=sys.stderr)
             return 3
         print(json.dumps(detail, indent=2))
         return 0
     if args.area:
-        detail = collect_area_nodes(repo, args.area.strip("/"))
+        detail = _pinned_configuration_call(
+            repo, collect_area_nodes, repo, args.area.strip("/"))
         if detail is None:
             print(f"area not found: {args.area}", file=sys.stderr)
             return 3
         print(json.dumps(detail, indent=2))
         return 0
     if args.events:
-        print(json.dumps(collect_events_overlay(repo, None, OVERLAY_ROW_LIMIT_DEFAULT, None), indent=2))
+        data = _pinned_configuration_call(
+            repo, collect_events_overlay, repo, None, OVERLAY_ROW_LIMIT_DEFAULT, None)
+        print(json.dumps(data, indent=2))
         return 0
     if args.overview:
-        print(json.dumps(collect_overview(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_overview, repo), indent=2))
         return 0
     if args.dag:
-        print(json.dumps(collect_dag_view(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_dag_view, repo), indent=2))
         return 0
     if args.timeline:
-        print(json.dumps(collect_timeline(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_timeline, repo), indent=2))
         return 0
     if args.config:
-        print(json.dumps(collect_config(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_config, repo), indent=2))
+        return 0
+    if args.lifecycle:
+        print(json.dumps(_pinned_configuration_call(repo, collect_lifecycle_view, repo), indent=2))
         return 0
     if args.providers:
-        print(json.dumps(collect_providers(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_providers, repo), indent=2))
         return 0
     if args.prompts:
-        print(json.dumps(collect_prompts(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_prompts, repo), indent=2))
         return 0
     if args.prompt:
-        data = collect_prompt(repo, args.prompt.strip("/"))
+        data = _pinned_configuration_call(
+            repo, collect_prompt, repo, args.prompt.strip("/"))
         if data is None:
             print(f"prompt not found: {args.prompt}", file=sys.stderr)
             return 3
@@ -8009,17 +8476,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.raw:
         raw_root, sep, raw_name = args.raw.strip("/").partition("/")
-        data = collect_raw(repo, raw_root, raw_name) if sep and raw_name else None
+        data = (_pinned_configuration_call(repo, collect_raw, repo, raw_root, raw_name)
+                if sep and raw_name else None)
         if data is None:
             print(f"raw not found: {args.raw}", file=sys.stderr)
             return 3
         print(json.dumps(data, indent=2))
         return 0
     if args.home:
-        print(json.dumps(collect_home(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_home, repo), indent=2))
         return 0
     if args.plans:
-        print(json.dumps(collect_plans(repo), indent=2))
+        print(json.dumps(_pinned_configuration_call(repo, collect_plans, repo), indent=2))
         return 0
     Handler.repo = repo
     server = ThreadingHTTPServer((args.host, args.port), Handler)

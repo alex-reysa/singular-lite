@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 from pathlib import Path
 
@@ -1165,7 +1166,8 @@ class NoAdapterSnapshotIdentityTests(unittest.TestCase):
             self._pin(srv)
             self._pin(head)
             # mirror main() startup for both servers; no adapter is resolvable here
-            srv.TARGET_BRANCH = srv.load_repo_target_branch(repo)
+            srv.initialize_configuration(repo, force=True)
+            self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
             apply_adapter_with_restore(self, srv.load_console_adapter(repo, None))
             head.TARGET_BRANCH = head.load_repo_target_branch(repo)
 
@@ -1195,6 +1197,8 @@ class NoAdapterSnapshotIdentityTests(unittest.TestCase):
             def drop_new_overview_fields(payload: dict) -> dict:
                 out = dict(payload)
                 out.pop("l1Selection", None)
+                out.pop("generation", None)
+                out.pop("settings", None)  # effective settings have dedicated contract tests
                 out["progress"] = {k: v for k, v in (out.get("progress") or {}).items()
                                    if k != "cohorts"}
                 out["loop"] = {k: v for k, v in (out.get("loop") or {}).items()
@@ -1724,6 +1728,8 @@ class CollectDagViewTests(unittest.TestCase):
         self._write_wave_dag(repo)
         (repo / "singular.config.json").write_text(json.dumps(
             {"env": {"SINGULAR_ENABLE_L1_PARALLEL": "1", "SINGULAR_MAX_L1_CONCURRENT": "3"}}))
+        srv.initialize_configuration(repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         # root is historical evidence: authoritative, passed, grandfathered.
         (repo / "docs/orchestration/gates/root.gate-result.json").write_text(json.dumps(
             {"node": "root", "status": "passed", "authoritative": True,
@@ -1936,30 +1942,39 @@ class L1SelectionConfigTests(unittest.TestCase):
         repo = self._repo()
         (repo / "singular.config.json").write_text(json.dumps(
             {"env": {"SINGULAR_ENABLE_L1_PARALLEL": "1", "SINGULAR_MAX_L1_CONCURRENT": "4"}}))
+        srv.initialize_configuration(repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         self.assertEqual(srv._l1_selection_limits(repo), (True, 4))
 
     def test_enabled_default_cap_is_three_and_junk_floors_to_one(self) -> None:
         repo = self._repo()
         (repo / "singular.config.json").write_text(json.dumps(
             {"env": {"SINGULAR_ENABLE_L1_PARALLEL": "1"}}))
+        srv.initialize_configuration(repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         self.assertEqual(srv._l1_selection_limits(repo), (True, 3))
         (repo / "singular.config.json").write_text(json.dumps(
             {"env": {"SINGULAR_ENABLE_L1_PARALLEL": "1", "SINGULAR_MAX_L1_CONCURRENT": "0"}}))
+        srv.initialize_configuration(repo, force=True)
         self.assertEqual(srv._l1_selection_limits(repo), (True, 1))
 
-    def test_state_env_override_beats_config_env(self) -> None:
+    def test_state_env_file_does_not_override_runtime_config(self) -> None:
         repo = self._repo()
         (repo / "singular.config.json").write_text(json.dumps(
             {"env": {"SINGULAR_ENABLE_L1_PARALLEL": "0", "SINGULAR_MAX_L1_CONCURRENT": "2"}}))
         (repo / ".singular-state/.env").write_text(
             "SINGULAR_ENABLE_L1_PARALLEL=1\nSINGULAR_MAX_L1_CONCURRENT=5\nDATABASE_URL=secret\n")
-        self.assertEqual(srv._l1_selection_limits(repo), (True, 5))
+        srv.initialize_configuration(repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
+        self.assertEqual(srv._l1_selection_limits(repo), (False, 1))
 
     def test_area_scopes_from_structured_config_and_prefix(self) -> None:
         repo = self._repo()
         (repo / "singular.config.json").write_text(json.dumps(
             {"areaPrefix": "src/", "areas": {"mcp": ["internal/mcp/", "cmd/mcp/"],
                                              "cli": "internal/cli/"}}))
+        srv.initialize_configuration(repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         self.assertEqual(srv._l1_area_scopes(repo, ["mcp", "cli", "unmapped"]), {
             "mcp": ["internal/mcp/", "cmd/mcp/"],
             "cli": ["internal/cli/"],
@@ -2218,13 +2233,14 @@ class SessionEnrichmentTests(unittest.TestCase):
 
 
 class ConfigEndpointTests(unittest.TestCase):
-    """/api/config: .env override > config env{} > runner-script default."""
+    """/api/config reflects lib.sh's environment < JSON < shell < local order."""
 
     def _repo(self) -> Path:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         repo = Path(tmp.name)
         (repo / ".singular-state").mkdir()
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         return repo
 
     def test_precedence(self) -> None:
@@ -2236,11 +2252,20 @@ class ConfigEndpointTests(unittest.TestCase):
                     "SINGULAR_MAX_CONCURRENT": "3"}}))
         (repo / ".singular-state/.env").write_text(
             "SINGULAR_CLAUDE_PLANNER_EFFORT=xhigh\nDATABASE_URL=secret://never\n")
-        cfg = srv.collect_config(repo)
+        (repo / "singular.config.sh").write_text(
+            'export SINGULAR_CLAUDE_PLANNER_EFFORT=xhigh\n'
+            'export SINGULAR_LOCAL_CONFIG_FILE="$SINGULAR_ROOT/operator/local.sh"\n')
+        (repo / "operator").mkdir()
+        (repo / "operator/local.sh").write_text(
+            'export SINGULAR_CLAUDE_PLANNER_EFFORT=max\n')
+        with mock.patch.dict(os.environ, {
+                "SINGULAR_CLAUDE_PLANNER_EFFORT": "medium"}, clear=False):
+            srv.initialize_configuration(repo, force=True)
+            cfg = srv.collect_config(repo)
         self.assertEqual(cfg["provider"], "claude")
         self.assertEqual(cfg["roles"]["planner"]["model"], "claude-opus-4-8")   # config fallback key
-        self.assertEqual(cfg["roles"]["planner"]["effort"], "xhigh")            # .env wins
-        self.assertEqual(cfg["roles"]["planner"]["source"]["effortTier"], "env")
+        self.assertEqual(cfg["roles"]["planner"]["effort"], "max")              # local wins
+        self.assertEqual(cfg["roles"]["planner"]["source"]["effortTier"], "effective")
         self.assertEqual(cfg["roles"]["implementer"]["effort"], "medium")       # runner default
         self.assertEqual(cfg["roles"]["implementer"]["source"]["effortTier"], "runner-default")
         self.assertEqual(cfg["limits"]["maxConcurrent"], "3")
@@ -2249,14 +2274,18 @@ class ConfigEndpointTests(unittest.TestCase):
     def test_codex_defaults(self) -> None:
         repo = self._repo()
         (repo / "singular.config.json").write_text(json.dumps({"runner": "codex-run.sh", "env": {}}))
+        srv.initialize_configuration(repo, force=True)
         cfg = srv.collect_config(repo)
         self.assertEqual(cfg["provider"], "codex")
         self.assertEqual(cfg["roles"]["implementer"]["model"], "gpt-5.5")
         self.assertEqual(cfg["roles"]["auditor"]["effort"], "high")
 
     def test_empty_repo(self) -> None:
-        cfg = srv.collect_config(self._repo())
+        repo = self._repo()
+        srv.initialize_configuration(repo, force=True)
+        cfg = srv.collect_config(repo)
         self.assertEqual(cfg["provider"], "codex")   # engine default runner
+        self.assertEqual(cfg["configuration"]["status"], "absent")
         self.assertIsNone(cfg["limits"]["maxConcurrent"])
 
 
@@ -2276,6 +2305,8 @@ class NewCollectorsNoSubprocessTests(unittest.TestCase):
             repo = Path(tmp)
             (repo / ".singular-state").mkdir()
             (repo / "docs/orchestration/tasks").mkdir(parents=True)
+            srv.initialize_configuration(repo, force=True)
+            self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
             saved = subprocess.run
             subprocess.run = record
             try:
@@ -2293,9 +2324,274 @@ class NewCollectorsNoSubprocessTests(unittest.TestCase):
                 # 0.10.0 supervisor ask read collectors (pure-FS).
                 srv.collect_ask(repo, "ASK-does-not-exist")
                 srv.collect_asks(repo)
+                # Advancing beyond both superseded TTLs cannot replay lib.sh.
+                with mock.patch.object(srv.time, "monotonic", return_value=time.monotonic() + 31):
+                    srv.collect_config(repo)
+                    srv.collect_home(repo)
+                # Concurrent readers share the same initialized generation.
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(lambda _n: srv.collect_config(repo), range(32)))
+                # An unsupported root reports uninitialized without resolving.
+                other = Path(tmp) / "archive"
+                other.mkdir()
+                self.assertEqual(
+                    srv.collect_config(other)["configuration"]["reason"],
+                    "configuration-not-initialized",
+                )
             finally:
                 subprocess.run = saved
         self.assertEqual(calls, [])
+
+
+class ConfigurationSnapshotContractTests(unittest.TestCase):
+    """Trusted initialization, immutable generations, and explicit invalidation."""
+
+    def setUp(self) -> None:
+        srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate()
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
+
+    def _repo(self, config: dict | None = None) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        if config is not None:
+            (repo / "singular.config.json").write_text(json.dumps(config))
+        return repo
+
+    def test_absent_json_keeps_shell_and_post_shell_local_paths(self) -> None:
+        repo = self._repo()
+        state = repo / "state with spaces"
+        state.mkdir()
+        tasks = repo / "tasks from local"
+        runner = repo / "bin" / "custom-run.sh"
+        runner.parent.mkdir()
+        runner.write_text("#!/bin/sh\nexit 0\n")
+        runner.chmod(0o755)
+        (repo / "singular.config.sh").write_text(
+            "export SINGULAR_STATE_DIR='state with spaces'\n"
+            "export SINGULAR_RUNNER='bin/custom-run.sh'\n")
+        (state / "config.local.sh").write_text(
+            "export SINGULAR_TASKS_DIR='tasks from local'\n")
+
+        view = srv.initialize_configuration(repo, force=True)
+        self.assertEqual(view["configuration"]["status"], "absent")
+        self.assertEqual(Path(view["configurationLayers"]["local"]),
+                         (state / "config.local.sh").resolve())
+        self.assertEqual(srv.state_path(repo), state.resolve())
+        self.assertEqual(srv.tasks_path(repo), tasks.resolve())
+        self.assertEqual(view["runner"], str(runner.resolve()))
+        self.assertEqual(view["provider"], "unknown")
+
+    def test_meaningful_empty_and_secret_never_serialize(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {
+            "SINGULAR_CODEX_SERVICE_TIER": "priority"}})
+        (repo / "singular.config.sh").write_text(
+            "export SINGULAR_CODEX_SERVICE_TIER=''\n"
+            "export SINGULAR_PRIVATE_TOKEN='do-not-serialize-this'\n")
+        srv.initialize_configuration(repo, force=True)
+        cfg = srv.collect_config(repo)
+        self.assertEqual(cfg["roles"]["planner"]["requestedServiceTier"], "default")
+        self.assertEqual(cfg["roles"]["planner"]["source"]["serviceTier"],
+                         "explicit-clear")
+        self.assertNotIn("do-not-serialize-this", json.dumps(cfg))
+
+    def test_changed_file_exposes_restart_required_in_every_projection(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {}})
+        srv.initialize_configuration(repo, force=True)
+        (repo / "singular.config.json").write_text(
+            json.dumps({"runner": "gemini-run.sh", "env": {}}))
+        cfg = srv.collect_config(repo)
+        self.assertFalse(cfg["ok"])
+        self.assertEqual(cfg["configuration"]["reason"], "configuration-changed")
+        self.assertTrue(cfg["configuration"]["restartRequired"])
+        lifecycle = srv.collect_lifecycle_view(repo)
+        self.assertEqual(lifecycle["configuration"]["reason"], "configuration-changed")
+        with self.assertRaises(srv.ConfigurationUnavailable):
+            srv.state_path(repo)
+
+    def test_environment_and_runner_identity_are_bound(self) -> None:
+        runner = None
+        repo = self._repo()
+        runner = repo / "custom-run.sh"
+        runner.write_text("#!/bin/sh\nexit 0\n")
+        runner.chmod(0o755)
+        (repo / "singular.config.json").write_text(json.dumps({
+            "runner": str(runner), "env": {}}))
+        srv.initialize_configuration(repo, force=True)
+        runner.write_text("#!/bin/sh\nexit 1\n")
+        changed = srv.collect_config(repo)["configuration"]
+        self.assertIn("runner", [item["label"] for item in changed["changedInputs"]])
+        srv.initialize_configuration(repo, force=True)
+        with mock.patch.dict(os.environ, {"SINGULAR_TEST_SELECTOR": "changed"}):
+            changed = srv.collect_config(repo)["configuration"]
+            self.assertIn("environment", [item["label"] for item in changed["changedInputs"]])
+
+    def test_custom_same_basename_never_implies_shipped_provider(self) -> None:
+        repo = self._repo()
+        custom = repo / "custom" / "codex-run.sh"
+        custom.parent.mkdir()
+        custom.write_text("#!/bin/sh\nexit 0\n")
+        custom.chmod(0o755)
+        (repo / "singular.config.json").write_text(json.dumps({
+            "runner": str(custom), "env": {}}))
+        view = srv.initialize_configuration(repo, force=True)
+        self.assertEqual(view["provider"], "unknown")
+        providers = srv.collect_providers(
+            repo, env={"PATH": "", "HOME": str(repo)}, home=repo)
+        self.assertEqual(providers["activeProvider"], "unknown")
+        self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
+
+    def test_missing_bootstrap_preserves_selector_and_unknown_identity(self) -> None:
+        repo = self._repo()
+        selector = repo / "selected.json"
+        selector.write_text(json.dumps({"runner": "gemini-run.sh", "env": {}}))
+        missing_bash = repo / "missing-bash"
+        with mock.patch.dict(os.environ, {
+                "SINGULAR_JSON_CONFIG_FILE": str(selector),
+                "SINGULAR_BASH_BIN": str(missing_bash)}):
+            view = srv.initialize_configuration(repo, force=True)
+            self.assertEqual(view["configuration"]["path"], str(selector.resolve()))
+            self.assertEqual(view["configuration"]["source"], "selector")
+            self.assertEqual(view["provider"], "unknown")
+            providers = srv.collect_providers(
+                repo, env={"PATH": "", "HOME": str(repo)}, home=repo)
+            self.assertEqual(providers["activeProvider"], "unknown")
+            self.assertIsNone(providers["activeRunner"])
+            self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
+            self.assertTrue(all(row["status"] == "unknown"
+                                for row in providers["providers"]))
+
+    def test_complete_collection_pins_one_generation(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {}})
+        initial = srv.initialize_configuration(repo, force=True)
+        with srv._EFFECTIVE_CONFIGURATION_CACHE.pin(repo):
+            (repo / "singular.config.json").write_text(
+                json.dumps({"runner": "gemini-run.sh", "env": {}}))
+            first = srv.collect_config(repo)
+            second = srv.collect_config(repo)
+            self.assertEqual(first["generation"]["id"], initial["generation"]["id"])
+            self.assertEqual(second["generation"]["status"], "current")
+            self.assertEqual(first["provider"], "codex")
+        self.assertEqual(srv.collect_config(repo)["configuration"]["reason"],
+                         "configuration-changed")
+
+    def test_settings_refreshes_exactly_once_and_updates_target_branch(self) -> None:
+        repo = self._repo({"targetBranch": "branch-a", "runner": "codex-run.sh",
+                           "env": {}})
+        srv.initialize_configuration(repo, force=True)
+        calls = 0
+        original = srv._compute_effective_configuration
+
+        def counted(root):
+            nonlocal calls
+            calls += 1
+            return original(root)
+
+        with mock.patch.object(srv, "_compute_effective_configuration", counted):
+            status, response = srv.apply_settings_changes(
+                repo, {"SINGULAR_RUNNER": "gemini-run.sh",
+                       "SINGULAR_TARGET_BRANCH": "branch-b"})
+            self.assertEqual(status, 200)
+            self.assertEqual(response["config"]["provider"], "gemini")
+            srv.collect_config(repo)
+            srv.collect_lifecycle_view(repo)
+        self.assertEqual(calls, 1)
+        self.assertEqual(srv.TARGET_BRANCH, "branch-b")
+
+    def test_settings_updates_the_selected_custom_json(self) -> None:
+        repo = self._repo()
+        selected = repo / "config with spaces" / "selected.json"
+        selected.parent.mkdir()
+        selected.write_text(json.dumps({"runner": "codex-run.sh", "env": {}}))
+        with mock.patch.dict(os.environ, {
+                "SINGULAR_JSON_CONFIG_FILE": "config with spaces/selected.json"}):
+            srv.initialize_configuration(repo, force=True)
+            status, response = srv.apply_settings_changes(
+                repo, {"SINGULAR_MAX_CONCURRENT": "3"})
+            self.assertEqual(status, 200)
+            self.assertEqual(response["config"]["limits"]["maxConcurrent"], "3")
+            self.assertEqual(json.loads(selected.read_text())["env"]
+                             ["SINGULAR_MAX_CONCURRENT"], "3")
+            self.assertFalse((repo / "singular.config.json").exists())
+
+    def test_json_env_cannot_relabel_the_actual_selected_file(self) -> None:
+        repo = self._repo({
+            "runner": "claude-run.sh",
+            "env": {"SINGULAR_JSON_CONFIG_FILE": "unselected.json"},
+        })
+        (repo / "unselected.json").write_text(
+            json.dumps({"runner": "gemini-run.sh", "env": {}}))
+        config = srv.initialize_configuration(repo, force=True)
+        self.assertEqual(config["configuration"]["path"],
+                         str((repo / "singular.config.json").resolve()))
+        self.assertEqual(config["configuration"]["source"], "default")
+        self.assertEqual(config["provider"], "claude")
+
+    def test_settings_accepts_changed_selector_with_one_refresh(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {}})
+        srv.initialize_configuration(repo, force=True)
+        selected = repo / "alternate.json"
+        selected.write_text(json.dumps({"runner": "claude-run.sh", "env": {}}))
+        calls = 0
+        original = srv._compute_effective_configuration
+
+        def counted(root):
+            nonlocal calls
+            calls += 1
+            return original(root)
+
+        with mock.patch.dict(os.environ, {"SINGULAR_JSON_CONFIG_FILE": str(selected)}), \
+                mock.patch.object(srv, "_compute_effective_configuration", counted):
+            self.assertEqual(srv.collect_config(repo)["configuration"]["reason"],
+                             "configuration-changed")
+            status, response = srv.apply_settings_changes(
+                repo, {"SINGULAR_MAX_CONCURRENT": "4"})
+            self.assertEqual(status, 200)
+            self.assertEqual(response["config"]["provider"], "claude")
+            self.assertEqual(response["config"]["limits"]["maxConcurrent"], "4")
+            self.assertEqual(calls, 1)
+        self.assertNotIn("SINGULAR_MAX_CONCURRENT",
+                         json.loads((repo / "singular.config.json").read_text())["env"])
+
+    def test_startup_shell_effect_is_not_replayed_by_reads(self) -> None:
+        repo = self._repo({"runner": "codex-run.sh", "env": {}})
+        marker = repo / "startup-effects"
+        (repo / ".singular-state" / "leases").mkdir(parents=True)
+        (repo / ".singular-state" / "locks").mkdir()
+        (repo / ".singular-state" / "leases" / "TASK-1.json").write_text(
+            '{"taskId":"TASK-1","status":"ready"}\n')
+        (repo / ".singular-state" / "locks" / "origin.lock.json").write_text('{}\n')
+        (repo / ".singular-state" / "events.ndjson").write_text("")
+        (repo / "singular.config.sh").write_text(
+            f"printf '%s\\n' startup >> {str(marker)!r}\n")
+        srv.initialize_configuration(repo, force=True)
+
+        def file_snapshot():
+            return {
+                str(path.relative_to(repo)): (
+                    path.stat().st_mode & 0o7777, path.stat().st_mtime_ns,
+                    hashlib.sha256(path.read_bytes()).hexdigest())
+                for path in repo.rglob("*") if path.is_file()
+            }
+
+        before = file_snapshot()
+        real_run = srv.subprocess.run
+        calls = []
+
+        def record(*args, **kwargs):
+            calls.append(args)
+            return real_run(*args, **kwargs)
+
+        with mock.patch.object(srv.subprocess, "run", record):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda _n: srv.collect_config(repo), range(32)))
+            base = time.monotonic()
+            with mock.patch.object(srv.time, "monotonic", return_value=base + 31):
+                srv.collect_home(repo)
+                srv.collect_lifecycle_view(repo)
+        after = file_snapshot()
+        self.assertEqual(calls, [])
+        self.assertEqual(before, after)
 
 
 class AutonomateLogResolutionTests(unittest.TestCase):
@@ -2339,23 +2635,24 @@ class AutonomateLogResolutionTests(unittest.TestCase):
 
 
 class SettingsOverlayTests(unittest.TestCase):
-    """/api/settings rows overlay singular.config.json env{} (the layer POST
-    writes to) so the System panel reflects config-set values and saves."""
+    """/api/settings rows use the same lib.sh-resolved generation as config."""
 
-    def test_config_env_overlays_defaults_but_not_dotenv(self) -> None:
+    def test_config_env_overlays_defaults_and_dotenv_is_not_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             (repo / ".singular-state").mkdir()
             (repo / "singular.config.json").write_text(json.dumps(
                 {"env": {"SINGULAR_MAX_CONCURRENT": "7", "SINGULAR_SLEEP": "45"}}))
             (repo / ".singular-state/.env").write_text("SINGULAR_SLEEP=9\n")
+            srv.initialize_configuration(repo, force=True)
+            self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
             view = srv.collect_settings_view(repo)
             items = {it["envKey"]: it for g in view["groups"] for it in g["items"]}
             conc = items["SINGULAR_MAX_CONCURRENT"]
             self.assertEqual((conc["value"], conc["source"], conc["overridden"]),
-                             ("7", "config", True))
-            sleep = items["SINGULAR_SLEEP"]     # .env row keeps its env source
-            self.assertEqual((sleep["value"], sleep["source"]), ("9", "env"))
+                             ("7", "effective", True))
+            sleep = items["SINGULAR_SLEEP"]
+            self.assertEqual((sleep["value"], sleep["source"]), ("45", "effective"))
 
     def test_post_response_settings_reflect_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2366,7 +2663,7 @@ class SettingsOverlayTests(unittest.TestCase):
             self.assertEqual(status, 200)
             items = {it["envKey"]: it for g in payload["settings"] for it in g["items"]}
             self.assertEqual(items["SINGULAR_MAX_CONCURRENT"]["value"], "4")
-            self.assertEqual(items["SINGULAR_MAX_CONCURRENT"]["source"], "config")
+            self.assertEqual(items["SINGULAR_MAX_CONCURRENT"]["source"], "effective")
 
 
 class SettingsWriteTests(unittest.TestCase):
@@ -3063,6 +3360,8 @@ class CollectProvidersTests(unittest.TestCase):
         (self.engine_home / "engine/claude-run.sh").write_text("")
         self.env = {"PATH": str(self.bindir), "HOME": str(self.home),
                     "SINGULAR_ENGINE_HOME": str(self.engine_home)}
+        srv.initialize_configuration(self.repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         srv._PROVIDERS_CACHE.invalidate()
         self.addCleanup(srv._PROVIDERS_CACHE.invalidate)
 
@@ -3121,6 +3420,8 @@ class CollectProvidersTests(unittest.TestCase):
         # config env{} SINGULAR_RUNNER overrides top-level "runner" (lib.sh order).
         (self.repo / "singular.config.json").write_text(json.dumps(
             {"runner": "codex-run.sh", "env": {"SINGULAR_RUNNER": "gemini-run.sh"}}))
+        # External edits require a restart; this explicit reinitialization models it.
+        srv.initialize_configuration(self.repo, force=True)
         payload, by = self._providers()
         self.assertEqual(payload["activeRunner"], "gemini-run.sh")
         self.assertEqual(payload["activeProvider"], "gemini")
@@ -3222,6 +3523,8 @@ class ProvidersRouteTests(unittest.TestCase):
                     os.environ[k] = v
 
         self.addCleanup(_restore_env)
+        srv.initialize_configuration(self.repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         for cache in (srv._PROVIDERS_CACHE, srv._CONFIG_CACHE, srv._OVERVIEW_CACHE):
             cache.invalidate()
         self.addCleanup(srv._PROVIDERS_CACHE.invalidate)
@@ -3279,19 +3582,61 @@ class ProvidersRouteTests(unittest.TestCase):
         self.assertEqual(data["schema"], "singular.providers.v0")
 
     def test_runner_switch_roundtrip(self) -> None:
-        status, resp = self._req("POST", "/api/settings",
-                                 body={"changes": {"SINGULAR_RUNNER": "gemini-run.sh"}})
+        calls = 0
+        original = srv._compute_effective_configuration
+
+        def counted(root):
+            nonlocal calls
+            calls += 1
+            return original(root)
+
+        with mock.patch.object(srv, "_compute_effective_configuration", counted):
+            status, resp = self._req("POST", "/api/settings",
+                                     body={"changes": {"SINGULAR_RUNNER": "gemini-run.sh"}})
+            _s, cfg = self._req("GET", "/api/config")
+            _s, prov = self._req("GET", "/api/providers")
         self.assertEqual(status, 200)
+        self.assertEqual(calls, 1)
         self.assertEqual(resp["applied"]["SINGULAR_RUNNER"], "gemini-run.sh")
         env = json.loads((self.repo / "singular.config.json").read_text())["env"]
         self.assertEqual(env["SINGULAR_RUNNER"], "gemini-run.sh")
-        # config + providers reflect the switch (caches invalidated by the write)
-        _s, cfg = self._req("GET", "/api/config")
+        # config + providers reflect the same replacement generation immediately.
         self.assertEqual(cfg["provider"], "gemini")
-        _s, prov = self._req("GET", "/api/providers")
+        self.assertEqual(cfg["generation"]["id"], prov["generation"]["id"])
         self.assertEqual(prov["activeRunner"], "gemini-run.sh")
         by = {p["id"]: p for p in prov["providers"]}
         self.assertTrue(by["gemini"]["isDefaultRunner"])
+
+    def test_external_config_change_is_actionable_over_http(self) -> None:
+        (self.repo / "singular.config.json").write_text(json.dumps({
+            "runner": "gemini-run.sh", "env": {}}))
+        status, cfg = self._req("GET", "/api/config")
+        self.assertEqual(status, 200)
+        self.assertEqual(cfg["configuration"]["reason"], "configuration-changed")
+        status, lifecycle = self._req("GET", "/api/lifecycle")
+        self.assertEqual(status, 200)
+        self.assertTrue(lifecycle["configuration"]["restartRequired"])
+        status, providers = self._req("GET", "/api/providers")
+        self.assertEqual(status, 200)
+        self.assertEqual(providers["activeProvider"], "unknown")
+        self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
+        status, data = self._req("GET", "/api/dag")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["configuration"]["reason"], "configuration-changed")
+
+    def test_http_reads_share_generation_past_former_ttls_and_concurrently(self) -> None:
+        def forbidden(_root):
+            raise AssertionError("configuration resolution replayed from a GET")
+
+        base = time.monotonic()
+        with mock.patch.object(srv, "_compute_effective_configuration", forbidden), \
+                mock.patch.object(srv.time, "monotonic", return_value=base + 31):
+            paths = ["/api/config", "/api/lifecycle", "/api/home", "/api/dag", "/api/asks"]
+            with ThreadPoolExecutor(max_workers=len(paths)) as pool:
+                results = list(pool.map(lambda path: self._req("GET", path), paths))
+        self.assertTrue(all(status == 200 for status, _data in results))
+        generations = [data["generation"]["id"] for _status, data in results[:3]]
+        self.assertEqual(len(set(generations)), 1)
 
     def test_runner_switch_rejects_bad_values(self) -> None:
         for bad in ("evil.sh", "../claude-run.sh", "/etc/passwd", "claude-run.sh; rm -rf"):
@@ -3464,6 +3809,8 @@ class ProvidersQuotaFieldTests(unittest.TestCase):
             p.write_text(body)
             p.chmod(0o755)
         self.env = {"PATH": str(self.bindir), "HOME": str(self.home)}
+        srv.initialize_configuration(self.repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         srv._PROVIDERS_CACHE.invalidate()
         self.addCleanup(srv._PROVIDERS_CACHE.invalidate)
 
@@ -3574,11 +3921,14 @@ class CollectHomeSupervisorTests(unittest.TestCase):
         repo = self._repo()
         (repo / "singular.config.json").write_text(json.dumps(
             {"env": {"SINGULAR_SUPERVISOR_INTERVAL_MIN": "15"}}))
+        srv.initialize_configuration(repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         home = srv.collect_home(repo)
         self.assertEqual(home["supervisor"], {"intervalMin": 15, "enabled": True})
         # invalid / zero -> disabled
         (repo / "singular.config.json").write_text(json.dumps(
             {"env": {"SINGULAR_SUPERVISOR_INTERVAL_MIN": "nope"}}))
+        srv.initialize_configuration(repo, force=True)
         srv._HOME_CACHE.invalidate()
         self.assertFalse(srv.collect_home(repo)["supervisor"]["enabled"])
 
@@ -3672,6 +4022,8 @@ class AskReportRouteTests(unittest.TestCase):
         self.repo = Path(tmp.name)
         (self.repo / ".singular-state/runs").mkdir(parents=True)
         (self.repo / "singular.config.json").write_text('{"env": {}}')
+        srv.initialize_configuration(self.repo, force=True)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
         # Monkeypatch Popen: record every call, never launch anything.
         self.popen_calls: list = []
         real_popen = srv.subprocess.Popen
@@ -3776,6 +4128,7 @@ class AskReportRouteTests(unittest.TestCase):
         self.assertIn("ASK-x", [a["runId"] for a in data["asks"]])
         status, _ = self._req("GET", "/api/ask/ASK-nope")
         self.assertEqual(status, 404)
+        self.assertEqual(self.popen_calls, [])
 
     def test_post_report_202_and_throttle(self) -> None:
         status, data = self._req("POST", "/api/report")
@@ -4381,10 +4734,12 @@ class ProviderResolutionTests(unittest.TestCase):
         srv._PROVIDERS_CACHE.invalidate()
         self.addCleanup(srv._PROVIDERS_CACHE.invalidate)
         self.addCleanup(srv._CONFIG_CACHE.invalidate)
+        self.addCleanup(srv._EFFECTIVE_CONFIGURATION_CACHE.invalidate)
 
     def _codex(self, config_env: dict) -> dict:
         (self.repo / "singular.config.json").write_text(
             json.dumps({"schemaVersion": "v2", "env": config_env}))
+        srv.initialize_configuration(self.repo, force=True)
         srv._CONFIG_CACHE.invalidate()
         out = srv.collect_providers(
             self.repo,
@@ -4406,8 +4761,8 @@ class ProviderResolutionTests(unittest.TestCase):
         self.assertTrue(codex["resolution"]["authoritative"])
 
     def test_config_env_override_is_honoured(self):
-        # os.environ alone is NOT enough: the console never sources lib.sh, so
-        # a pin that lives in singular.config.json env{} has to be read from there.
+        # Startup resolves config env{} through lib.sh once; discovery consumes
+        # the resulting safe executable projection without another shell pass.
         codex = self._codex({"SINGULAR_CODEX_BIN": str(self.good)})
         self.assertEqual(codex["resolution"]["source"], "configured")
         self.assertEqual(codex["path"], str(self.good))
@@ -4430,6 +4785,7 @@ class ProviderResolutionTests(unittest.TestCase):
     def test_misconfigured_counts_toward_attention(self):
         (self.repo / "singular.config.json").write_text(json.dumps(
             {"schemaVersion": "v2", "env": {"SINGULAR_CODEX_BIN": str(self.broken)}}))
+        srv.initialize_configuration(self.repo, force=True)
         srv._CONFIG_CACHE.invalidate()
         out = srv.collect_providers(
             self.repo,
