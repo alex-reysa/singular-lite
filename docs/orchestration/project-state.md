@@ -13,7 +13,8 @@ Tasks: 12
 Gates passed: 28/28
 
 Task statuses:
+- accepted: 1
 - integrated: 4
-- ready: 4
+- ready: 3
 - superseded: 4
 <!-- singular:reconcile-snapshot:end -->

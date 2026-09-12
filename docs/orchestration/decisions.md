@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-12T17:51:38Z — TASK-1103 — accept
+
+- Run: `RUN-20260912T172947Z-37339`
+- Branch: `codex/brain-rescue/TASK-1103`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
 ### 2026-09-12T17:45:03Z — TASK-1103 — decide:retry
 
 - Run: `RUN-20260912T172947Z-37339`
