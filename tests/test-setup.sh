@@ -712,6 +712,53 @@ PY
   [[ -f "$repo_l/.singular-state/STOP" ]] || fail "(l) STOP must exist even on a failed run"
 fi
 
+# --- (l2) a dangling version-pin symlink is a collision, not unwritability ---
+#
+# The entry is intentionally not normalized: setup writes STOP first, emits one
+# structured operator failure, and leaves both the link and its absent target
+# exactly as the operator supplied them.
+repo_l2="$tmp/l2"
+new_repo "$repo_l2"
+pin_stub_provider "$repo_l2"
+missing_pin_target="$tmp/l2-missing-pin-target"
+ln -s "$missing_pin_target" "$repo_l2/.singular-version"
+stdout_only="$(cd "$repo_l2" && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
+  bash "$CLI" setup --no-test --json 2>/dev/null)"
+rc=$?
+stderr_only="$(cd "$repo_l2" && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
+  bash "$CLI" setup --no-test 2>&1 >/dev/null)"
+[[ "$rc" -ne 0 ]] || fail "(l2) a dangling version-pin symlink must fail setup"
+python3 - "$stdout_only" "$repo_l2/.singular-version" "$missing_pin_target" <<'PY' \
+  || fail "(l2) --json stdout is not the specific version-pin collision failure"
+import json
+import os
+import sys
+
+failure = json.loads(sys.argv[1])
+link, target = sys.argv[2:4]
+assert failure["schema"] == "singular.operator-failure.v0", failure["schema"]
+assert failure["code"] == "SINGULAR_VERSION_PIN_CONFLICT", failure["code"]
+assert failure["phase"] == "version-pin", failure["phase"]
+assert failure["safeToActuate"] is False, failure
+assert "symlink" in failure["summary"], failure["summary"]
+assert "not writable" not in failure["summary"], failure["summary"]
+assert failure["cause"]["entryType"] == "symlink", failure["cause"]
+assert failure["cause"]["linkTarget"] == target, failure["cause"]
+assert os.path.islink(link), link
+assert os.readlink(link) == target, os.readlink(link)
+assert not os.path.exists(target), target
+PY
+[[ -f "$repo_l2/.singular-state/STOP" ]] \
+  || fail "(l2) STOP must be written before the version-pin collision"
+assert_contains "$stderr_only" "SINGULAR_VERSION_PIN_CONFLICT" \
+  "(l2) human output names the version-pin collision"
+assert_contains "$stderr_only" "symlink already occupies that path" \
+  "(l2) human output identifies the entry type"
+assert_not_contains "$stderr_only" "SINGULAR_REPO_UNWRITABLE" \
+  "(l2) symlink collision is not mislabeled as repository unwritability"
+assert_eq "$(json_field "$repo_l2/.singular-state/setup/last-result.json" code)" \
+  "SINGULAR_VERSION_PIN_CONFLICT" "(l2) persisted failure code"
+
 # --- (m) a refusal is the ONLY thing on the failure path ---------------------
 #
 # Two ways raw machine text used to reach the operator ahead of, or inside, the

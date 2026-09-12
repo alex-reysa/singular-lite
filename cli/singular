@@ -119,7 +119,17 @@ try:
     with open(source, "rb") as reader, os.fdopen(descriptor, "wb") as writer:
         descriptor = -1
         shutil.copyfileobj(reader, writer)
-    os.chmod(destination, mode, follow_symlinks=False)
+        writer.flush()
+        # Preserve the restrictions applied by the caller's umask. Only the
+        # owner permissions required by the consumer contract are added back,
+        # and they are applied to the inode created with O_EXCL while its
+        # descriptor is still open. This does not make the parent directory or
+        # the pathname cleanup below globally race-free.
+        required = stat.S_IWUSR
+        if access == "executable":
+            required |= stat.S_IXUSR
+        created_mode = stat.S_IMODE(os.fstat(writer.fileno()).st_mode)
+        os.fchmod(writer.fileno(), created_mode | required)
 except BaseException:
     if descriptor >= 0:
         os.close(descriptor)
@@ -2011,6 +2021,16 @@ cmd_setup() {
   if [[ -f "$root/.singular-version" ]]; then
     setup_step version-pin ok ".singular-version present ($pin_file)"
   else
+    if [[ -L "$root/.singular-version" ]]; then
+      local pin_link_target="" pin_path_arg=""
+      pin_link_target="$(readlink "$root/.singular-version" 2>/dev/null || true)"
+      printf -v pin_path_arg '%q' "$root/.singular-version"
+      setup_fail SINGULAR_VERSION_PIN_CONFLICT version-pin \
+        "cannot create $root/.singular-version because a symlink already occupies that path" \
+        "ls -l -- $pin_path_arg" \
+        "Inspect the existing symlink, then replace or remove it explicitly before rerunning setup. Setup will not follow or normalize a version-pin symlink." \
+        "$(setup_cause path "$root/.singular-version" entryType symlink linkTarget "$pin_link_target" engineVersion "$SETUP_ENGINE_VERSION")"
+    fi
     # Guarded like every other repo write in this command. Unguarded, a read-only
     # repository root got a raw `cp: Permission denied` and exit 1 with no code,
     # no recovery and no `Next:` — and under --json, zero bytes on stdout where

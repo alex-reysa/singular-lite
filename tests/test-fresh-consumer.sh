@@ -8,6 +8,7 @@ BASH_BIN=/opt/homebrew/bin/bash
 PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
 [[ -x "$BASH_BIN" ]] || { echo "missing pinned Bash: $BASH_BIN" >&2; exit 1; }
 [[ -x "$PYTHON_BIN" ]] || { echo "missing pinned Python: $PYTHON_BIN" >&2; exit 1; }
+PINNED_PATH="$(dirname "$PYTHON_BIN"):$(dirname "$BASH_BIN"):/usr/bin:/bin"
 
 export PYTHONDONTWRITEBYTECODE=1
 
@@ -25,13 +26,6 @@ print(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode))
 PY
 }
 
-assert_mode_bits() {
-  local path="$1" required="$2" label="$3" mode
-  mode="$(file_mode "$path")"
-  (( (mode & required) == required )) \
-    || fail "$label: mode $(printf '%04o' "$mode") lacks $(printf '%04o' "$required")"
-}
-
 assert_mode_lacks() {
   local path="$1" forbidden="$2" label="$3" mode
   mode="$(file_mode "$path")"
@@ -39,11 +33,23 @@ assert_mode_lacks() {
     || fail "$label: mode $(printf '%04o' "$mode") includes $(printf '%04o' "$forbidden")"
 }
 
+assert_mode_exact() {
+  local path="$1" expected="$2" label="$3" mode actual
+  mode="$(file_mode "$path")"
+  printf -v actual '%04o' "$mode"
+  [[ "$actual" == "$expected" ]] \
+    || fail "$label: want mode $expected got $actual"
+}
+
 tree_bytes_modes_digest() {
   "$PYTHON_BIN" - "$1" <<'PY'
 import hashlib, os, stat, sys
 root = os.path.abspath(sys.argv[1])
 digest = hashlib.sha256()
+root_info = os.lstat(root)
+digest.update((1).to_bytes(4, "big")); digest.update(b".")
+digest.update(stat.S_IFMT(root_info.st_mode).to_bytes(4, "big"))
+digest.update(stat.S_IMODE(root_info.st_mode).to_bytes(4, "big"))
 for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
     dirs.sort(); files.sort()
     for name in dirs + files:
@@ -64,7 +70,7 @@ PY
 }
 
 json_file_field() {
-  python3 - "$1" "$2" <<'PY'
+  "$PYTHON_BIN" - "$1" "$2" <<'PY'
 import json
 import sys
 path, field = sys.argv[1:3]
@@ -74,6 +80,21 @@ for part in field.split("."):
     value = value[part]
 print(value)
 PY
+}
+
+run_frozen_cli() { # umask repo frozen fixture-root command...
+  local creation_mask="$1" repo="$2" frozen="$3" fixture_root="$4"
+  shift 4
+  (
+    umask "$creation_mask"
+    cd "$repo"
+    env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
+      -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
+      PATH="$PINNED_PATH" HOME="$fixture_root/home" \
+      SINGULAR_HOME="$fixture_root/singular-home" \
+      SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
+      "$BASH_BIN" "$frozen/cli/singular" "$@"
+  )
 }
 
 new_git_repo() {
@@ -87,12 +108,13 @@ new_git_repo() {
 }
 
 test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_files() {
-  local tmp frozen fresh existing before_engine after_engine out version_mode rc outside_sha
+  local tmp frozen before_engine after_engine stub_bin mask expected_file expected_gate
+  local repo out prompt marker report version_mode rc existing links setup_repo
   local config_sha config_mode prompt_sha prompt_mode gate_sha gate_mode pin_sha pin_mode
+  local outside_sha before_targets after_targets setup_config_sha setup_prompt_sha setup_gate_sha
   tmp="$(mktemp -d)"
   frozen="$tmp/frozen-engine"
-  fresh="$tmp/fresh"
-  existing="$tmp/existing"
+  stub_bin="$tmp/bin"
   mkdir -p "$frozen/cli"
   cp -R "$ENGINE_HOME/engine" "$ENGINE_HOME/schemas" "$ENGINE_HOME/templates" "$frozen/"
   cp "$ENGINE_HOME/cli/singular" "$frozen/cli/singular"
@@ -100,54 +122,132 @@ test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_fi
   chmod -R a-w "$frozen"
   before_engine="$(tree_bytes_modes_digest "$frozen")"
 
-  new_git_repo "$fresh"
-  out="$(cd "$fresh" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
-    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
-    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
-    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
-    "$BASH_BIN" "$frozen/cli/singular" init 2>&1)"
-  assert_contains "$out" "singular init ->" "frozen-engine init succeeds"
-  cmp -s "$frozen/templates/singular.config.json" "$fresh/singular.config.json" \
-    || fail "new consumer config differs from frozen template"
-  assert_mode_bits "$fresh/singular.config.json" 128 "new consumer config is owner-writable"
-  for prompt in "$frozen"/templates/prompts/*.md; do
-    cmp -s "$prompt" "$fresh/docs/orchestration/prompts/$(basename "$prompt")" \
-      || fail "new consumer prompt differs from frozen template: $(basename "$prompt")"
-    assert_mode_bits "$fresh/docs/orchestration/prompts/$(basename "$prompt")" 128 \
-      "new consumer prompt is owner-writable: $(basename "$prompt")"
+  mkdir -p "$stub_bin"
+  cat >"$stub_bin/npm" <<'SH'
+#!/usr/bin/env bash
+printf 'deterministic local npm stub\n'
+printf 'ran\n' >"$GATE_STUB_MARKER"
+SH
+  cat >"$stub_bin/codex" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "codex-cli 0.0.0-stub" ;;
+  *) echo "stub" ;;
+esac
+exit 0
+SH
+  chmod +x "$stub_bin/npm" "$stub_bin/codex"
+
+  # The actual public CLI copies the frozen payload under both common masks.
+  # Every byte comparison happens before the owner edits the copy.
+  for mask in 022 077; do
+    if [[ "$mask" == "022" ]]; then
+      expected_file=0644
+      expected_gate=0755
+    else
+      expected_file=0600
+      expected_gate=0700
+    fi
+    repo="$tmp/init-$mask"
+    new_git_repo "$repo"
+    out="$(run_frozen_cli "$mask" "$repo" "$frozen" "$tmp" init 2>&1)"
+    assert_contains "$out" "singular init ->" "frozen-engine init succeeds under umask $mask"
+    cmp -s "$frozen/templates/singular.config.json" "$repo/singular.config.json" \
+      || fail "umask $mask consumer config differs from frozen template"
+    assert_mode_exact "$repo/singular.config.json" "$expected_file" \
+      "umask $mask config creation mode"
+    for prompt in "$frozen"/templates/prompts/*.md; do
+      cmp -s "$prompt" "$repo/docs/orchestration/prompts/$(basename "$prompt")" \
+        || fail "umask $mask prompt differs from frozen template: $(basename "$prompt")"
+      assert_mode_exact "$repo/docs/orchestration/prompts/$(basename "$prompt")" \
+        "$expected_file" "umask $mask prompt creation mode: $(basename "$prompt")"
+    done
+    cmp -s "$frozen/templates/gate-adapter.sh" "$repo/docs/orchestration/gates/gate.sh" \
+      || fail "umask $mask consumer gate differs from frozen template"
+    assert_mode_exact "$repo/docs/orchestration/gates/gate.sh" "$expected_gate" \
+      "umask $mask gate creation mode"
+    cmp -s "$frozen/VERSION" "$repo/.singular-version" \
+      || fail "umask $mask consumer version pin differs from frozen VERSION"
+    assert_mode_exact "$repo/.singular-version" "$expected_file" \
+      "umask $mask version-pin creation mode"
+
+    # Schema contracts are mirrors, not editable templates. Their frozen mode
+    # and bytes remain intact, proving init did not apply a blanket chmod.
+    cmp -s "$frozen/schemas/orchestration/audit-verdict.v1.schema.json" \
+      "$repo/schemas/orchestration/audit-verdict.v1.schema.json" \
+      || fail "umask $mask schema mirror differs from frozen engine schema"
+    assert_mode_lacks "$repo/schemas/orchestration/audit-verdict.v1.schema.json" 128 \
+      "umask $mask schema mirror remains read-only"
+
+    marker="$tmp/gate-$mask.ran"
+    report="$tmp/gate-$mask.json"
+    out="$(env PATH="$stub_bin:$PINNED_PATH" GATE_STUB_MARKER="$marker" \
+      SINGULAR_GATE_REPORT_FILE="$report" \
+      "$repo/docs/orchestration/gates/gate.sh" 2>&1)"
+    assert_contains "$out" "deterministic local npm stub" \
+      "umask $mask copied gate executes the local stub"
+    assert_file "$marker" "umask $mask copied gate executed directly"
+    assert_eq "$(json_file_field "$report" schema)" \
+      "singular.orchestration.gate-observation.v0" "umask $mask gate report schema"
+    assert_eq "$(json_file_field "$report" failures)" "[]" \
+      "umask $mask local gate reports no failures"
+
+    "$PYTHON_BIN" - "$repo/singular.config.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    config = json.load(stream)
+config["targetBranch"] = "owner-edited"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(config, stream, indent=2)
+    stream.write("\n")
+PY
+    printf '\nowner edit\n' >>"$repo/docs/orchestration/prompts/auditor.md"
+    assert_eq "$(json_file_field "$repo/singular.config.json" targetBranch)" \
+      "owner-edited" "umask $mask owner edits config"
+    assert_contains "$(tail -n 1 "$repo/docs/orchestration/prompts/auditor.md")" \
+      "owner edit" "umask $mask owner edits prompt"
+
+    version_mode="$(file_mode "$repo/.singular-version")"
+    out="$(run_frozen_cli "$mask" "$repo" "$frozen" "$tmp" update 9.9.9 2>&1)"
+    assert_contains "$out" "to engine 9.9.9 (.singular-version)" \
+      "umask $mask update rewrites editable frozen pin"
+    assert_eq "$(tr -d '[:space:]' <"$repo/.singular-version")" "9.9.9" \
+      "umask $mask update writes requested pin"
+    assert_eq "$(file_mode "$repo/.singular-version")" "$version_mode" \
+      "umask $mask update preserves consumer pin mode"
+    run_frozen_cli "$mask" "$repo" "$frozen" "$tmp" update 9.9.9 >/dev/null
+    assert_eq "$(file_mode "$repo/.singular-version")" "$version_mode" \
+      "umask $mask repeated update preserves pin mode"
   done
-  cmp -s "$frozen/templates/gate-adapter.sh" "$fresh/docs/orchestration/gates/gate.sh" \
-    || fail "new consumer gate differs from frozen template"
-  assert_mode_bits "$fresh/docs/orchestration/gates/gate.sh" 192 \
-    "new consumer gate is owner-writable and executable"
-  cmp -s "$frozen/VERSION" "$fresh/.singular-version" \
-    || fail "new consumer version pin differs from frozen VERSION"
-  assert_mode_bits "$fresh/.singular-version" 128 "new consumer version pin is owner-writable"
 
-  # Schema contracts are mirrors, not editable templates. Their frozen mode and
-  # bytes remain intact, proving init did not apply a blanket consumer chmod.
-  cmp -s "$frozen/schemas/orchestration/audit-verdict.v1.schema.json" \
-    "$fresh/schemas/orchestration/audit-verdict.v1.schema.json" \
-    || fail "schema mirror differs from frozen engine schema"
-  assert_mode_lacks "$fresh/schemas/orchestration/audit-verdict.v1.schema.json" 128 \
-    "schema mirror remains read-only"
-
-  version_mode="$(file_mode "$fresh/.singular-version")"
-  out="$(cd "$fresh" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
-    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
-    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
-    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
-    "$BASH_BIN" "$frozen/cli/singular" update 9.9.9 2>&1)"
-  assert_contains "$out" "to engine 9.9.9 (.singular-version)" \
-    "update rewrites editable frozen pin"
-  assert_eq "$(tr -d '[:space:]' <"$fresh/.singular-version")" "9.9.9" \
-    "update writes requested pin"
-  assert_eq "$(file_mode "$fresh/.singular-version")" "$version_mode" \
-    "update preserves consumer pin mode"
+  # Pre-create writable directories, then mask owner-write at file creation.
+  # Passing here requires the descriptor-local owner-write addition; merely
+  # deleting the old pathname chmod would leave fresh copies at 0444/0555.
+  repo="$tmp/owner-write-masked"
+  new_git_repo "$repo"
+  run_frozen_cli 022 "$repo" "$frozen" "$tmp" init >/dev/null
+  rm "$repo/singular.config.json" "$repo/.singular-version" \
+    "$repo/docs/orchestration/gates/gate.sh" \
+    "$repo/docs/orchestration/prompts/"*.md
+  chmod 0755 "$repo" "$repo/docs" "$repo/docs/orchestration" \
+    "$repo/docs/orchestration/prompts" "$repo/docs/orchestration/tasks" \
+    "$repo/docs/orchestration/areas" "$repo/docs/orchestration/gates"
+  out="$(run_frozen_cli 200 "$repo" "$frozen" "$tmp" init 2>&1)"
+  assert_contains "$out" "singular init ->" "owner-write-masked init succeeds"
+  assert_mode_exact "$repo/singular.config.json" 0644 \
+    "descriptor chmod restores only required config owner-write"
+  assert_mode_exact "$repo/docs/orchestration/prompts/auditor.md" 0644 \
+    "descriptor chmod restores only required prompt owner-write"
+  assert_mode_exact "$repo/docs/orchestration/gates/gate.sh" 0755 \
+    "descriptor chmod restores required gate owner-write/execute"
+  assert_mode_exact "$repo/.singular-version" 0644 \
+    "descriptor chmod restores only required pin owner-write"
 
   # A second consumer already owns each class of file. Init must preserve exact
-  # bytes and modes, including a dangling prompt symlink, while filling only the
-  # absent scaffold around them.
+  # bytes and modes while filling only the absent scaffold around them. Repeating
+  # under a different umask must not normalize anything already present.
+  existing="$tmp/existing"
   new_git_repo "$existing"
   mkdir -p "$existing/docs/orchestration/prompts" "$existing/docs/orchestration/gates"
   printf '%s\n' '{"schemaVersion":"v2","targetBranch":"main","gateCommand":"true","areas":{}}' \
@@ -169,11 +269,8 @@ test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_fi
   pin_sha="$(shasum -a 256 "$existing/.singular-version" | awk '{print $1}')"
   pin_mode="$(file_mode "$existing/.singular-version")"
 
-  out="$(cd "$existing" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
-    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
-    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
-    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
-    "$BASH_BIN" "$frozen/cli/singular" init 2>&1)"
+  out="$(run_frozen_cli 077 "$existing" "$frozen" "$tmp" init 2>&1)"
+  run_frozen_cli 022 "$existing" "$frozen" "$tmp" init >/dev/null
   assert_contains "$out" "skip  singular.config.json (exists)" "init reports preserved config"
   assert_eq "$(shasum -a 256 "$existing/singular.config.json" | awk '{print $1}')" "$config_sha" \
     "init preserves existing config bytes"
@@ -198,16 +295,22 @@ test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_fi
   [[ ! -e "$tmp/absent-reviewer-target" ]] \
     || fail "init followed dangling prompt symlink outside the consumer path"
 
+  set +e
+  out="$(run_frozen_cli 077 "$existing" "$frozen" "$tmp" update 8.8.8 2>&1)"
+  rc=$?
+  set -e
+  [[ "$rc" -ne 0 ]] || fail "update made an existing read-only pin writable"
+  assert_eq "$(shasum -a 256 "$existing/.singular-version" | awk '{print $1}')" "$pin_sha" \
+    "failed update preserves read-only pin bytes"
+  assert_eq "$(file_mode "$existing/.singular-version")" "$pin_mode" \
+    "failed update preserves read-only pin mode"
+
   printf 'outside pin bytes\n' >"$tmp/outside-version-pin"
   outside_sha="$(shasum -a 256 "$tmp/outside-version-pin" | awk '{print $1}')"
   mv "$existing/.singular-version" "$existing/.singular-version.saved"
   ln -s "$tmp/outside-version-pin" "$existing/.singular-version"
   set +e
-  out="$(cd "$existing" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
-    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
-    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
-    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
-    "$BASH_BIN" "$frozen/cli/singular" update 8.8.8 2>&1)"
+  out="$(run_frozen_cli 077 "$existing" "$frozen" "$tmp" update 8.8.8 2>&1)"
   rc=$?
   set -e
   [[ "$rc" -ne 0 ]] || fail "update accepted a symlink version pin"
@@ -215,9 +318,85 @@ test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_fi
   assert_eq "$(shasum -a 256 "$tmp/outside-version-pin" | awk '{print $1}')" "$outside_sha" \
     "rejected update leaves symlink target bytes unchanged"
 
+  # Live and dangling symlinks at every copy target are entries owned by the
+  # consumer. Init must preserve the links and every external target.
+  links="$tmp/links"
+  mkdir -p "$tmp/link-targets"
+  printf '%s\n' '{"schemaVersion":"v2","targetBranch":"main","gateCommand":"true","areas":{}}' \
+    >"$tmp/link-targets/config.json"
+  printf 'live prompt target\n' >"$tmp/link-targets/auditor.md"
+  printf '#!/bin/sh\nexit 23\n' >"$tmp/link-targets/gate.sh"
+  chmod 0640 "$tmp/link-targets/config.json" "$tmp/link-targets/auditor.md"
+  chmod 0710 "$tmp/link-targets/gate.sh"
+  before_targets="$(tree_bytes_modes_digest "$tmp/link-targets")"
+  new_git_repo "$links"
+  mkdir -p "$links/docs/orchestration/prompts" "$links/docs/orchestration/gates"
+  ln -s "$tmp/link-targets/config.json" "$links/singular.config.json"
+  ln -s "$tmp/link-targets/auditor.md" "$links/docs/orchestration/prompts/auditor.md"
+  ln -s "$tmp/missing-reviewer" "$links/docs/orchestration/prompts/reviewer.md"
+  ln -s "$tmp/link-targets/gate.sh" "$links/docs/orchestration/gates/gate.sh"
+  ln -s "$tmp/missing-version" "$links/.singular-version"
+  run_frozen_cli 077 "$links" "$frozen" "$tmp" init >/dev/null
+  run_frozen_cli 022 "$links" "$frozen" "$tmp" init >/dev/null
+  assert_eq "$(readlink "$links/singular.config.json")" "$tmp/link-targets/config.json" \
+    "init preserves live config symlink"
+  assert_eq "$(readlink "$links/docs/orchestration/prompts/auditor.md")" \
+    "$tmp/link-targets/auditor.md" "init preserves live prompt symlink"
+  assert_eq "$(readlink "$links/docs/orchestration/prompts/reviewer.md")" \
+    "$tmp/missing-reviewer" "init preserves dangling prompt symlink"
+  assert_eq "$(readlink "$links/docs/orchestration/gates/gate.sh")" \
+    "$tmp/link-targets/gate.sh" "init preserves live gate symlink"
+  assert_eq "$(readlink "$links/.singular-version")" "$tmp/missing-version" \
+    "init preserves dangling version symlink"
+  [[ ! -e "$tmp/missing-reviewer" && ! -e "$tmp/missing-version" ]] \
+    || fail "init followed a dangling consumer symlink"
+  after_targets="$(tree_bytes_modes_digest "$tmp/link-targets")"
+  assert_eq "$after_targets" "$before_targets" \
+    "init preserves external symlink target bytes and modes"
+
+  # Setup uses the same copy contract before calling init. Exercise the actual
+  # public setup --no-test path with a deterministic local provider, then prove
+  # setup and update remain mode-preserving and idempotent.
+  setup_repo="$tmp/setup"
+  new_git_repo "$setup_repo"
+  mkdir -p "$setup_repo/.singular-state"
+  cat >"$setup_repo/.singular-state/config.local.sh" <<SH
+export SINGULAR_RUNNER="$frozen/engine/codex-run.sh"
+export SINGULAR_CODEX_BIN="$stub_bin/codex"
+SH
+  out="$(run_frozen_cli 077 "$setup_repo" "$frozen" "$tmp" setup --no-test 2>&1)"
+  assert_contains "$out" "State: validated (STOP active; no workers dispatched)" \
+    "frozen setup --no-test validates with local provider stub"
+  assert_file "$setup_repo/.singular-state/STOP" "setup writes STOP"
+  assert_mode_exact "$setup_repo/.singular-version" 0600 "setup pin honors umask 077"
+  assert_mode_exact "$setup_repo/singular.config.json" 0600 "setup config honors umask 077"
+  assert_mode_exact "$setup_repo/docs/orchestration/prompts/auditor.md" 0600 \
+    "setup prompt honors umask 077"
+  assert_mode_exact "$setup_repo/docs/orchestration/gates/gate.sh" 0700 \
+    "setup gate honors umask 077"
+  setup_config_sha="$(shasum -a 256 "$setup_repo/singular.config.json" | awk '{print $1}')"
+  setup_prompt_sha="$(shasum -a 256 "$setup_repo/docs/orchestration/prompts/auditor.md" | awk '{print $1}')"
+  setup_gate_sha="$(shasum -a 256 "$setup_repo/docs/orchestration/gates/gate.sh" | awk '{print $1}')"
+  version_mode="$(file_mode "$setup_repo/.singular-version")"
+  run_frozen_cli 022 "$setup_repo" "$frozen" "$tmp" setup --no-test >/dev/null
+  assert_eq "$(shasum -a 256 "$setup_repo/singular.config.json" | awk '{print $1}')" \
+    "$setup_config_sha" "repeated setup preserves config bytes"
+  assert_eq "$(shasum -a 256 "$setup_repo/docs/orchestration/prompts/auditor.md" | awk '{print $1}')" \
+    "$setup_prompt_sha" "repeated setup preserves prompt bytes"
+  assert_eq "$(shasum -a 256 "$setup_repo/docs/orchestration/gates/gate.sh" | awk '{print $1}')" \
+    "$setup_gate_sha" "repeated setup preserves gate bytes"
+  assert_eq "$(file_mode "$setup_repo/.singular-version")" "$version_mode" \
+    "repeated setup preserves pin mode"
+  run_frozen_cli 022 "$setup_repo" "$frozen" "$tmp" update 9.9.9 >/dev/null
+  run_frozen_cli 077 "$setup_repo" "$frozen" "$tmp" update 9.9.9 >/dev/null
+  assert_eq "$(tr -d '[:space:]' <"$setup_repo/.singular-version")" "9.9.9" \
+    "repeated setup consumer update is idempotent"
+  assert_eq "$(file_mode "$setup_repo/.singular-version")" "$version_mode" \
+    "setup consumer update preserves pin mode"
+
   after_engine="$(tree_bytes_modes_digest "$frozen")"
   assert_eq "$after_engine" "$before_engine" \
-    "init/update leave frozen engine bytes and modes unchanged"
+    "init/setup/update leave frozen payload root, bytes and modes unchanged"
 }
 
 test_init_scaffolds_fresh_repo_and_reconcile_apply_is_noop_safe() {
@@ -717,11 +896,17 @@ SH
   assert_contains "$out" "ACCEPTED: TASK-0001" "provisioned task accepted"
 }
 
-test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_files
-test_init_scaffolds_fresh_repo_and_reconcile_apply_is_noop_safe
-test_setup_after_init_is_a_clean_noop_ladder
-test_v0_to_v2_migration_backfills_scaffold_rebrands_and_syncs_contracts
-test_integrate_retains_and_suppresses_missing_branch_until_restored
-test_l1_drive_provisions_gitignored_files_and_allowlisted_env
+if [[ "${SINGULAR_FRESH_CONSUMER_CASE:-all}" == "consumer-copy-only" ]]; then
+  test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_files
+elif [[ "${SINGULAR_FRESH_CONSUMER_CASE:-all}" == "l1-only" ]]; then
+  test_l1_drive_provisions_gitignored_files_and_allowlisted_env
+else
+  test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_files
+  test_init_scaffolds_fresh_repo_and_reconcile_apply_is_noop_safe
+  test_setup_after_init_is_a_clean_noop_ladder
+  test_v0_to_v2_migration_backfills_scaffold_rebrands_and_syncs_contracts
+  test_integrate_retains_and_suppresses_missing_branch_until_restored
+  test_l1_drive_provisions_gitignored_files_and_allowlisted_env
+fi
 
 echo "fresh consumer tests passed"
