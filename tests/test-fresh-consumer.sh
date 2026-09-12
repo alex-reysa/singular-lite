@@ -4,6 +4,12 @@ set -euo pipefail
 ENGINE_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$ENGINE_HOME/engine"
 CLI="$ENGINE_HOME/cli/singular"
+BASH_BIN=/opt/homebrew/bin/bash
+PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+[[ -x "$BASH_BIN" ]] || { echo "missing pinned Bash: $BASH_BIN" >&2; exit 1; }
+[[ -x "$PYTHON_BIN" ]] || { echo "missing pinned Python: $PYTHON_BIN" >&2; exit 1; }
+
+export PYTHONDONTWRITEBYTECODE=1
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: missing '$2' in: $1"; }
@@ -11,6 +17,51 @@ assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "$3: unexpected '$2' in: $1
 assert_file() { [[ -f "$1" ]] || fail "$2: missing file $1"; }
 assert_dir() { [[ -d "$1" ]] || fail "$2: missing dir $1"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "$3: want '$2' got '$1'"; }
+
+file_mode() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import os, stat, sys
+print(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode))
+PY
+}
+
+assert_mode_bits() {
+  local path="$1" required="$2" label="$3" mode
+  mode="$(file_mode "$path")"
+  (( (mode & required) == required )) \
+    || fail "$label: mode $(printf '%04o' "$mode") lacks $(printf '%04o' "$required")"
+}
+
+assert_mode_lacks() {
+  local path="$1" forbidden="$2" label="$3" mode
+  mode="$(file_mode "$path")"
+  (( (mode & forbidden) == 0 )) \
+    || fail "$label: mode $(printf '%04o' "$mode") includes $(printf '%04o' "$forbidden")"
+}
+
+tree_bytes_modes_digest() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import hashlib, os, stat, sys
+root = os.path.abspath(sys.argv[1])
+digest = hashlib.sha256()
+for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    dirs.sort(); files.sort()
+    for name in dirs + files:
+        path = os.path.join(current, name)
+        relative = os.path.relpath(path, root).encode()
+        info = os.lstat(path)
+        digest.update(len(relative).to_bytes(4, "big")); digest.update(relative)
+        digest.update(stat.S_IFMT(info.st_mode).to_bytes(4, "big"))
+        digest.update(stat.S_IMODE(info.st_mode).to_bytes(4, "big"))
+        if stat.S_ISLNK(info.st_mode):
+            raw = os.readlink(path).encode()
+            digest.update(len(raw).to_bytes(8, "big")); digest.update(raw)
+        elif stat.S_ISREG(info.st_mode):
+            raw = open(path, "rb").read()
+            digest.update(len(raw).to_bytes(8, "big")); digest.update(raw)
+print(digest.hexdigest())
+PY
+}
 
 json_file_field() {
   python3 - "$1" "$2" <<'PY'
@@ -33,6 +84,140 @@ new_git_repo() {
   printf 'seed\n' >"$root/README.md"
   git -C "$root" add README.md
   git -C "$root" -c user.name=test -c user.email=test@example.local commit -q -m init
+}
+
+test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_files() {
+  local tmp frozen fresh existing before_engine after_engine out version_mode rc outside_sha
+  local config_sha config_mode prompt_sha prompt_mode gate_sha gate_mode pin_sha pin_mode
+  tmp="$(mktemp -d)"
+  frozen="$tmp/frozen-engine"
+  fresh="$tmp/fresh"
+  existing="$tmp/existing"
+  mkdir -p "$frozen/cli"
+  cp -R "$ENGINE_HOME/engine" "$ENGINE_HOME/schemas" "$ENGINE_HOME/templates" "$frozen/"
+  cp "$ENGINE_HOME/cli/singular" "$frozen/cli/singular"
+  cp "$ENGINE_HOME/VERSION" "$ENGINE_HOME/SCHEMA_VERSION" "$frozen/"
+  chmod -R a-w "$frozen"
+  before_engine="$(tree_bytes_modes_digest "$frozen")"
+
+  new_git_repo "$fresh"
+  out="$(cd "$fresh" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
+    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
+    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
+    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
+    "$BASH_BIN" "$frozen/cli/singular" init 2>&1)"
+  assert_contains "$out" "singular init ->" "frozen-engine init succeeds"
+  cmp -s "$frozen/templates/singular.config.json" "$fresh/singular.config.json" \
+    || fail "new consumer config differs from frozen template"
+  assert_mode_bits "$fresh/singular.config.json" 128 "new consumer config is owner-writable"
+  for prompt in "$frozen"/templates/prompts/*.md; do
+    cmp -s "$prompt" "$fresh/docs/orchestration/prompts/$(basename "$prompt")" \
+      || fail "new consumer prompt differs from frozen template: $(basename "$prompt")"
+    assert_mode_bits "$fresh/docs/orchestration/prompts/$(basename "$prompt")" 128 \
+      "new consumer prompt is owner-writable: $(basename "$prompt")"
+  done
+  cmp -s "$frozen/templates/gate-adapter.sh" "$fresh/docs/orchestration/gates/gate.sh" \
+    || fail "new consumer gate differs from frozen template"
+  assert_mode_bits "$fresh/docs/orchestration/gates/gate.sh" 192 \
+    "new consumer gate is owner-writable and executable"
+  cmp -s "$frozen/VERSION" "$fresh/.singular-version" \
+    || fail "new consumer version pin differs from frozen VERSION"
+  assert_mode_bits "$fresh/.singular-version" 128 "new consumer version pin is owner-writable"
+
+  # Schema contracts are mirrors, not editable templates. Their frozen mode and
+  # bytes remain intact, proving init did not apply a blanket consumer chmod.
+  cmp -s "$frozen/schemas/orchestration/audit-verdict.v1.schema.json" \
+    "$fresh/schemas/orchestration/audit-verdict.v1.schema.json" \
+    || fail "schema mirror differs from frozen engine schema"
+  assert_mode_lacks "$fresh/schemas/orchestration/audit-verdict.v1.schema.json" 128 \
+    "schema mirror remains read-only"
+
+  version_mode="$(file_mode "$fresh/.singular-version")"
+  out="$(cd "$fresh" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
+    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
+    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
+    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
+    "$BASH_BIN" "$frozen/cli/singular" update 9.9.9 2>&1)"
+  assert_contains "$out" "to engine 9.9.9 (.singular-version)" \
+    "update rewrites editable frozen pin"
+  assert_eq "$(tr -d '[:space:]' <"$fresh/.singular-version")" "9.9.9" \
+    "update writes requested pin"
+  assert_eq "$(file_mode "$fresh/.singular-version")" "$version_mode" \
+    "update preserves consumer pin mode"
+
+  # A second consumer already owns each class of file. Init must preserve exact
+  # bytes and modes, including a dangling prompt symlink, while filling only the
+  # absent scaffold around them.
+  new_git_repo "$existing"
+  mkdir -p "$existing/docs/orchestration/prompts" "$existing/docs/orchestration/gates"
+  printf '%s\n' '{"schemaVersion":"v2","targetBranch":"main","gateCommand":"true","areas":{}}' \
+    >"$existing/singular.config.json"
+  printf 'existing auditor\n' >"$existing/docs/orchestration/prompts/auditor.md"
+  printf '#!/bin/sh\nexit 7\n' >"$existing/docs/orchestration/gates/gate.sh"
+  printf 'existing-pin\n' >"$existing/.singular-version"
+  ln -s "$tmp/absent-reviewer-target" "$existing/docs/orchestration/prompts/reviewer.md"
+  chmod 0640 "$existing/singular.config.json"
+  chmod 0600 "$existing/docs/orchestration/prompts/auditor.md"
+  chmod 0711 "$existing/docs/orchestration/gates/gate.sh"
+  chmod 0440 "$existing/.singular-version"
+  config_sha="$(shasum -a 256 "$existing/singular.config.json" | awk '{print $1}')"
+  config_mode="$(file_mode "$existing/singular.config.json")"
+  prompt_sha="$(shasum -a 256 "$existing/docs/orchestration/prompts/auditor.md" | awk '{print $1}')"
+  prompt_mode="$(file_mode "$existing/docs/orchestration/prompts/auditor.md")"
+  gate_sha="$(shasum -a 256 "$existing/docs/orchestration/gates/gate.sh" | awk '{print $1}')"
+  gate_mode="$(file_mode "$existing/docs/orchestration/gates/gate.sh")"
+  pin_sha="$(shasum -a 256 "$existing/.singular-version" | awk '{print $1}')"
+  pin_mode="$(file_mode "$existing/.singular-version")"
+
+  out="$(cd "$existing" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
+    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
+    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
+    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
+    "$BASH_BIN" "$frozen/cli/singular" init 2>&1)"
+  assert_contains "$out" "skip  singular.config.json (exists)" "init reports preserved config"
+  assert_eq "$(shasum -a 256 "$existing/singular.config.json" | awk '{print $1}')" "$config_sha" \
+    "init preserves existing config bytes"
+  assert_eq "$(file_mode "$existing/singular.config.json")" "$config_mode" \
+    "init preserves existing config mode"
+  assert_eq "$(shasum -a 256 "$existing/docs/orchestration/prompts/auditor.md" | awk '{print $1}')" "$prompt_sha" \
+    "init preserves existing prompt bytes"
+  assert_eq "$(file_mode "$existing/docs/orchestration/prompts/auditor.md")" "$prompt_mode" \
+    "init preserves existing prompt mode"
+  assert_eq "$(shasum -a 256 "$existing/docs/orchestration/gates/gate.sh" | awk '{print $1}')" "$gate_sha" \
+    "init preserves existing gate bytes"
+  assert_eq "$(file_mode "$existing/docs/orchestration/gates/gate.sh")" "$gate_mode" \
+    "init preserves existing gate mode"
+  assert_eq "$(shasum -a 256 "$existing/.singular-version" | awk '{print $1}')" "$pin_sha" \
+    "init preserves existing pin bytes"
+  assert_eq "$(file_mode "$existing/.singular-version")" "$pin_mode" \
+    "init preserves existing pin mode"
+  [[ -L "$existing/docs/orchestration/prompts/reviewer.md" ]] \
+    || fail "init replaced an existing prompt symlink"
+  assert_eq "$(readlink "$existing/docs/orchestration/prompts/reviewer.md")" \
+    "$tmp/absent-reviewer-target" "init preserves dangling prompt symlink target"
+  [[ ! -e "$tmp/absent-reviewer-target" ]] \
+    || fail "init followed dangling prompt symlink outside the consumer path"
+
+  printf 'outside pin bytes\n' >"$tmp/outside-version-pin"
+  outside_sha="$(shasum -a 256 "$tmp/outside-version-pin" | awk '{print $1}')"
+  mv "$existing/.singular-version" "$existing/.singular-version.saved"
+  ln -s "$tmp/outside-version-pin" "$existing/.singular-version"
+  set +e
+  out="$(cd "$existing" && env -u SINGULAR_CONFIG_FILE -u SINGULAR_LOCAL_CONFIG_FILE \
+    -u SINGULAR_JSON_CONFIG_FILE -u SINGULAR_JSON_CONFIG_SOURCE \
+    HOME="$tmp/home" SINGULAR_HOME="$tmp/singular-home" \
+    SINGULAR_ENGINE_HOME="$frozen" SINGULAR_BASH_BIN="$BASH_BIN" \
+    "$BASH_BIN" "$frozen/cli/singular" update 8.8.8 2>&1)"
+  rc=$?
+  set -e
+  [[ "$rc" -ne 0 ]] || fail "update accepted a symlink version pin"
+  assert_contains "$out" "refusing to overwrite symlink" "update rejects symlink version pin"
+  assert_eq "$(shasum -a 256 "$tmp/outside-version-pin" | awk '{print $1}')" "$outside_sha" \
+    "rejected update leaves symlink target bytes unchanged"
+
+  after_engine="$(tree_bytes_modes_digest "$frozen")"
+  assert_eq "$after_engine" "$before_engine" \
+    "init/update leave frozen engine bytes and modes unchanged"
 }
 
 test_init_scaffolds_fresh_repo_and_reconcile_apply_is_noop_safe() {
@@ -532,6 +717,7 @@ SH
   assert_contains "$out" "ACCEPTED: TASK-0001" "provisioned task accepted"
 }
 
+test_frozen_engine_creates_editable_consumer_copies_without_touching_existing_files
 test_init_scaffolds_fresh_repo_and_reconcile_apply_is_noop_safe
 test_setup_after_init_is_a_clean_noop_ladder
 test_v0_to_v2_migration_backfills_scaffold_rebrands_and_syncs_contracts

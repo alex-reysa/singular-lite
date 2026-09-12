@@ -92,6 +92,46 @@ export SINGULAR_HOME
 
 die() { echo "singular: $*" >&2; exit 1; }
 
+# Install one previously absent, consumer-owned copy from the immutable engine
+# payload. Frozen installs deliberately make their own files read-only; those
+# modes must not leak into files the operator is instructed to edit. Restrict
+# normalization to the new destination, and never follow an existing (including
+# dangling) symlink. Callers retain their command-specific existing-file policy.
+copy_new_consumer_file() {
+  local source="$1" destination="$2" access="${3:-editable}"
+  [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+  python3 - "$source" "$destination" "$access" <<'PY'
+import os, shutil, stat, sys
+
+source, destination, access = sys.argv[1:]
+if access not in {"editable", "executable"}:
+    raise SystemExit(f"unsupported consumer copy access: {access}")
+mode = stat.S_IMODE(os.stat(source).st_mode) | stat.S_IWUSR
+if access == "executable":
+    mode |= stat.S_IXUSR
+created = False
+descriptor = -1
+try:
+    # O_EXCL refuses every pre-existing directory entry, including a dangling
+    # symlink introduced between the shell precheck and this creation.
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    created = True
+    with open(source, "rb") as reader, os.fdopen(descriptor, "wb") as writer:
+        descriptor = -1
+        shutil.copyfileobj(reader, writer)
+    os.chmod(destination, mode, follow_symlinks=False)
+except BaseException:
+    if descriptor >= 0:
+        os.close(descriptor)
+    if created:
+        try:
+            os.unlink(destination)
+        except FileNotFoundError:
+            pass
+    raise
+PY
+}
+
 # Real directory of this script, following symlinks (for the installed launcher).
 self_dir() {
   local src="${BASH_SOURCE[0]}" dir
@@ -265,16 +305,24 @@ cmd_init() {
   local home root; home="$(resolve_engine_home)"; root="$(require_repo)"
   echo "singular init -> $root"
   # config
-  if [[ -f "$root/singular.config.json" ]]; then
+  if [[ -e "$root/singular.config.json" || -L "$root/singular.config.json" ]]; then
     echo "  skip  singular.config.json (exists)"
   else
-    cp "$home/templates/singular.config.json" "$root/singular.config.json"
+    copy_new_consumer_file "$home/templates/singular.config.json" \
+      "$root/singular.config.json"
     echo "  new   singular.config.json (edit: targetBranch, gateCommand, areas)"
   fi
   # orchestration skeleton
   mkdir -p "$root/docs/orchestration/"{prompts,tasks,areas,gates}
   if [[ -d "$home/templates/prompts" ]]; then
-    cp -n "$home/templates/prompts/"*.md "$root/docs/orchestration/prompts/" 2>/dev/null || true
+    local prompt prompt_destination
+    for prompt in "$home/templates/prompts/"*.md; do
+      [[ -f "$prompt" ]] || continue
+      prompt_destination="$root/docs/orchestration/prompts/$(basename "$prompt")"
+      if [[ ! -e "$prompt_destination" && ! -L "$prompt_destination" ]]; then
+        copy_new_consumer_file "$prompt" "$prompt_destination"
+      fi
+    done
     echo "  new   docs/orchestration/prompts/ (skeletons — rewrite for your stack)"
   fi
   if [[ ! -f "$root/docs/orchestration/dag.v0.json" ]]; then
@@ -294,9 +342,11 @@ EOF
   # gate-observation sidecar either — so the only gates that existed in the wild
   # were bare commands, and the engine had to infer everything about a failure
   # from an exit code and a log.
-  if [[ -f "$home/templates/gate-adapter.sh" && ! -f "$root/docs/orchestration/gates/gate.sh" ]]; then
-    cp "$home/templates/gate-adapter.sh" "$root/docs/orchestration/gates/gate.sh"
-    chmod +x "$root/docs/orchestration/gates/gate.sh"
+  if [[ -f "$home/templates/gate-adapter.sh" \
+      && ! -e "$root/docs/orchestration/gates/gate.sh" \
+      && ! -L "$root/docs/orchestration/gates/gate.sh" ]]; then
+    copy_new_consumer_file "$home/templates/gate-adapter.sh" \
+      "$root/docs/orchestration/gates/gate.sh" executable
     echo "  new   docs/orchestration/gates/gate.sh (optional adapter — read the header)"
   fi
   SINGULAR_ROOT="$root" SINGULAR_ENGINE_HOME="$home" "${SINGULAR_BASH_BIN:-bash}" "$home/engine/scaffold.sh"
@@ -307,8 +357,9 @@ EOF
   # scaffold had stopped doing it.
   echo "  ok    docs/orchestration scaffold + schema mirrors + .gitignore entries (.singular-state/, .worktrees/, .singular-evidence/, .singular-cache/)"
   # version pin
-  if [[ ! -f "$root/.singular-version" ]]; then
-    cp "$home/VERSION" "$root/.singular-version"; echo "  new   .singular-version ($(cat "$home/VERSION"))"
+  if [[ ! -e "$root/.singular-version" && ! -L "$root/.singular-version" ]]; then
+    copy_new_consumer_file "$home/VERSION" "$root/.singular-version"
+    echo "  new   .singular-version ($(cat "$home/VERSION"))"
   fi
   echo ""
   echo "Next: edit singular.config.json + docs/orchestration/dag.v0.json, then: singular doctor"
@@ -323,6 +374,8 @@ cmd_update() {
   fi
   [[ -d "$SINGULAR_HOME/versions/$want" || -n "${SINGULAR_ENGINE_HOME:-}" ]] \
     || echo "singular: warning: engine $want is not installed yet ($SINGULAR_HOME/versions/$want)" >&2
+  [[ ! -L "$root/.singular-version" ]] \
+    || die "refusing to overwrite symlink: $root/.singular-version"
   echo "$want" > "$root/.singular-version"
   echo "singular: pinned $root to engine $want (.singular-version)"
   # Schema drift check against the newly pinned engine (when resolvable).
@@ -1962,7 +2015,8 @@ cmd_setup() {
     # repository root got a raw `cp: Permission denied` and exit 1 with no code,
     # no recovery and no `Next:` — and under --json, zero bytes on stdout where
     # the contract promises exactly one operator-failure.v0 object.
-    if ! cp "$home/VERSION" "$root/.singular-version" 2>/dev/null; then
+    if ! copy_new_consumer_file "$home/VERSION" "$root/.singular-version" \
+        2>/dev/null; then
       setup_fail SINGULAR_REPO_UNWRITABLE version-pin \
         "cannot write $root/.singular-version (repository root is not writable)" \
         "chmod u+w $root && singular setup" \

@@ -16,11 +16,19 @@ BASH_BIN=/opt/homebrew/bin/bash
 PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
 [[ -x "$BASH_BIN" ]] || { echo "missing pinned Bash: $BASH_BIN" >&2; exit 1; }
 [[ -x "$PYTHON_BIN" ]] || { echo "missing pinned Python: $PYTHON_BIN" >&2; exit 1; }
+unset SINGULAR_CONFIG_FILE SINGULAR_LOCAL_CONFIG_FILE SINGULAR_JSON_CONFIG_FILE \
+  SINGULAR_JSON_CONFIG_SOURCE 2>/dev/null || true
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "$3: want '$2', got '$1'"; }
 assert_file() { [[ -f "$1" ]] || fail "$2: missing $1"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: missing '$2'"; }
+file_mode() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import os, stat, sys
+print(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode))
+PY
+}
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/singular-frozen-terminal.XXXXXX")"
 cleanup() {
@@ -125,6 +133,38 @@ case "$role" in
       sleep 1
       exit 137
     fi
+    # Policy drift must be established and evidenced before any candidate bytes
+    # or packet exist. A failed injection therefore cannot be salvaged through
+    # l1-drive's intentional nonzero-with-output path.
+    if [[ "${FROZEN_FIXTURE_MODE:-success}" == "drift" ]]; then
+      drift_target="${FROZEN_FIXTURE_DRIFT_TARGET:-${FROZEN_FIXTURE_SOURCE_ROOT:?}/docs/orchestration/prompts/auditor.md}"
+      "$FROZEN_PYTHON" - "$drift_target" \
+        "${FROZEN_FIXTURE_COUNTER_DIR:?}/drift-injection-proof.json" <<'PY'
+import hashlib, json, os, stat, sys
+target, proof = sys.argv[1:]
+before = open(target, "rb").read()
+before_mode = stat.S_IMODE(os.stat(target).st_mode)
+with open(target, "ab") as handle:
+    handle.write(b"\nmid-run policy drift\n")
+after = open(target, "rb").read()
+after_mode = stat.S_IMODE(os.stat(target).st_mode)
+if after == before or after_mode != before_mode:
+    raise SystemExit("drift injection did not change only bytes")
+record = {
+    "schema": "singular.test.drift-injection-proof.v0",
+    "target": target,
+    "beforeSha256": hashlib.sha256(before).hexdigest(),
+    "afterSha256": hashlib.sha256(after).hexdigest(),
+    "beforeMode": before_mode,
+    "afterMode": after_mode,
+}
+temporary = proof + ".tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(record, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, proof)
+PY
+    fi
     mkdir -p "$worktree/internal/widget" "$worktree/.singular-evidence"
     branch="$(git -C "$worktree" branch --show-current)"
     if [[ "$branch" == "agent/widget/TASK-0001-repair" ]]; then
@@ -172,9 +212,6 @@ json.dump({
         microsecond=0).isoformat().replace("+00:00", "Z"),
 }, open(out, "w", encoding="utf-8"))
 PY
-    if [[ "${FROZEN_FIXTURE_MODE:-success}" == "drift" ]]; then
-      printf '\nmid-run policy drift\n' >>"${FROZEN_FIXTURE_SOURCE_ROOT:?}/docs/orchestration/prompts/auditor.md"
-    fi
     write_result
     ;;
   auditor)
@@ -235,6 +272,13 @@ make_fixture() {
     "$FIXTURE_ROOT/docs/orchestration/prompts/"
   cp "$ENGINE_HOME/templates/prompts/auditor.md" \
     "$FIXTURE_ROOT/docs/orchestration/prompts/"
+  chmod u+w \
+    "$FIXTURE_ROOT/docs/orchestration/prompts/l2-test-first-developer.md" \
+    "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md"
+  assert_eq "$(file_mode "$FIXTURE_ROOT/docs/orchestration/prompts/l2-test-first-developer.md")" \
+    "420" "$name developer prompt planned mode 0644"
+  assert_eq "$(file_mode "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md")" \
+    "420" "$name auditor prompt planned mode 0644"
   printf '# Fixture planner policy\n' >"$FIXTURE_ROOT/docs/orchestration/prompts/l1-planner.md"
   cat >"$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<'TASK'
 # TASK-0001: Frozen campaign terminal fixture
@@ -316,6 +360,7 @@ run_engine() {
       FROZEN_FIXTURE_MODE="$mode" \
       FROZEN_FIXTURE_COUNTER_DIR="$FIXTURE_COUNTERS" \
       FROZEN_FIXTURE_SOURCE_ROOT="$FIXTURE_ROOT" \
+      FROZEN_FIXTURE_DRIFT_TARGET="${FROZEN_FIXTURE_DRIFT_TARGET:-}" \
       FROZEN_CONTINUATION_EXPECTED="${FROZEN_CONTINUATION_EXPECTED:-0}" \
       CONTINUATION_BOOTSTRAP_MARKER="${CONTINUATION_BOOTSTRAP_MARKER:-}" \
       SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
@@ -830,26 +875,108 @@ test_infra_exhaustion() {
   echo "ok: exhausted worker infrastructure is durable and cannot auto-redispatch"
 }
 
+test_policy_drift_injection_failure_is_fail_closed() {
+  local name=drift-injection-failure output result
+  make_fixture "$name"
+  output="$scratch/$name/candidate-packet.json"
+  result="$scratch/$name/runner-result.json"
+  if FROZEN_FIXTURE_DRIFT_TARGET="$scratch/$name/missing/auditor.md" \
+      run_engine drift env \
+        SINGULAR_RUNNER_ROLE=implementer \
+        SINGULAR_RUNNER_CAPABILITY_PROFILE=fixture \
+        SINGULAR_RUNNER_RESULT_FILE="$result" \
+        SINGULAR_TEST_TASK_ID=TASK-0001 \
+        SINGULAR_TEST_TASK_CONTRACT="$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" \
+        SINGULAR_TEST_TASKS_DIR="$FIXTURE_ROOT/docs/orchestration/tasks" \
+        "$FIXTURE_RUNNER" --worktree "$FIXTURE_ROOT" --level l2 \
+          --run-id RUN-DRIFT-INJECTION-FAILURE --output-last-message "$output" \
+          >"$scratch/$name/injection-failure.log" 2>&1; then
+    fail "$name unexpectedly succeeded"
+  fi
+  [[ ! -e "$output" ]] || fail "$name left usable candidate output"
+  [[ ! -e "$result" ]] || fail "$name left a successful runner result"
+  [[ ! -e "$FIXTURE_COUNTERS/drift-injection-proof.json" ]] \
+    || fail "$name claimed a failed injection was proved"
+  [[ ! -e "$FIXTURE_ROOT/internal/widget/parser.go" ]] \
+    || fail "$name created candidate bytes before drift injection"
+  assert_eq "$(calls worker)" "1" "$name attempted exactly one worker injection"
+  echo "ok: failed drift injection cannot create usable worker output"
+}
+
 test_policy_drift() {
+  local packet original_sha original_mode
   make_fixture drift
   cp "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md" "$scratch/drift-auditor.original"
+  original_sha="$(shasum -a 256 "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md" | awk '{print $1}')"
+  original_mode="$(file_mode "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md")"
   start_campaign drift
   # L1 publishes the campaign-mismatch disposition, and the same reconcile
   # process then refuses its later control-state commit under the changed
   # policy. Exit 2 is the expected outer entrypoint refusal.
   reconcile drift drift-first 2
+  assert_file "$FIXTURE_COUNTERS/drift-injection-proof.json" \
+    "drift injection proof"
+  "$PYTHON_BIN" - "$FIXTURE_COUNTERS/drift-injection-proof.json" \
+    "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" \
+    "$FIXTURE_ROOT/docs/orchestration/prompts" \
+    "$ENGINE_HOME/engine/campaign_manifest.py" "$original_sha" "$original_mode" <<'PY'
+import hashlib, importlib.util, json, pathlib, stat, sys
+proof_path, manifest_path, prompts, module_path, original_sha, original_mode = sys.argv[1:]
+proof = json.load(open(proof_path, encoding="utf-8"))
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+spec = importlib.util.spec_from_file_location("campaign_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+actual = module.tree_fingerprint(prompts)
+expected = manifest["activePolicy"]["consumer-prompts"]
+target = pathlib.Path(proof["target"])
+assert proof["beforeSha256"] == original_sha, proof
+assert proof["beforeMode"] == proof["afterMode"] == int(original_mode), proof
+assert proof["beforeSha256"] != proof["afterSha256"], proof
+assert hashlib.sha256(target.read_bytes()).hexdigest() == proof["afterSha256"], proof
+assert stat.S_IMODE(target.stat().st_mode) == int(original_mode), proof
+assert expected["sha256"] != actual["sha256"], (expected, actual)
+PY
   assert_eq "$(calls worker)" "1" "drift worker calls"
   assert_eq "$(calls auditor)" "1" "drift semantic audit completed before refusal"
-  assert_contains "$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")" \
-    'campaign' "drift refusal event"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/events.ndjson" \
+    "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+phases = [event.get("data", {}).get("phase") for event in events
+          if event.get("type") == "campaign.drift_detected"]
+assert phases.count("post-accepted-audit-checkpoint") == 1, phases
+assert phases.count("pre-control-state-commit") == 1, phases
+assert sum(event.get("type") == "l1.campaign_mismatch" for event in events) == 1, events
+assert not any(event.get("type") == "l1.task_accepted" for event in events), events
+assert not any(event.get("type") == "origin.control_state_committed" for event in events), events
+lease = json.load(open(sys.argv[2], encoding="utf-8"))
+terminal = lease["terminalDisposition"]
+assert terminal["kind"] == "campaign-mismatch", terminal
+assert terminal["failureClass"] == "campaign-mismatch", terminal
+assert terminal["action"] == "re-audit-current-campaign", terminal
+PY
   [[ ! -d "$FIXTURE_ROOT/.singular-state/inbox" ]] \
     || [[ -z "$(find "$FIXTURE_ROOT/.singular-state/inbox" -name '*.json' -type f -print -quit)" ]] \
     || fail "drift published an inbox packet"
+  [[ ! -d "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" ]] \
+    || [[ -z "$(find "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" \
+      -name '*.json' -type f -print -quit)" ]] \
+    || fail "drift published an imported packet"
   packet="$(find "$FIXTURE_ROOT/.singular-state/runs" -name packet.json -type f -print -quit)"
   assert_file "$packet" "drift worker packet preserved"
   assert_file "$FIXTURE_ROOT/.worktrees/TASK-0001/internal/widget/parser.go" \
     "drift partial candidate preserved"
   cp "$scratch/drift-auditor.original" "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md"
+  chmod "$(printf '%04o' "$original_mode")" \
+    "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md"
+  assert_eq "$(shasum -a 256 "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md" | awk '{print $1}')" \
+    "$original_sha" "drift restores exact auditor bytes"
+  assert_eq "$(file_mode "$FIXTURE_ROOT/docs/orchestration/prompts/auditor.md")" \
+    "$original_mode" "drift restores exact auditor mode"
+  run_engine drift "$BASH_BIN" "$ENGINE_HOME/engine/campaign.sh" verify --quiet \
+    || fail "drift exact restoration did not recover the frozen campaign fingerprint"
   set_task_ready
   reconcile drift drift-reconcile-2
   reconcile drift drift-reconcile-3
@@ -865,6 +992,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
   success) test_success ;;
   infra) test_infra_exhaustion ;;
   drift) test_policy_drift ;;
+  drift-injection-failure) test_policy_drift_injection_failure_is_fail_closed ;;
   continuation-budget)
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
@@ -882,6 +1010,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
   all)
     test_success
     test_infra_exhaustion
+    test_policy_drift_injection_failure_is_fail_closed
     test_policy_drift
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
