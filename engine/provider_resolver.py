@@ -16,7 +16,9 @@ provider with a bare ``shutil.which`` over its own PATH. A field run showed the
 Providers card reporting an unauthenticated /opt/homebrew/bin/codex while the
 orchestration was actually driving a different Codex entirely.
 
-Stdlib only, no engine imports — mirrors engine/capability_policy.py.
+The provider rules remain stdlib-only. The effective-configuration projection
+also imports the stdlib-only context service so every diagnostic consumer uses
+the same selected context policy and workspace semantics.
 """
 
 from __future__ import annotations
@@ -28,6 +30,19 @@ import os
 from pathlib import Path
 import shutil
 from typing import Any, Mapping
+
+try:
+    from engine.context_service import (
+        ContextError,
+        context_policy_view,
+        resolve_context_config,
+    )
+except ImportError:  # installed execution from engine/
+    from context_service import (  # type: ignore
+        ContextError,
+        context_policy_view,
+        resolve_context_config,
+    )
 
 # Resolution outcomes. The console needs "explicitly configured but broken" to
 # be distinguishable from "nothing on PATH": the first is an operator
@@ -303,6 +318,7 @@ def unavailable_effective_configuration(
     shell_raw = str(env.get("SINGULAR_CONFIG_FILE", "") or "").strip()
     local_raw = str(env.get("SINGULAR_LOCAL_CONFIG_FILE", "") or "").strip()
     engine_raw = str(env.get("SINGULAR_ENGINE_HOME", "") or "").strip()
+    context_path, context_source = resolve_context_config(root, env)
     return {
         "schema": "singular.effective-configuration.v1",
         "configuration": {
@@ -334,6 +350,18 @@ def unavailable_effective_configuration(
         "roles": {},
         "settings": {},
         "providerRuntime": {},
+        "contextService": {
+            "status": "unavailable",
+            "configuration": {
+                "path": str(context_path),
+                "source": context_source,
+                "status": "unknown",
+                "sha256": None,
+            },
+            "workspace": str(root),
+            "enabled": None,
+            "roles": {},
+        },
     }
 
 
@@ -419,6 +447,48 @@ def effective_configuration(
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 effective_env[str(key)] = str(value)
 
+    context_path, context_source = resolve_context_config(root, effective_env)
+    if status == "absent" and not str(
+        effective_env.get("SINGULAR_CONTEXT_CONFIG_FILE", "") or ""
+    ).strip():
+        context_source = "default"
+        context_view: dict[str, Any] = {
+            "status": "disabled",
+            "configuration": {
+                "path": str(context_path), "source": context_source,
+                "status": "absent", "sha256": None,
+            },
+            "workspace": str(root), "enabled": False,
+            "projectId": root.name, "budgetBytes": 65536,
+            "budgetSource": "contextService.budgetBytes", "roles": {},
+        }
+    else:
+        try:
+            context_view = context_policy_view(
+                context_path,
+                workspace=root,
+                environment=effective_env,
+                source=context_source,
+            )
+        except ContextError as exc:
+            unavailable = unavailable_effective_configuration(
+                root,
+                effective_env,
+                f"selected context policy is invalid: {exc}",
+                reason="context-policy-error",
+                resolution=resolution,
+            )
+            unavailable["contextService"] = {
+                "status": "unavailable",
+                "configuration": {
+                    "path": str(context_path), "source": context_source,
+                    "status": "error", "sha256": None,
+                },
+                "workspace": str(root), "enabled": None, "roles": {},
+                "message": str(exc),
+            }
+            return unavailable
+
     def consumer_path(key: str, fallback: str) -> str:
         raw = str(effective_env.get(key, "") or "").strip()
         path = Path(raw).expanduser() if raw else root / fallback
@@ -503,6 +573,7 @@ def effective_configuration(
                 if key in effective_env
             },
         },
+        "contextService": context_view,
     }
     if error:
         result["configuration"]["message"] = error

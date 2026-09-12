@@ -3692,6 +3692,11 @@ def _configuration_bindings(view: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     loaded_engine = lib.parent if lib is not None else None
     selected_home = Path(str(layers["engine"])) if layers.get("engine") else None
     selected_engine = selected_home / "engine" if selected_home else None
+    context = view.get("contextService") if isinstance(view.get("contextService"), dict) else {}
+    context_configuration = (
+        context.get("configuration")
+        if isinstance(context.get("configuration"), dict) else {}
+    )
     paths: list[tuple[str, Any]] = [
         ("json", layers.get("json")),
         ("shell", layers.get("shell")),
@@ -3700,6 +3705,9 @@ def _configuration_bindings(view: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         ("loaded-health-details", loaded_engine / "health_details.py" if loaded_engine else None),
         ("selected-engine-lib", selected_engine / "lib.sh" if selected_engine else None),
         ("provider-resolver", selected_engine / "provider_resolver.py" if selected_engine else None),
+        ("context-policy", context_configuration.get("path")),
+        ("context-service", selected_engine / "context_service.py" if selected_engine else None),
+        ("brain-documents", selected_engine / "brain_documents.py" if selected_engine else None),
         ("provider-registry", selected_engine / "providers.json" if selected_engine else None),
         ("runner", runner),
         ("bash", _diagnostic_bash()),
@@ -5714,6 +5722,7 @@ def collect_config(repo: Path) -> dict[str, Any]:
         "limits": projected(_CONFIG_LIMIT_KEYS),
         "flags": projected(_CONFIG_FLAG_KEYS),
         "paths": effective.get("paths") or {},
+        "contextService": effective.get("contextService") or {},
     }
 
     # Legacy static resolution retained below as documentation for older
@@ -6562,11 +6571,18 @@ def _load_provider_resolver():
                     # through sys.modules[cls.__module__], which is None for a
                     # module loaded by path alone, and the class body raises.
                     sys.modules[name] = module
+                    engine_path = str(path.parent)
+                    inserted_engine_path = engine_path not in sys.path
+                    if inserted_engine_path:
+                        sys.path.insert(0, engine_path)
                     try:
                         spec.loader.exec_module(module)
                     except Exception:
                         sys.modules.pop(name, None)
                         raise
+                    finally:
+                        if inserted_engine_path:
+                            sys.path.remove(engine_path)
             except Exception:
                 module = None
         _PROVIDER_RESOLVER_CACHE[key] = module

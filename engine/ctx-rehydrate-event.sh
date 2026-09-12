@@ -187,10 +187,18 @@ PY
 }
 
 # Print `0<TAB>budget` or `1<TAB>budget` after strict context configuration
-# validation. A missing config is feature-off compatibility.
+# validation. Only a missing legacy default is feature-off compatibility; an
+# explicitly selected context policy is strict.
 singular_context_invocation_settings() {
   local config="$1"
-  [[ -f "$config" ]] || { printf '0\t65536\n'; return 0; }
+  if [[ ! -f "$config" ]]; then
+    if [[ -n "${SINGULAR_CONTEXT_CONFIG_FILE:-}" ]]; then
+      echo "selected context configuration is missing: $config" >&2
+      return 2
+    fi
+    printf '0\t65536\n'
+    return 0
+  fi
   python3 - "$config" <<'PY'
 import json, sys
 try:
@@ -240,7 +248,10 @@ record = {
     "policy": {
         "configPath": os.path.realpath(config) if config else None,
         "resolvedSettingsProjectionVersion": projection["version"],
-        "resolvedPolicySha256": identity(projection["policy"]),
+        # No campaign projection has been verified on this pre-admission
+        # failure path. Never mislabel the ambient Python environment as the
+        # effective frozen policy.
+        "resolvedPolicySha256": None,
     },
     "invocation": {
         "invocationId": invocation or None,

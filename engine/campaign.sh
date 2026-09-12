@@ -87,6 +87,21 @@ campaign_args() {
     --active-policy "context-service-config=$context_config"
 }
 read_campaign_args() {
+  local effective_projection
+  effective_projection="$(singular_effective_configuration_json)" || {
+    echo "campaign: effective configuration is unavailable" >&2
+    return 2
+  }
+  python3 - "$effective_projection" <<'PY' || return $?
+import json, sys
+value = json.loads(sys.argv[1])
+configuration = value.get("configuration") or {}
+context = value.get("contextService") or {}
+if configuration.get("status") == "error" or context.get("status") == "unavailable":
+    message = context.get("message") or configuration.get("message") or "context policy is unavailable"
+    print("campaign: " + message, file=sys.stderr)
+    raise SystemExit(2)
+PY
   campaign_export_settings
   CAMPAIGN_ARGS=()
   while IFS= read -r -d '' item; do CAMPAIGN_ARGS+=("$item"); done < <(campaign_args)
@@ -209,6 +224,10 @@ case "$cmd" in
       }
       replace_pending="yes"
     fi
+    # Validate every selected configuration input before the live canary. A
+    # missing or malformed alternate context policy is not feature-off and
+    # must never reach a provider probe or become a frozen campaign.
+    read_campaign_args
     canary_args=()
     [[ "$provider_unchecked" == "yes" ]] && canary_args+=(--allow-provider-unchecked)
     canary_rc=0

@@ -215,6 +215,42 @@ class ContextInvocationTest(unittest.TestCase):
         self.assertEqual(child["SINGULAR_TEST_TASK_ID"], "TASK-0001")
         self.assertEqual(child["SINGULAR_CODEX_MODEL"], "gpt-fixture")
 
+    def test_admission_evidence_uses_verified_frozen_policy_projection(self) -> None:
+        from engine import evidence_delivery
+
+        policy = {
+            "SINGULAR_CONTEXT_CONFIG_FILE": {
+                "bytes": 20, "sha256": hashlib.sha256(b"selected-policy.json").hexdigest(),
+            },
+            "SINGULAR_UNKNOWN_POLICY_SENTINEL": {
+                "bytes": 6, "sha256": hashlib.sha256(b"frozen").hexdigest(),
+            },
+        }
+        manifest = self.repo / "manifest.json"
+        write(manifest, json.dumps({
+            "schema": "singular.orchestration.campaign-manifest.v1",
+            "campaignId": "frozen-policy-test",
+            "configuration": {"resolvedSettings": policy},
+        }, sort_keys=True))
+        raw = manifest.read_bytes()
+        binding = (
+            "campaign:frozen-policy-test:sha256:" + hashlib.sha256(raw).hexdigest()
+        )
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"{binding}\n{manifest}\n", stderr="",
+        )
+        with mock.patch.object(evidence_delivery.subprocess, "run", return_value=completed):
+            admitted = evidence_delivery.verify_campaign(binding)
+        self.assertEqual(admitted, {"binding": binding, "policy": policy})
+        evidence = evidence_delivery.invocation_setting_evidence(admitted["policy"])
+        expected = "sha256:" + hashlib.sha256(json.dumps(
+            policy, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        self.assertEqual(evidence["policySha256"], expected)
+        self.assertIsNone(
+            evidence_delivery.invocation_setting_evidence(policy_verified=False)["policySha256"]
+        )
+
     def test_frozen_policy_config_is_distinct_from_invocation_workspace(self) -> None:
         policy_root = Path(self.temp.name) / "policy-root"
         workspace = Path(self.temp.name) / "worker-workspace"
@@ -308,7 +344,29 @@ class ContextInvocationTest(unittest.TestCase):
             denial["policy"]["resolvedSettingsProjectionVersion"],
             SETTING_PROJECTION_VERSION,
         )
+        self.assertIsNone(denial["policy"]["resolvedPolicySha256"])
         self.assertEqual(denial["invocation"]["invocationId"], "RUN:implementer")
+
+        receipt.unlink()
+        missing = self.repo / "missing-context.json"
+        result = run(
+            [
+                str(BASH), "-c", script, "context-shell", str(ROOT), str(missing),
+                str(task), str(self.repo / "bundle.json"), str(receipt),
+                str(self.repo), str(provider),
+            ],
+            cwd=self.repo,
+            env={
+                "SINGULAR_ROOT": str(self.repo),
+                "SINGULAR_ENGINE_HOME": str(ROOT),
+                "SINGULAR_JSON_CONFIG_FILE": str(config),
+            },
+        )
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertFalse(marker.exists())
+        missing_denial = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(missing_denial["denial"]["reason"], "context-invalid")
+        self.assertIsNone(missing_denial["policy"]["resolvedPolicySha256"])
 
     def test_invocation_bundle_is_atomic_delta_bounded_and_revalidates(self) -> None:
         config = self.config()
@@ -466,23 +524,33 @@ class ContextInvocationTest(unittest.TestCase):
             )
             doctor.config = json.loads(config.read_text(encoding="utf-8"))
             doctor.config_resolution = JsonConfigResolution(config, "selector")
-            doctor.effective_config_projection = {
-                "schema": "singular.effective-configuration.v1",
-                "paths": {"state": str(self.repo / ".singular-state")},
-            }
             with mock.patch.dict(os.environ, {"SINGULAR_CONTEXT_BUDGET_BYTES": "12288"}):
+                from context_service import context_policy_view
+                policy = context_policy_view(
+                    config,
+                    workspace=self.repo,
+                    environment=os.environ,
+                    source="selector",
+                )
+                doctor.runtime_env = dict(os.environ)
+                doctor.effective_config_projection = {
+                    "schema": "singular.effective-configuration.v1",
+                    "paths": {"state": str(self.repo / ".singular-state")},
+                    "contextService": policy,
+                }
                 doctor.context_service_check()
         finally:
             sys.path.pop(0)
         check = next(item for item in doctor.checks if item["id"] == "runtime.context-service")
         self.assertEqual(check["status"], "pass")
-        self.assertTrue(check["details"]["enabled"])
-        self.assertEqual(check["details"]["roles"]["implementer"]["budgetBytes"], 12288)
+        effective = check["details"]["effectivePolicy"]
+        self.assertTrue(effective["enabled"])
+        self.assertEqual(effective["roles"]["implementer"]["budgetBytes"], 12288)
         self.assertEqual(
-            check["details"]["roles"]["implementer"]["budgetSource"],
+            effective["roles"]["implementer"]["budgetSource"],
             "SINGULAR_CONTEXT_BUDGET_BYTES",
         )
-        review = check["details"]["roles"]["review-target"]
+        review = effective["roles"]["review-target"]
         self.assertEqual(review["allowedKinds"], ["code"])
         self.assertTrue(review["sources"][0]["provenance"])
         self.assertIn("contextService", doctor.effective_config_projection)

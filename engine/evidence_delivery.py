@@ -27,10 +27,18 @@ from datetime import datetime, timezone
 
 try:
     from engine.context_service import ContextError, ContextOverflow, ContextService
-    from engine.campaign_manifest import resolved_settings_projection, runner_child_environment
+    from engine.campaign_manifest import (
+        SETTING_PROJECTION_VERSION,
+        resolved_settings_projection,
+        runner_child_environment,
+    )
 except ImportError:  # installed execution from engine/
     from context_service import ContextError, ContextOverflow, ContextService
-    from campaign_manifest import resolved_settings_projection, runner_child_environment
+    from campaign_manifest import (  # type: ignore
+        SETTING_PROJECTION_VERSION,
+        resolved_settings_projection,
+        runner_child_environment,
+    )
 
 
 class AdmissionDenied(ValueError):
@@ -45,14 +53,16 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def invocation_setting_evidence():
+def invocation_setting_evidence(policy_projection=None, *, policy_verified=True):
     projection = resolved_settings_projection()
     encoded = lambda value: 'sha256:' + sha(json.dumps(
         value, sort_keys=True, separators=(',', ':')
     ).encode())
     return {
-        'version': projection['version'],
-        'policySha256': encoded(projection['policy']),
+        'version': SETTING_PROJECTION_VERSION,
+        'policySha256': encoded(
+            projection['policy'] if policy_projection is None else policy_projection
+        ) if policy_verified else None,
         'invocationSha256': encoded(projection['invocation']),
         'transportSha256': encoded(projection['transport']),
     }
@@ -273,7 +283,7 @@ def append_context_event(receipt, path=None):
 
 
 def verify_campaign(expected_binding=None):
-    """Use the existing read-only campaign verifier at the provider boundary."""
+    """Verify campaign policy and return its canonical resolved projection."""
     library = Path(__file__).resolve().with_name('lib.sh')
     if not library.is_file():
         raise ValueError('campaign verifier is unavailable')
@@ -287,7 +297,8 @@ def verify_campaign(expected_binding=None):
             'provider-boundary || exit $?; actual="$(singular_campaign_binding)" '
             '|| exit $?; [[ -z "$2" || "$actual" == "$2" ]] || { '
             'echo "campaign identity changed at provider boundary" >&2; exit 2; }; '
-            'printf "%s\\n" "$actual"',
+            'manifest="${SINGULAR_CAMPAIGN_MANIFEST:-$SINGULAR_STATE_DIR/campaign/manifest.json}"; '
+            'printf "%s\\n%s\\n" "$actual" "$manifest"',
             'evidence-delivery', str(library), expected_binding or '',
         ],
         stdout=subprocess.PIPE,
@@ -301,7 +312,28 @@ def verify_campaign(expected_binding=None):
             else 'campaign-mismatch'
         )
         raise AdmissionDenied(reason, detail)
-    return result.stdout.strip()
+    lines = result.stdout.splitlines()
+    if len(lines) < 2 or not lines[0]:
+        raise AdmissionDenied('campaign-mismatch', 'campaign verifier returned incomplete identity')
+    binding, manifest_path = lines[0], lines[1]
+    if not binding.startswith('campaign:'):
+        return {
+            'binding': binding,
+            'policy': resolved_settings_projection()['policy'],
+        }
+    try:
+        raw = Path(manifest_path).read_bytes()
+        marker = ':sha256:' + sha(raw)
+        manifest = json.loads(raw)
+        policy = manifest['configuration']['resolvedSettings']
+        campaign_id = manifest['campaignId']
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise AdmissionDenied('campaign-mismatch', f'verified campaign policy is unreadable: {exc}') from exc
+    if marker not in binding or not binding.startswith('campaign:' + campaign_id + ':'):
+        raise AdmissionDenied('campaign-mismatch', 'verified campaign identity does not match manifest bytes')
+    if not isinstance(policy, dict):
+        raise AdmissionDenied('campaign-mismatch', 'verified campaign resolved policy is invalid')
+    return {'binding': binding, 'policy': policy}
 
 
 def context_event(
@@ -356,7 +388,8 @@ def run(args):
         command = command[1:]
     if not command:
         raise ValueError('missing child command')
-    setting_evidence = invocation_setting_evidence()
+    setting_evidence = None
+    args._verified_setting_evidence = None
 
     evidence = Evidence(args.manifest) if args.manifest else None
     if bool(evidence) != bool(args.ledger):
@@ -379,6 +412,8 @@ def run(args):
         raise ValueError('actual runner is missing or not executable: ' + command[0])
 
     admitted_campaign = verify_campaign(args.campaign_binding)
+    setting_evidence = invocation_setting_evidence(admitted_campaign['policy'])
+    args._verified_setting_evidence = setting_evidence
 
     sources = [(ref, evidence.read(ref)) for ref in args.required] if evidence else []
     for ref, data in sources:
@@ -523,7 +558,7 @@ def run(args):
         'invocation': {
             **(bundle.get('invocation') if bundle else {
                 'invocationId': args.context_invocation_id,
-                'campaignBinding': args.campaign_binding or admitted_campaign,
+                'campaignBinding': args.campaign_binding or admitted_campaign['binding'],
                 'workspace': args.context_workspace,
                 'role': args.context_role or args.role,
                 'phase': args.context_phase,
@@ -605,7 +640,9 @@ def main():
             except (OSError, ValueError):
                 receipt_already_admitted = False
         if args.verb == 'run' and not receipt_already_admitted:
-            denied_setting_evidence = invocation_setting_evidence()
+            denied_setting_evidence = getattr(args, '_verified_setting_evidence', None)
+            if denied_setting_evidence is None:
+                denied_setting_evidence = invocation_setting_evidence(policy_verified=False)
             if isinstance(error, AdmissionDenied):
                 reason = error.reason
             elif isinstance(error, ContextOverflow):

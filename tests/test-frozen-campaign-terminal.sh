@@ -351,11 +351,16 @@ PY
 }
 
 enable_context_service() {
-  "$PYTHON_BIN" - "$FIXTURE_ROOT/singular.config.json" <<'PY'
+  mkdir -p "$FIXTURE_ROOT/policy/nested"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/singular.config.json" \
+    "$FIXTURE_ROOT/policy/nested/context.json" <<'PY'
 import json, sys
-path = sys.argv[1]
+path, alternate = sys.argv[1:]
 data = json.load(open(path, encoding="utf-8"))
-data["contextService"] = {
+data["contextService"] = {"enabled": False, "budgetBytes": 1, "rolePolicy": {}}
+data.setdefault("env", {})["SINGULAR_CONTEXT_CONFIG_FILE"] = "policy/nested/context.json"
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+policy = {
     "enabled": True,
     "projectId": "frozen-terminal-fixture",
     "budgetBytes": 65536,
@@ -366,9 +371,9 @@ data["contextService"] = {
         "review-target": ["code"],
     },
 }
-json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+json.dump({"contextService": policy}, open(alternate, "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
-  git -C "$FIXTURE_ROOT" add singular.config.json
+  git -C "$FIXTURE_ROOT" add singular.config.json policy/nested/context.json
   git -C "$FIXTURE_ROOT" commit -qm 'enable frozen context service'
 }
 
@@ -737,9 +742,10 @@ test_context_success() {
   assert_eq "$(calls worker)" "1" "$name did not redispatch worker"
   assert_eq "$(calls auditor)" "1" "$name did not redispatch auditor"
   "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/runs" \
-    "$FIXTURE_ROOT/singular.config.json" "$FIXTURE_ROOT/.worktrees/TASK-0001" <<'PY'
-import json, pathlib, sys
-runs, config, workspace = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).resolve(), pathlib.Path(sys.argv[3]).resolve()
+    "$FIXTURE_ROOT/policy/nested/context.json" "$FIXTURE_ROOT/.worktrees/TASK-0001" \
+    "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" <<'PY'
+import hashlib, json, pathlib, sys
+runs, config, workspace, manifest_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).resolve(), pathlib.Path(sys.argv[3]).resolve(), pathlib.Path(sys.argv[4])
 bundles = [json.load(open(path, encoding="utf-8")) for path in runs.glob("*/context-*.bundle.json")]
 roles = {bundle["identity"]["role"] for bundle in bundles}
 assert {"implementer", "review-target"} <= roles, roles
@@ -752,8 +758,40 @@ for bundle in bundles:
 receipts = [json.load(open(path, encoding="utf-8"))
             for path in runs.glob("*/context-invocation-*.json")]
 assert receipts and all(item["status"] == "admitted" for item in receipts), receipts
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+expected = "sha256:" + hashlib.sha256(json.dumps(
+    manifest["configuration"]["resolvedSettings"], sort_keys=True,
+    separators=(",", ":"),
+).encode()).hexdigest()
+assert all(item["policy"]["resolvedPolicySha256"] == expected for item in receipts), receipts
+events = [json.loads(line) for line in (runs.parent / "events.ndjson").read_text().splitlines()]
+context_events = [item for item in events if item.get("type") == "context.bundle_selected"]
+assert context_events, events
+assert all(item["data"]["policy"]["resolvedPolicySha256"] == expected
+           for item in context_events), context_events
 PY
-  echo "ok: enabled frozen context uses root policy and explicit worker workspace"
+  echo "ok: enabled frozen context uses selected nested policy, explicit worker workspace, and frozen receipt identity"
+}
+
+test_missing_context_policy_refuses_campaign_start() {
+  local name=context-missing-policy
+  make_fixture "$name"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/singular.config.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data.setdefault("env", {})["SINGULAR_CONTEXT_CONFIG_FILE"] = "policy/missing.json"
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+  git -C "$FIXTURE_ROOT" add singular.config.json
+  git -C "$FIXTURE_ROOT" commit -qm 'select missing context policy'
+  if run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/campaign.sh" start \
+      --id frozen-context-missing >"$scratch/$name.log" 2>&1; then
+    fail "$name campaign silently treated missing selected policy as disabled"
+  fi
+  [[ ! -e "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" ]] \
+    || fail "$name published a campaign manifest"
+  echo "ok: already-missing selected context policy refuses campaign creation"
 }
 
 test_context_infra_exhaustion() {
@@ -1134,6 +1172,7 @@ PY
 case "${FROZEN_TERMINAL_CASE:-all}" in
   success) test_success ;;
   context-success) test_context_success ;;
+  context-missing) test_missing_context_policy_refuses_campaign_start ;;
   infra) test_infra_exhaustion ;;
   context-infra) test_context_infra_exhaustion ;;
   drift) test_policy_drift ;;
@@ -1155,6 +1194,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
   all)
     test_success
     test_context_success
+    test_missing_context_policy_refuses_campaign_start
     test_infra_exhaustion
     test_context_infra_exhaustion
     test_policy_drift_injection_failure_is_fail_closed

@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 try:  # Import works both as engine.context_service and as an installed script.
     from engine import brain_documents
@@ -48,6 +48,35 @@ class ContextError(ValueError):
 
 class ContextOverflow(ContextError):
     """Mandatory context cannot fit within the host-managed byte budget."""
+
+
+def resolve_context_config(
+    workspace: str | os.PathLike[str],
+    environment: Mapping[str, str],
+    *,
+    explicit: str | os.PathLike[str] | None = None,
+    invocation_directory: str | os.PathLike[str] | None = None,
+) -> tuple[Path, str]:
+    """Resolve the one context policy selected for an invocation.
+
+    An explicit CLI argument is relative to the invocation directory. Runtime
+    selectors are relative to the project root, matching lib.sh's configuration
+    path normalization. The selected JSON configuration is the legacy fallback.
+    """
+    root = Path(os.path.abspath(workspace)).resolve()
+    if explicit is not None and str(explicit).strip():
+        raw = Path(str(explicit)).expanduser()
+        base = Path(os.path.abspath(invocation_directory or os.getcwd())).resolve()
+        return ((base / raw).resolve() if not raw.is_absolute() else raw.resolve()), "explicit"
+    selected = str(environment.get("SINGULAR_CONTEXT_CONFIG_FILE", "") or "").strip()
+    if selected:
+        raw = Path(selected).expanduser()
+        return ((root / raw).resolve() if not raw.is_absolute() else raw.resolve()), "selector"
+    selected = str(environment.get("SINGULAR_JSON_CONFIG_FILE", "") or "").strip()
+    if selected:
+        raw = Path(selected).expanduser()
+        return ((root / raw).resolve() if not raw.is_absolute() else raw.resolve()), "json"
+    return (root / "singular.config.json").resolve(), "default"
 
 
 def _sha256(data: bytes) -> str:
@@ -217,6 +246,7 @@ class ContextService:
         role: str,
         phase: str | None = None,
         workspace: str | os.PathLike[str] | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> "ContextService":
         config_path = Path(os.path.abspath(config)).resolve(strict=False)
         value, config_raw = _read_json(config_path, "context configuration")
@@ -271,7 +301,8 @@ class ContextService:
         if not isinstance(budget_bytes, int) or isinstance(budget_bytes, bool) or budget_bytes < 1:
             raise ContextError("contextService.budgetBytes must be a positive integer")
         budget_source = "contextService.budgetBytes"
-        budget_override = os.environ.get("SINGULAR_CONTEXT_BUDGET_BYTES")
+        resolved_environment = environment if environment is not None else os.environ
+        budget_override = resolved_environment.get("SINGULAR_CONTEXT_BUDGET_BYTES")
         if budget_override:
             if not budget_override.isdigit() or int(budget_override) < 1:
                 raise ContextError(
@@ -1270,6 +1301,43 @@ class ContextService:
             "omissions": bundle["omissions"],
             "limitations": bundle["limitations"],
         }
+
+
+def context_policy_view(
+    config: str | os.PathLike[str],
+    *,
+    workspace: str | os.PathLike[str],
+    environment: Mapping[str, str],
+    roles: Sequence[str] = ("planner", "implementer", "review-target", "assistant"),
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Produce the shared effective context-policy view for diagnostics."""
+    descriptions: dict[str, dict[str, Any]] = {}
+    for role in roles:
+        descriptions[role] = ContextService.from_config(
+            config,
+            role=role,
+            phase="diagnostic",
+            workspace=workspace,
+            environment=environment,
+        ).describe()
+    representative = descriptions[roles[0]]
+    policy = representative["policy"]
+    return {
+        "status": "ok" if representative["enabled"] else "disabled",
+        "configuration": {
+            "path": policy["configPath"],
+            "source": source,
+            "status": "ok",
+            "sha256": policy["configSha256"],
+        },
+        "workspace": str(Path(os.path.abspath(workspace)).resolve()),
+        "enabled": representative["enabled"],
+        "projectId": representative["projectId"],
+        "budgetBytes": representative["budgetBytes"],
+        "budgetSource": representative["budgetSource"],
+        "roles": descriptions,
+    }
 
 
 def publish_bundle(bundle: dict[str, Any], destination: str | os.PathLike[str]) -> None:

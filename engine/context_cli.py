@@ -12,9 +12,15 @@ import tempfile
 from pathlib import Path
 
 try:
-    from engine.context_service import ContextError, ContextOverflow, ContextService, publish_bundle
+    from engine.context_service import (
+        ContextError, ContextOverflow, ContextService, publish_bundle,
+        resolve_context_config,
+    )
 except ImportError:  # installed execution from engine/
-    from context_service import ContextError, ContextOverflow, ContextService, publish_bundle
+    from context_service import (  # type: ignore
+        ContextError, ContextOverflow, ContextService, publish_bundle,
+        resolve_context_config,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -100,11 +106,12 @@ def _publish_prompt(prompt: str, destination: Path) -> None:
 
 
 def _config(args: argparse.Namespace, repo_root: Path, cwd: Path) -> Path:
-    raw = args.config or os.environ.get("SINGULAR_JSON_CONFIG_FILE")
-    if raw:
-        path = Path(raw)
-        return (cwd / path).resolve() if not path.is_absolute() else path.resolve()
-    return repo_root / "singular.config.json"
+    return resolve_context_config(
+        repo_root,
+        os.environ,
+        explicit=args.config,
+        invocation_directory=cwd,
+    )[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,9 +128,13 @@ def main(argv: list[str] | None = None) -> int:
     args = _commands().parse_args(raw)
     try:
         role = args.role or os.environ.get("SINGULAR_RUNNER_ROLE") or "assistant"
+        workspace = Path(args.workspace).expanduser() if args.workspace else repo_root
+        if not workspace.is_absolute():
+            workspace = cwd / workspace
+        diagnostic_phase = args.phase or ("diagnostic" if args.command == "effective-config" else None)
         service = ContextService.from_config(
-            _config(args, repo_root, cwd), role=role, phase=args.phase,
-            workspace=args.workspace,
+            _config(args, repo_root, cwd), role=role, phase=diagnostic_phase,
+            workspace=workspace.resolve(), environment=os.environ,
         )
         if args.command == "search":
             result = service.search(args.query, limit=args.limit, max_bytes=args.max_bytes)
