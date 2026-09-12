@@ -1,0 +1,97 @@
+{
+  "schema": "singular.orchestration.gate-result.v1",
+  "node": "context-service",
+  "status": "passed",
+  "authoritative": true,
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A9:sha256:3fff9b15bf7a16bc34423b03a413aeb09624a144d87ac2245708100624ed472d:epoch:be15c59b8196351aa1c0138bf5b62125b295f137ec0356d2",
+  "evidenceClass": "deterministic-proof",
+  "evidence": [
+    {
+      "kind": "source-path",
+      "ref": "tests/test-context-service-e2e.sh",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "6824a2d9ecbe6122ebdba487b06bd9d72d5eabcad4d2bd153e3ad53390ecef35"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/run.sh",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "b8bf1a2333426e6c6565292d43153e6edb1c15cd8d5da59434a44f3f9604fe47"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test_context_service.py",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "928e7187c86a080fac3b484312e0f95580930fbf8e32cee06364302edc79f544"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/fixtures/context-service",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "1c5b93afa714d7dd14d646c235c28a72954b5fc09402b3ea1b89eb742d954f01"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/context_service.py",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "d3d2a3b9823f303736eb61eb0b4c4ed2acdecb3b8d9e01c330fb35bf4c5006f3"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/context_cli.py",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "4654dd9728fbcada04fd3452dfa13c34ee06e23a4101e66b759ec08ccf14e2fa"
+    },
+    {
+      "kind": "source-path",
+      "ref": "cli/singular",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "ffd347ec9825fb174123fd8101d3047e457310a02f699f26866caf49d0ba168b"
+    },
+    {
+      "kind": "source-path",
+      "ref": "schemas/context-bundle.v1.schema.json",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "f78fd033ee76144ba6f4f69881e7189687c9eda2850bd6538eed7c2ba0f9d16b"
+    },
+    {
+      "kind": "source-path",
+      "ref": "schemas/orchestration/context-bundle.v1.schema.json",
+      "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
+      "sha256": "f78fd033ee76144ba6f4f69881e7189687c9eda2850bd6538eed7c2ba0f9d16b"
+    },
+    {
+      "kind": "task-set",
+      "ref": "context-service-integrated-tasks",
+      "description": "Integrated task slices cited by the context-service gate-result candidate.",
+      "taskIds": [
+        "TASK-1103"
+      ],
+      "sha256": "48ba2dfd63d6fdbf72db91af3917b2d63f566be142effb0f9a6d558a1f73c588"
+    },
+    {
+      "kind": "command-log",
+      "ref": "context-service-regression",
+      "description": "Authoritative registered acceptance command captured on the exact promoted tree during integration or L0 gate promotion.",
+      "command": "bash tests/run.sh test-context-service-e2e.sh",
+      "exitCode": 0,
+      "logRef": "docs/orchestration/gates/evidence/context-service.regression.txt",
+      "sha256": "1ce423311b2cc03c824e4df3211f1f81b2b1126be9789b97944f535629e4cbc0",
+      "headSha": "2b1460b5474fafe7c651241f3c79370fd95eb320"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "docs/orchestration/gates/evidence/context-service.gate-report.json",
+      "sha256": "9ed6aae4f6d10cc007e929491d5106e0f7529c811ec05c5e3f98bedcadf005da",
+      "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
+    }
+  ],
+  "upstreamGates": [
+    "brain-package"
+  ],
+  "decidedBy": "l0-gate-promoter",
+  "rationale": "Integrated audited end-to-end acceptance for context-service plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
+  "recordedAt": "2026-09-12T21:15:57Z",
+  "verificationClassification": "passed",
+  "gateReportRef": "docs/orchestration/gates/evidence/context-service.gate-report.json"
+}
