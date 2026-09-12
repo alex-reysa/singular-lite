@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-12T18:47:38Z — TASK-1104 — escalate-parked
+
+- Run: `RUN-20260912T175349Z-25584`
+- Branch: `codex/brain-rescue/TASK-1104`
+- Authority: policy
+- Rationale: product repair budget exhausted for normal-risk task after 1 of 1 allowed repairs; audit and merged-tree gate authority remain unchanged.
+
 ### 2026-09-12T18:26:09Z — TASK-1104 — decide:retry
 
 - Run: `RUN-20260912T175349Z-25584`
