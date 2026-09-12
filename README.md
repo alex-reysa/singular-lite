@@ -515,6 +515,65 @@ matching and fail-soft behavior; an object descriptor never falls back to it.
 With `SINGULAR_CTX_MANIFEST` disabled or the field absent, no brain sources are
 read.
 
+### Bounded local context service
+
+The opt-in context service reads the normalized brain manifest, explicitly
+selected current-worktree code, and retained run records into one immutable
+read snapshot. It uses no cache, lock, ledger, vector service, or third-party
+Python dependency. Enable it in the effective `singular.config.json`:
+
+```json
+{
+  "contextService": {
+    "enabled": true,
+    "projectId": "my-project",
+    "codePaths": ["engine/example.py"],
+    "runRecordPaths": [".singular-state/runs/RUN-ID/runner-result.json"],
+    "rolePolicy": {
+      "planner": ["brain", "code", "run"],
+      "implementer": ["brain", "code", "run"],
+      "auditor": ["brain", "code"]
+    }
+  }
+}
+```
+
+Paths are canonical project-relative paths and are contained after symlink
+resolution. Role policy is applied before source metadata is exposed. The
+command role is an input from the host invocation boundary; the B2 CLI does not
+authenticate a caller by itself. An absent or false `enabled` value returns a
+versioned `disabled` result and performs no source discovery.
+
+```bash
+singular context search --role implementer --query "serialized migration"
+singular context get --role implementer --ref REF --version sha256:... \
+  --section "Failure recovery" --max-bytes 4000
+singular context get --role implementer --ref REF --version sha256:... \
+  --cursor line:80 --line-count 40
+singular context build --role implementer --phase implement --task TASK.md \
+  --budget-bytes 12000 --output .singular-state/runs/RUN-ID/context-bundle.json
+singular context explain --role implementer \
+  --bundle .singular-state/runs/RUN-ID/context-bundle.json
+```
+
+Search is deterministic exact-reference and lexical-token matching
+(`exact-lexical.v1`). It can miss synonyms and semantic paraphrases; no result
+is reported as an explicit abstention, never as proof that knowledge is absent.
+`get` requires the source SHA-256 returned by search and refuses missing,
+modified, or wrong-version sources. Heading and line/cursor pagination make
+late facts reachable beyond the default 4,000-byte excerpt.
+
+Build admits the complete task contract and open/violated run obligations
+before optional lexical matches. If mandatory bytes do not fit, it exits 3
+with `mandatory-overflow`; optional overflow is recorded in `omissions`. Byte
+accounting is exact UTF-8 at the host boundary. Provider system content, tool
+schemas, session history, and output remain explicitly unknown in B2 rather
+than being counted as zero. The output contract is
+`singular.context.bundle.v1` in `schemas/context-bundle.v1.schema.json`.
+Prompt bytes and their provenance are fields of the same hash-addressed JSON
+object; `--output` publishes that object with a same-directory atomic replace.
+Search, get, and explain never write accounting or retrieval state.
+
 **Note on overrides.** `singular.config.json`’s `env{}` block is applied over the
 process environment, so in a repo that pins a knob there, `VAR=0 singular …` will
 *not* override it — edit the config (or `.singular-state/config.local.sh`) instead.

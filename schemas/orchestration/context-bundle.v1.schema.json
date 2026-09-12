@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://singular.local/schemas/context-bundle.v1.schema.json",
+  "title": "Singular immutable context bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "contractVersion", "status", "identity", "prompt", "promptSha256", "provenance", "omissions", "budget", "limitations", "bundleId"],
+  "properties": {
+    "schema": {"const": "singular.context.bundle.v1"},
+    "contractVersion": {"const": 1},
+    "status": {"enum": ["ok", "disabled"]},
+    "reason": {"type": "string", "minLength": 1},
+    "identity": {"$ref": "#/$defs/identity"},
+    "prompt": {"type": "string"},
+    "promptSha256": {"$ref": "#/$defs/hash"},
+    "provenance": {"type": "array", "items": {"$ref": "#/$defs/provenance"}},
+    "omissions": {"type": "array", "items": {"$ref": "#/$defs/omission"}},
+    "budget": {"$ref": "#/$defs/budget"},
+    "limitations": {"type": "string", "minLength": 1},
+    "bundleId": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "worktree", "revision", "role", "phase", "policyVersion", "retrievalVersion", "snapshotId"],
+      "properties": {
+        "projectId": {"type": "string", "minLength": 1},
+        "worktree": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "minLength": 1},
+        "phase": {"type": ["string", "null"]},
+        "policyVersion": {"const": "singular.context.policy.v1"},
+        "retrievalVersion": {"const": "exact-lexical.v1"},
+        "snapshotId": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startByte", "endByte"],
+      "properties": {
+        "startByte": {"type": "integer", "minimum": 0},
+        "endByte": {"type": "integer", "minimum": 0}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["ref", "kind", "sourceLocation", "sourceSha256", "excerptSha256", "range", "reasons", "validity", "priority"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["task", "brain", "code", "run"]},
+        "sourceLocation": {"type": "string", "minLength": 1},
+        "sourceSha256": {"$ref": "#/$defs/hash"},
+        "excerptSha256": {"$ref": "#/$defs/hash"},
+        "range": {"$ref": "#/$defs/range"},
+        "reasons": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "validity": {"type": "string", "minLength": 1},
+        "priority": {"enum": ["mandatory", "optional"]},
+        "truncated": {"type": "boolean"},
+        "provenance": {"type": "object"}
+      }
+    },
+    "omission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ref", "reason"],
+      "properties": {"ref": {"type": "string"}, "reason": {"type": "string"}}
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "limitBytes", "usedBytes", "remainingBytes", "mandatoryBytes", "optionalBytes", "estimator", "accountingBoundary", "providerVisibleBytes", "unknownComponents"],
+      "properties": {
+        "unit": {"const": "utf8-bytes"},
+        "limitBytes": {"type": "integer", "minimum": 0},
+        "usedBytes": {"type": "integer", "minimum": 0},
+        "remainingBytes": {"type": "integer", "minimum": 0},
+        "mandatoryBytes": {"type": "integer", "minimum": 0},
+        "optionalBytes": {"type": "integer", "minimum": 0},
+        "estimator": {"const": "utf8-exact.v1"},
+        "accountingBoundary": {"const": "host-invocation"},
+        "providerVisibleBytes": {"type": ["integer", "null"], "minimum": 0},
+        "unknownComponents": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
