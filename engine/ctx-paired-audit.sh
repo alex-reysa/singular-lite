@@ -83,18 +83,50 @@ singular_ctx_paired_audit_record() {
   local sample_key="${run_id}:${task_id}"
   singular_ctx_paired_audit_should_sample "$sample_key" || return 0
 
-  local prompt="$SINGULAR_ORCH_DIR/prompts/auditor.md"
+  local prompt="$run_dir/paired-audit-prompt.md"
+  local base_prompt="$SINGULAR_ORCH_DIR/prompts/auditor.md"
   local raw="$run_dir/paired-audit-raw.json"
   local record="$run_dir/paired-audit.json"
   local runner="${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}"
 
   mkdir -p "$run_dir"
 
+  # Acceptance appends the authoritative audit binding to packet.json after the
+  # primary review manifest was built. Refresh through the driver's host-owned
+  # evidence builder so the sampled auditor receives identities for the final
+  # accepted packet and verification report, not a stale pre-verdict snapshot.
+  if declare -F l1_build_evidence_manifest >/dev/null 2>&1; then
+    l1_build_evidence_manifest \
+      "paired-audit-refresh" "$run_dir/evidence-manifest-paired-refresh.log" \
+      || return $?
+  fi
+
+  # A paired audit is a brand-new review-target invocation. Assemble its exact
+  # prompt from the task contract and role-filtered source snapshot; never reuse
+  # the worker or primary reviewer bundle/session.
+  cp "$base_prompt" "$prompt" || return $?
+  local context_config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
+  local context_task="$SINGULAR_TASKS_DIR/$task_id.md"
+  context_task="$(singular_context_worktree_path "$context_task" "$worktree")"
   # Exactly ONE fresh, read-only auditor pass over the accepted result. FRESH =
-  # no --resume-session / session reuse; read-only = --level readonly. The base
-  # auditor prompt is used unchanged. Runner failure is non-fatal (record still
+  # no --resume-session / session reuse; read-only = --level readonly. Runner failure is non-fatal (record still
   # captures what happened) and never feeds back into any outcome.
   local result_file="$run_dir/paired-audit-runner-result.json"
+  local context_receipt="$run_dir/context-invocation-review-target-paired.json"
+  local paired_campaign_binding
+  paired_campaign_binding="$(singular_campaign_binding)" || return $?
+  local -a context_delivery_args=(--campaign-binding "$paired_campaign_binding")
+  if [[ -f "$context_config" ]]; then
+    context_delivery_args+=(
+      --context-config "$context_config" --context-role review-target
+      --context-workspace "$worktree"
+      --context-phase paired-audit --context-task "$context_task"
+      --context-bundle "$run_dir/context-review-target-paired.bundle.json"
+      --context-invocation-id "$run_id:$task_id:review-target:paired"
+      --receipt "$context_receipt" --events-file "$SINGULAR_EVENTS_FILE"
+    )
+  fi
+  rm -f "$context_receipt" 2>/dev/null || true
   rm -f "$result_file" 2>/dev/null || true
   local rc=0
   local audit_capability_profile="${SINGULAR_AUDITOR_CAPABILITY_PROFILE:-audit-core}"
@@ -104,9 +136,14 @@ singular_ctx_paired_audit_record() {
   SINGULAR_RUNNER_CAPABILITY_PROFILE="$audit_capability_profile" \
   SINGULAR_RUNNER_RESULT_FILE="$result_file" \
   SINGULAR_RUNNER_RUN_ID="$run_id" \
-  "$runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
-    --level readonly -C "$worktree" --run-id "$run_id" \
-    --prompt-file "$prompt" --output-last-message "$raw" >/dev/null 2>&1 || rc=$?
+  python3 "$SINGULAR_LIB_DIR/evidence_delivery.py" run \
+    --manifest "$run_dir/evidence-manifest.json" \
+    --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
+    --required packet.json --required audit-verification.json \
+    "${context_delivery_args[@]}" -- \
+    "$runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
+      --level readonly -C "$worktree" --run-id "$run_id" \
+      --prompt-file "$prompt" --output-last-message "$raw" >/dev/null 2>&1 || rc=$?
 
   # Parse verdict + findings and write the record; emit the event data on stdout.
   # Disagreement := verdict != "accepted" OR non-empty findings.

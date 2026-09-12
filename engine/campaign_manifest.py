@@ -13,10 +13,11 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Mapping
 
 
 SCHEMA = "singular.orchestration.campaign-manifest.v1"
+SETTING_PROJECTION_VERSION = "singular.campaign.resolved-settings.v1"
 
 # Invocation-local outputs are not campaign policy.  They are populated by a
 # runner while a model call is in flight (or by the test harness) and would make
@@ -24,7 +25,7 @@ SCHEMA = "singular.orchestration.campaign-manifest.v1"
 # process was launched.  Everything else in the resolved SINGULAR_* namespace
 # is pinned below as a value digest, including defaults applied by lib.sh and
 # consumer config/env overrides.
-RUNTIME_SETTING_NAMES = {
+INVOCATION_SETTING_NAMES = {
     "SINGULAR_ATTEMPT_REVIEWER_STRATEGY",
     "SINGULAR_ATTEMPT_STARTED_AT",
     "SINGULAR_ATTEMPT_TASK_ID",
@@ -35,14 +36,35 @@ RUNTIME_SETTING_NAMES = {
     "SINGULAR_PLANNING_ARTIFACT_DIR",
     "SINGULAR_PLANNING_RUN_ID",
     "SINGULAR_PLAN_ATTEMPT_BASE_SHA",
-    "SINGULAR_ORIGIN_LOCK_CAPABILITY",
-    "SINGULAR_CAMPAIGN_LOCK_CAPABILITY",
-    "SINGULAR_GIT_LOCK_CAPABILITY",
+    "SINGULAR_EXPECTED_CAMPAIGN_BINDING",
+    "SINGULAR_EVIDENCE_CAMPAIGN_BINDING",
     # Per-dispatch compare-and-set authority. Reconcile creates a fresh token
     # for each launch and dispatch-wrap must carry it into L1, but that token is
     # not configuration or campaign policy.
     "SINGULAR_RESERVATION_OWNER",
     "SINGULAR_RESERVATION_GENERATION",
+    "SINGULAR_RUNNER_ROLE",
+    "SINGULAR_RUNNER_CAPABILITY_PROFILE",
+    "SINGULAR_RUNNER_RUN_ID",
+    "SINGULAR_TEST_TASK_CONTRACT",
+    "SINGULAR_TEST_TASK_ID",
+    "SINGULAR_TEST_TASKS_DIR",
+    # Exact test-control and generated task-contract inputs. A new test seam is
+    # not implicitly trusted: it must be reviewed and named here.
+    "SINGULAR_TEST_CYCLE_MUTATE",
+    "SINGULAR_TEST_PROCESS_CONTROL",
+    "SINGULAR_TEST_PROCESS_CONTROL_STATE",
+    "SINGULAR_WORKER_CONTRACT_EXTRA",
+    "SINGULAR_WORKER_RED_LOG",
+    "SINGULAR_WORKTREE_ENV_FILE",
+}
+
+# These are ephemeral child capabilities and result locations. They cross the
+# provider boundary but are neither caller identity nor campaign policy.
+TRANSPORT_SETTING_NAMES = {
+    "SINGULAR_ORIGIN_LOCK_CAPABILITY",
+    "SINGULAR_CAMPAIGN_LOCK_CAPABILITY",
+    "SINGULAR_GIT_LOCK_CAPABILITY",
     "SINGULAR_RESOLVED_CAPABILITY_DECLARED",
     "SINGULAR_RESOLVED_CAPABILITY_PROFILE",
     "SINGULAR_RESOLVED_CAPABILITY_STRICT",
@@ -53,16 +75,44 @@ RUNTIME_SETTING_NAMES = {
     "SINGULAR_RUNNER_RESULT_FILE",
     "SINGULAR_RUNNER_SESSION_RECORD",
     "SINGULAR_RUNNER_TIMEOUT_NOTE",
-    # Exact test-control seams used by the campaign lifecycle fixture.  A new
-    # SINGULAR_TEST_* variable is not implicitly trusted: it must be reviewed
-    # and named here before it can be excluded from the frozen policy surface.
-    "SINGULAR_TEST_CYCLE_MUTATE",
-    "SINGULAR_TEST_PROCESS_CONTROL",
-    "SINGULAR_TEST_PROCESS_CONTROL_STATE",
-    "SINGULAR_WORKER_CONTRACT_EXTRA",
-    "SINGULAR_WORKER_RED_LOG",
-    "SINGULAR_WORKTREE_ENV_FILE",
+    "SINGULAR_EVIDENCE_SOCKET",
+    "SINGULAR_EVIDENCE_CAPABILITY",
+    "SINGULAR_EVIDENCE_ROLE",
 }
+
+# Host authority is retained through admission evidence but is never delegated
+# to the provider process. This is one central boundary, not a per-caller scrub.
+HOST_ONLY_SETTING_NAMES = {
+    "SINGULAR_ORIGIN_LOCK_CAPABILITY",
+    "SINGULAR_CAMPAIGN_LOCK_CAPABILITY",
+    "SINGULAR_GIT_LOCK_CAPABILITY",
+    "SINGULAR_RESERVATION_OWNER",
+    "SINGULAR_RESERVATION_GENERATION",
+    "SINGULAR_EXPECTED_CAMPAIGN_BINDING",
+    "SINGULAR_CONTEXT_CONFIG_FILE",
+}
+
+
+def classify_resolved_setting(name: str) -> str:
+    """Classify one exact setting; unknown SINGULAR names remain policy."""
+    if name in INVOCATION_SETTING_NAMES:
+        return "invocation"
+    if name in TRANSPORT_SETTING_NAMES:
+        return "transport"
+    return "policy"
+
+
+def runner_child_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return provider environment without delegating host-only authority."""
+    source = environment if environment is not None else os.environ
+    return {
+        key: value
+        for key, value in source.items()
+        if key not in HOST_ONLY_SETTING_NAMES
+    }
+
 
 GENERATED_PARTS = {
     "__pycache__",
@@ -225,22 +275,34 @@ def model_identity() -> dict[str, dict[str, Any]]:
     return identity
 
 
-def resolved_settings_identity() -> dict[str, dict[str, Any]]:
+def resolved_settings_projection(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Return a secret-safe identity for every resolved campaign setting.
 
     campaign.sh exports all scalar SINGULAR_* variables after lib.sh has applied
     JSON, shell, local and default configuration. Values are never written to
     the manifest: only their byte length and SHA-256 digest are retained.
     """
-    identity: dict[str, dict[str, Any]] = {}
-    for key, value in sorted(os.environ.items()):
+    identities: dict[str, dict[str, dict[str, Any]]] = {
+        "policy": {}, "invocation": {}, "transport": {},
+    }
+    source = environment if environment is not None else os.environ
+    for key, value in sorted(source.items()):
         if not key.startswith("SINGULAR_"):
             continue
-        if key in RUNTIME_SETTING_NAMES:
-            continue
         raw = value.encode("utf-8")
-        identity[key] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
-    return identity
+        identities[classify_resolved_setting(key)][key] = {
+            "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()
+        }
+    return {"version": SETTING_PROJECTION_VERSION, **identities}
+
+
+def resolved_settings_identity(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return only the authoritative policy portion used by campaign drift."""
+    return resolved_settings_projection(environment)["policy"]
 
 
 def active_policy_identity(specifications: list[str]) -> dict[str, dict[str, Any]]:
@@ -286,6 +348,7 @@ def current(args: argparse.Namespace) -> dict[str, Any]:
             "local": file_fingerprint(args.config_local),
             "brain": configured_brain_identity(args.config_json),
             "resolvedSettings": resolved_settings_identity(),
+            "resolvedSettingsProjectionVersion": SETTING_PROJECTION_VERSION,
         },
         "activePolicy": active_policy_identity(args.active_policy),
         "runtime": {"bash": args.bash_bin, "bashVersion": command_version([args.bash_bin, "--version"])},

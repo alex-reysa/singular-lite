@@ -237,6 +237,15 @@ test_fast_action_table() {
   out="$(singular_decider_fast_action integrity-violation 0 3 integrity-violation)"
   assert_eq "$out" "escalate-parked" "fast table integrity-violation repeat"
 
+  # Host admission policy is equally deterministic: neither retry budget, a
+  # repeat, nor disabling the ordinary fast table may delegate it to a model.
+  out="$(singular_decider_fast_action configured-context 0 3 "$prev")"
+  assert_eq "$out" "escalate-parked" "fast table configured-context budget"
+  out="$(singular_decider_fast_action configured-context 3 3 configured-context)"
+  assert_eq "$out" "escalate-parked" "fast table configured-context repeat"
+  out="$(SINGULAR_DECIDER_FAST=0 singular_decider_fast_action configured-context 0 3 "$prev")"
+  assert_eq "$out" "escalate-parked" "configured-context bypasses model when fast table disabled"
+
   # ...and it is a declared action, not a string the engine invented: the
   # decider-verdict schema has to accept what the fast path emits, or a model
   # decider choosing the same action fails validation.
@@ -275,7 +284,8 @@ test_fast_action_repeat_and_disabled() {
   out="$(singular_decider_fast_action gate-red 0 3 scope-violation)"
   assert_eq "$out" "retry" "fast repeat: different prev still fast-paths"
 
-  # SINGULAR_DECIDER_FAST=0 -> empty for everything (force the model path).
+  # SINGULAR_DECIDER_FAST=0 disables ordinary table actions (force the model
+  # path), but cannot disable deterministic containment/admission policy.
   for cls in gate-red scope-violation worker-infra audit-infra audit-needs-fix no-changes; do
     out="$(SINGULAR_DECIDER_FAST=0 singular_decider_fast_action "$cls" 0 3 "")"
     assert_eq "$out" "" "fast disabled: $cls -> empty"
@@ -284,6 +294,8 @@ test_fast_action_repeat_and_disabled() {
   # operators disabling ordinary fast actions must never hand it to the model.
   out="$(SINGULAR_DECIDER_FAST=0 singular_decider_fast_action integrity-violation 0 3 "")"
   assert_eq "$out" "escalate-parked" "fast disabled: integrity-violation still parks"
+  out="$(SINGULAR_DECIDER_FAST=0 singular_decider_fast_action configured-context 0 3 "")"
+  assert_eq "$out" "escalate-parked" "fast disabled: configured-context still parks"
   echo "ok: fast-path repeat + disabled"
 }
 

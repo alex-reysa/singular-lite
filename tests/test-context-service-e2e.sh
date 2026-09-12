@@ -12,9 +12,9 @@ unset inherited_name
 python3 -m unittest "$ROOT/tests/test_context_service.py"
 
 project="$tmp/project with spaces"
-invoke="$tmp/different cwd"
-mkdir -p "$invoke"
 cp -Rp "$ROOT/tests/fixtures/context-service" "$project"
+invoke="$project/nested/invocation"
+mkdir -p "$invoke"
 python3 - "$project" <<'PY'
 import json
 import pathlib
@@ -48,9 +48,14 @@ code.write_text(code.read_text(encoding="utf-8") +
     },
 }, sort_keys=True), encoding="utf-8")
 PY
+git -C "$project" init -q
+git -C "$project" -c user.name=test -c user.email=test@example.invalid \
+  add .
+git -C "$project" -c user.name=test -c user.email=test@example.invalid \
+  commit -qm 'context service e2e fixture'
 
 # Generate a real singular-brain manifest and freshness sidecar, then invoke
-# every context operation through the public launcher from an unrelated cwd.
+# every context operation through the public launcher from a nested cwd.
 node "$ROOT/vendor/singular-brain/engine/cli.mjs" \
   --config "$project/brain/singular-brain.config.json" gen
 context() {

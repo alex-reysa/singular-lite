@@ -2522,6 +2522,27 @@ class ConfigurationSnapshotContractTests(unittest.TestCase):
         self.assertEqual(srv.collect_config(repo)["configuration"]["reason"],
                          "configuration-changed")
 
+    def test_selected_context_policy_change_invalidates_generation(self) -> None:
+        repo = self._repo({
+            "runner": "codex-run.sh",
+            "env": {"SINGULAR_CONTEXT_CONFIG_FILE": "policy/context.json"},
+        })
+        policy = repo / "policy" / "context.json"
+        policy.parent.mkdir()
+        policy.write_text(json.dumps({"contextService": {
+            "enabled": False, "budgetBytes": 4096, "rolePolicy": {},
+        }}))
+        view = srv.initialize_configuration(repo, force=True)
+        self.assertEqual(view["contextService"]["configuration"]["path"],
+                         str(policy.resolve()))
+        policy.write_text(json.dumps({"contextService": {
+            "enabled": False, "budgetBytes": 8192, "rolePolicy": {},
+        }}))
+        changed = srv.collect_config(repo)["configuration"]
+        self.assertEqual(changed["reason"], "configuration-changed")
+        self.assertIn("context-policy",
+                      [item["label"] for item in changed["changedInputs"]])
+
     def test_settings_refreshes_exactly_once_and_updates_target_branch(self) -> None:
         repo = self._repo({"targetBranch": "branch-a", "runner": "codex-run.sh",
                            "env": {}})
@@ -3787,6 +3808,40 @@ class ProvidersRouteTests(unittest.TestCase):
         status, cfg = self._req("GET", "/api/config")
         self.assertEqual(status, 200)
         self.assertEqual(cfg["configuration"]["reason"], "configuration-changed")
+        status, lifecycle = self._req("GET", "/api/lifecycle")
+        self.assertEqual(status, 200)
+        self.assertTrue(lifecycle["configuration"]["restartRequired"])
+        status, providers = self._req("GET", "/api/providers")
+        self.assertEqual(status, 200)
+        self.assertEqual(providers["activeProvider"], "unknown")
+        self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
+        status, data = self._req("GET", "/api/dag")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["configuration"]["reason"], "configuration-changed")
+
+    def test_external_context_policy_change_is_actionable_over_http(self) -> None:
+        policy = self.repo / "policy" / "context.json"
+        policy.parent.mkdir()
+        policy.write_text(json.dumps({"contextService": {
+            "enabled": False, "budgetBytes": 4096, "rolePolicy": {},
+        }}))
+        (self.repo / "singular.config.json").write_text(json.dumps({
+            "env": {"SINGULAR_CONTEXT_CONFIG_FILE": "policy/context.json"},
+        }))
+        srv.initialize_configuration(self.repo, force=True)
+        status, current = self._req("GET", "/api/config")
+        self.assertEqual(status, 200)
+        self.assertEqual(current["contextService"]["configuration"]["path"],
+                         str(policy.resolve()))
+        policy.write_text(json.dumps({"contextService": {
+            "enabled": False, "budgetBytes": 8192, "rolePolicy": {},
+        }}))
+        status, changed = self._req("GET", "/api/config")
+        self.assertEqual(status, 200)
+        self.assertEqual(changed["configuration"]["reason"], "configuration-changed")
+        self.assertIn("context-policy", [
+            item["label"] for item in changed["configuration"]["changedInputs"]
+        ])
         status, lifecycle = self._req("GET", "/api/lifecycle")
         self.assertEqual(status, 200)
         self.assertTrue(lifecycle["configuration"]["restartRequired"])

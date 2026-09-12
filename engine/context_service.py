@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 try:  # Import works both as engine.context_service and as an installed script.
     from engine import brain_documents
@@ -30,6 +30,7 @@ SEARCH_SCHEMA = "singular.context.search.v1"
 GET_SCHEMA = "singular.context.get.v1"
 EXPLAIN_SCHEMA = "singular.context.explain.v1"
 POLICY_VERSION = "singular.context.policy.v1"
+POLICY_BINDING_VERSION = "singular.context.policy-binding.v1"
 RETRIEVAL_VERSION = "exact-lexical.v1"
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
@@ -47,6 +48,35 @@ class ContextError(ValueError):
 
 class ContextOverflow(ContextError):
     """Mandatory context cannot fit within the host-managed byte budget."""
+
+
+def resolve_context_config(
+    workspace: str | os.PathLike[str],
+    environment: Mapping[str, str],
+    *,
+    explicit: str | os.PathLike[str] | None = None,
+    invocation_directory: str | os.PathLike[str] | None = None,
+) -> tuple[Path, str]:
+    """Resolve the one context policy selected for an invocation.
+
+    An explicit CLI argument is relative to the invocation directory. Runtime
+    selectors are relative to the project root, matching lib.sh's configuration
+    path normalization. The selected JSON configuration is the legacy fallback.
+    """
+    root = Path(os.path.abspath(workspace)).resolve()
+    if explicit is not None and str(explicit).strip():
+        raw = Path(str(explicit)).expanduser()
+        base = Path(os.path.abspath(invocation_directory or os.getcwd())).resolve()
+        return ((base / raw).resolve() if not raw.is_absolute() else raw.resolve()), "explicit"
+    selected = str(environment.get("SINGULAR_CONTEXT_CONFIG_FILE", "") or "").strip()
+    if selected:
+        raw = Path(selected).expanduser()
+        return ((root / raw).resolve() if not raw.is_absolute() else raw.resolve()), "selector"
+    selected = str(environment.get("SINGULAR_JSON_CONFIG_FILE", "") or "").strip()
+    if selected:
+        raw = Path(selected).expanduser()
+        return ((root / raw).resolve() if not raw.is_absolute() else raw.resolve()), "json"
+    return (root / "singular.config.json").resolve(), "default"
 
 
 def _sha256(data: bytes) -> str:
@@ -161,6 +191,9 @@ class ContextService:
         allowed_kinds: frozenset[str],
         sources: tuple[Source, ...],
         config_hash: str,
+        budget_bytes: int,
+        budget_source: str = "contextService.budgetBytes",
+        eligibility_inputs: tuple[tuple[Path, str], ...] = (),
     ) -> None:
         self.enabled = enabled
         self.root = root
@@ -172,6 +205,14 @@ class ContextService:
         self.allowed_kinds = allowed_kinds
         self.sources = sources
         self.config_hash = config_hash
+        self.budget_bytes = budget_bytes
+        self.budget_source = budget_source
+        self.eligibility_inputs = eligibility_inputs
+        self.policy_identity = {
+            "version": POLICY_BINDING_VERSION,
+            "configPath": str(config_path),
+            "configSha256": config_hash,
+        }
         source_versions = [
             {"ref": item.ref, "sha256": item.source_hash, "validity": item.validity}
             for item in sources
@@ -204,10 +245,18 @@ class ContextService:
         *,
         role: str,
         phase: str | None = None,
+        workspace: str | os.PathLike[str] | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> "ContextService":
-        config_path = Path(os.path.abspath(config))
+        config_path = Path(os.path.abspath(config)).resolve(strict=False)
         value, config_raw = _read_json(config_path, "context configuration")
-        root = config_path.parent.resolve()
+        policy_root = config_path.parent.resolve()
+        root = (
+            Path(os.path.abspath(workspace)).resolve()
+            if workspace is not None else policy_root
+        )
+        if not root.is_dir():
+            raise ContextError(f"invocation workspace is missing or not a directory: {root}")
         settings = value.get("contextService")
         if settings is None:
             settings = {}
@@ -216,7 +265,7 @@ class ContextService:
         enabled = settings.get("enabled", False)
         if not isinstance(enabled, bool):
             raise ContextError("contextService.enabled must be boolean")
-        project_id = settings.get("projectId", root.name)
+        project_id = settings.get("projectId", policy_root.name)
         if not isinstance(project_id, str) or not project_id:
             raise ContextError("contextService.projectId must be a non-empty string")
         config_hash = _sha256(config_raw)
@@ -228,26 +277,57 @@ class ContextService:
         policy = settings.get("rolePolicy", {})
         if not isinstance(policy, dict):
             raise ContextError("contextService.rolePolicy must be an object")
-        raw_kinds = policy.get(role, policy.get("*", []))
+        if role == "review-target":
+            # `review-target` names the trust policy at the invocation boundary;
+            # retain compatibility with earlier auditor/reviewer config keys.
+            raw_kinds = policy.get(
+                role, policy.get("reviewer", policy.get("auditor", policy.get("*", [])))
+            )
+        else:
+            raw_kinds = policy.get(role, policy.get("*", []))
         if not isinstance(raw_kinds, list) or not all(
             isinstance(item, str) and item in {"brain", "code", "run"}
             for item in raw_kinds
         ):
             raise ContextError(f"contextService.rolePolicy.{role} must list brain/code/run")
         allowed = frozenset(raw_kinds)
+        # Audits evaluate the review target, never model-authored run history.
+        # This is a hard trust boundary in addition to the configured role
+        # policy, so a permissive wildcard cannot accidentally import worker
+        # conclusions into an auditor.
+        if role in {"review-target", "reviewer", "auditor"}:
+            allowed = frozenset(kind for kind in allowed if kind != "run")
+        budget_bytes = settings.get("budgetBytes", 65536)
+        if not isinstance(budget_bytes, int) or isinstance(budget_bytes, bool) or budget_bytes < 1:
+            raise ContextError("contextService.budgetBytes must be a positive integer")
+        budget_source = "contextService.budgetBytes"
+        resolved_environment = environment if environment is not None else os.environ
+        budget_override = resolved_environment.get("SINGULAR_CONTEXT_BUDGET_BYTES")
+        if budget_override:
+            if not budget_override.isdigit() or int(budget_override) < 1:
+                raise ContextError(
+                    "SINGULAR_CONTEXT_BUDGET_BYTES must be a positive integer"
+                )
+            budget_bytes = int(budget_override)
+            budget_source = "SINGULAR_CONTEXT_BUDGET_BYTES"
         if not enabled:
             return cls(
                 enabled=False, root=root, config_path=config_path,
                 project_id=project_id, revision=revision, role=role, phase=phase,
                 allowed_kinds=allowed, sources=(), config_hash=config_hash,
+                budget_bytes=budget_bytes, budget_source=budget_source,
             )
 
         sources: list[Source] = []
+        eligibility_inputs: dict[Path, str] = {}
         if "brain" in allowed and "contextManifest" in value:
             try:
                 normalized, bodies = brain_documents.normalize(config_path)
             except brain_documents.ConsumerError as exc:
                 raise ContextError(f"brain source is invalid: {exc}") from exc
+            eligibility_inputs[Path(normalized["manifestPath"]).resolve()] = normalized[
+                "manifestSha256"
+            ]
             for record in normalized["documents"]:
                 if not record["selected"]:
                     continue
@@ -314,7 +394,73 @@ class ContextService:
             enabled=True, root=root, config_path=config_path,
             project_id=project_id, revision=revision, role=role, phase=phase,
             allowed_kinds=allowed, sources=tuple(sources), config_hash=config_hash,
+            budget_bytes=budget_bytes, budget_source=budget_source,
+            eligibility_inputs=tuple(sorted(
+                eligibility_inputs.items(), key=lambda item: str(item[0])
+            )),
         )
+
+    def describe(self) -> dict[str, Any]:
+        """Effective invocation configuration and source provenance."""
+        return {
+            "enabled": self.enabled,
+            "projectId": self.project_id,
+            "role": self.role,
+            "phase": self.phase,
+            "budgetBytes": self.budget_bytes,
+            "budgetSource": self.budget_source,
+            "allowedKinds": sorted(self.allowed_kinds),
+            "identity": self.identity,
+            "policy": self.policy_identity,
+            "sources": [
+                {
+                    "ref": source.ref,
+                    "kind": source.kind,
+                    "sourceLocation": str(source.path),
+                    "sourceSha256": source.source_hash,
+                    "validity": source.validity,
+                    "provenance": source.provenance,
+                }
+                for source in self.sources
+            ],
+        }
+
+    def validate_snapshot(self) -> None:
+        """Refuse config/source drift after this invocation snapshot was read."""
+        try:
+            current_config = self.config_path.read_bytes()
+        except OSError as exc:
+            raise ContextError(
+                f"context configuration changed during invocation: {self.config_path}: {exc}"
+            ) from exc
+        if _sha256(current_config) != self.config_hash:
+            raise ContextError(
+                f"context configuration changed during invocation: {self.config_path}"
+            )
+        for path, expected_hash in self.eligibility_inputs:
+            try:
+                current = path.read_bytes()
+            except OSError as exc:
+                raise ContextError(
+                    f"context eligibility metadata changed during invocation: {path}: {exc}"
+                ) from exc
+            if _sha256(current) != expected_hash:
+                raise ContextError(
+                    f"context eligibility metadata changed during invocation: {path}"
+                )
+        for source in self.sources:
+            try:
+                current = source.path.read_bytes()
+            except FileNotFoundError:
+                current = None
+            except OSError as exc:
+                raise ContextError(
+                    f"configured source changed during invocation: {source.ref}: {exc}"
+                ) from exc
+            if current != source.raw:
+                raise ContextError(
+                    f"configured source changed during invocation: {source.ref}"
+                )
 
     def _disabled(self, schema: str) -> dict[str, Any]:
         return {
@@ -589,7 +735,19 @@ class ContextService:
         phase: str,
         budget_bytes: int,
         query: str | None = None,
+        base_prompt: str | os.PathLike[str] | None = None,
+        delivery: str = "full",
+        prior_bundle: dict[str, Any] | str | os.PathLike[str] | None = None,
+        required_evidence: list[dict[str, Any]] | None = None,
+        final_budget_bytes: int | None = None,
+        invocation_id: str | None = None,
+        campaign_binding: str | None = None,
     ) -> dict[str, Any]:
+        invocation = {
+            "invocationId": invocation_id,
+            "campaignBinding": campaign_binding,
+            "workspace": str(self.root),
+        }
         if not self.enabled:
             prompt = b""
             disabled_identity = dict(self.identity)
@@ -600,6 +758,8 @@ class ContextService:
                 "status": "disabled",
                 "reason": "contextService.enabled is false or absent",
                 "identity": disabled_identity,
+                "policy": self.policy_identity,
+                "invocation": invocation,
                 "prompt": "",
                 "promptSha256": _sha256(prompt),
                 "provenance": [],
@@ -618,6 +778,20 @@ class ContextService:
             return result
         if budget_bytes < 0:
             raise ContextError("budget-bytes must be non-negative")
+        if base_prompt is not None:
+            return self._build_invocation(
+                task=task,
+                phase=phase,
+                budget_bytes=budget_bytes,
+                query=query,
+                base_prompt=base_prompt,
+                delivery="initial" if delivery == "full" else delivery,
+                prior_bundle=prior_bundle,
+                required_evidence=required_evidence or [],
+                final_budget_bytes=final_budget_bytes,
+                invocation_id=invocation_id,
+                campaign_binding=campaign_binding,
+            )
         task_raw_value = os.fspath(task)
         if re.fullmatch(r"TASK-[0-9]{4,}", task_raw_value):
             candidates = [
@@ -732,6 +906,12 @@ class ContextService:
             })
         prompt_bytes = b"".join(prompt_parts)
         prompt = prompt_bytes.decode("utf-8")
+        try:
+            if task_path.read_bytes() != task_raw:
+                raise ContextError(f"mandatory task source changed during invocation: {task_path}")
+        except OSError as exc:
+            raise ContextError(f"mandatory task source changed during invocation: {exc}") from exc
+        self.validate_snapshot()
         bundle_identity = dict(self.identity)
         if phase != self.phase:
             bundle_identity["phase"] = phase
@@ -743,6 +923,8 @@ class ContextService:
             "contractVersion": 1,
             "status": "ok",
             "identity": bundle_identity,
+            "policy": self.policy_identity,
+            "invocation": invocation,
             "prompt": prompt,
             "promptSha256": _sha256(prompt_bytes),
             "provenance": provenance,
@@ -751,6 +933,340 @@ class ContextService:
                 "unit": "utf8-bytes", "limitBytes": budget_bytes,
                 "usedBytes": len(prompt_bytes), "remainingBytes": budget_bytes - len(prompt_bytes),
                 "mandatoryBytes": mandatory_bytes, "optionalBytes": optional_used,
+                "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
+                "providerVisibleBytes": None,
+                "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
+            },
+            "limitations": LEXICAL_LIMIT,
+        }
+        bundle["bundleId"] = _sha256(_canonical(bundle))
+        return bundle
+
+    def _build_invocation(
+        self,
+        *,
+        task: str | os.PathLike[str],
+        phase: str,
+        budget_bytes: int,
+        query: str | None,
+        base_prompt: str | os.PathLike[str],
+        delivery: str,
+        prior_bundle: dict[str, Any] | str | os.PathLike[str] | None,
+        required_evidence: list[dict[str, Any]],
+        final_budget_bytes: int | None,
+        invocation_id: str | None,
+        campaign_binding: str | None,
+    ) -> dict[str, Any]:
+        """Build the exact provider prompt from one immutable source snapshot.
+
+        The existing driver prompt remains authoritative. Initial delivery adds
+        selected source bodies once; delta delivery adds changed bodies,
+        mandatory obligation lines, and immutable references for unchanged
+        sources. The resulting prompt and its event provenance therefore come
+        from the same signed bundle.
+        """
+        if delivery not in {"initial", "delta"}:
+            raise ContextError("delivery must be initial or delta")
+        if final_budget_bytes is not None and (
+            not isinstance(final_budget_bytes, int)
+            or isinstance(final_budget_bytes, bool)
+            or final_budget_bytes < 1
+        ):
+            raise ContextError("final composed budget must be a positive integer")
+        base_path = Path(base_prompt).resolve(strict=False)
+        try:
+            base_raw = base_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise ContextError(f"mandatory base prompt is missing: {base_path}") from exc
+        try:
+            base_text = base_raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContextError(f"mandatory base prompt is not UTF-8: {base_path}") from exc
+
+        task_path = Path(os.fspath(task))
+        if not task_path.is_absolute():
+            task_path = self.root / task_path
+        task_path = task_path.resolve(strict=False)
+        try:
+            task_path.relative_to(self.root)
+        except ValueError as exc:
+            raise ContextError(
+                f"containment: task resolves outside worktree: {task_path}"
+            ) from exc
+        try:
+            task_raw = task_path.read_bytes()
+            task_text = task_raw.decode("utf-8")
+        except FileNotFoundError as exc:
+            raise ContextError(f"mandatory task source is missing: {task_path}") from exc
+        except UnicodeDecodeError as exc:
+            raise ContextError(f"mandatory task source is not UTF-8: {task_path}") from exc
+
+        missing = [source for source in self.sources if source.raw is None or source.validity == "missing"]
+        if missing:
+            refs = ", ".join(source.ref for source in missing)
+            raise ContextError(f"missing source: configured invocation source(s): {refs}")
+        invalid = [
+            source for source in self.sources
+            if source.validity not in {"current", "current-reviewed"}
+        ]
+        if invalid:
+            refs = ", ".join(f"{source.ref} ({source.validity})" for source in invalid)
+            raise ContextError(f"ineligible configured invocation source(s): {refs}")
+
+        prior: dict[str, Any] = {}
+        prior_path: Path | None = None
+        if prior_bundle is not None:
+            if isinstance(prior_bundle, dict):
+                prior = prior_bundle
+            else:
+                prior_path = Path(prior_bundle).resolve(strict=False)
+                prior, _ = _read_json(prior_path, "prior context bundle")
+            if prior.get("schema") != BUNDLE_SCHEMA:
+                raise ContextError("wrong-version: prior bundle must be singular.context.bundle.v1")
+            claimed = prior.get("bundleId")
+            unsigned = dict(prior)
+            unsigned.pop("bundleId", None)
+            if claimed != _sha256(_canonical(unsigned)):
+                raise ContextError("modified prior context bundle")
+            prior_identity = prior.get("identity")
+            if not isinstance(prior_identity, dict):
+                raise ContextError("prior context bundle has no compatible identity")
+            compatibility = {
+                "projectId": self.project_id,
+                "worktree": str(self.root),
+                "role": self.role,
+            }
+            mismatched = [
+                key for key, expected in compatibility.items()
+                if prior_identity.get(key) != expected
+            ]
+            prior_host_binding = prior.get("invocation", {})
+            if (
+                campaign_binding is not None
+                and prior_host_binding.get("campaignBinding") != campaign_binding
+            ):
+                mismatched.append("campaignBinding")
+            if mismatched:
+                # An incompatible bundle is not authority and contributes no
+                # references. A fresh bounded initial delivery is safe and is
+                # required for provider fallbacks that cannot reuse memory.
+                prior = {}
+                prior_path = None
+                delivery = "initial"
+        elif delivery == "delta":
+            delivery = "initial"
+
+        previous = {
+            item.get("ref"): item.get("sourceSha256")
+            for item in prior.get("provenance", [])
+            if isinstance(item, dict) and item.get("kind") in {"brain", "code", "run"}
+        }
+        current_refs = {source.ref for source in self.sources}
+        revoked = sorted(ref for ref in previous if ref not in current_refs)
+        changed = sorted(
+            source.ref for source in self.sources
+            if previous.get(source.ref) != source.source_hash
+        )
+        parts = [base_raw]
+        mandatory_bytes = len(base_raw)
+        optional_used = 0
+        provenance: list[dict[str, Any]] = [{
+            "ref": "driver-prompt:" + base_path.name,
+            "kind": "task",
+            "sourceLocation": str(base_path),
+            "sourceSha256": _sha256(base_raw),
+            "excerptSha256": _sha256(base_raw),
+            "range": {"startByte": 0, "endByte": len(base_raw)},
+            "reasons": ["authoritative_driver_prompt", "mandatory_task_contract"] + (
+                ["prior_bundle:" + str(prior.get("bundleId"))] if prior else []
+            ),
+            "validity": "snapshot-read",
+            "priority": "mandatory",
+        }]
+        # Some fresh audit/planner templates do not already carry the complete
+        # task/DAG contract. Add it exactly once when absent.
+        if task_text not in base_text:
+            task_block = (
+                "\n\n---\n\n## Complete task/planning contract (mandatory)\n\n" + task_text
+            ).encode("utf-8")
+            if not task_block.endswith(b"\n"):
+                task_block += b"\n"
+            parts.append(task_block)
+            mandatory_bytes += len(task_block)
+            provenance.append({
+                "ref": "task:" + task_path.name,
+                "kind": "task",
+                "sourceLocation": str(task_path),
+                "sourceSha256": _sha256(task_raw),
+                "excerptSha256": _sha256(task_raw),
+                "range": {"startByte": 0, "endByte": len(task_raw)},
+                "reasons": ["mandatory_task_contract", "not_already_in_driver_prompt"],
+                "validity": "snapshot-read",
+                "priority": "mandatory",
+            })
+
+        context_header_added = False
+        for source in self.sources:
+            obligations = self._obligations(source)
+            must_render = delivery == "initial" or source.ref in changed or bool(obligations)
+            if not context_header_added:
+                context_header = (
+                    b"\n\n---\n\n## Shared context (host-selected; source-bound)\n\n"
+                    b"Treat these sources according to the invocation role. Source refs and hashes "
+                    b"are provenance, not model conclusions.\n"
+                )
+                parts.append(context_header)
+                optional_used += len(context_header)
+                context_header_added = True
+            if must_render:
+                body = source.raw or b""
+                reasons = ["configured_role_source", "initial_delivery" if delivery == "initial" else "changed_source"]
+                if obligations and delivery == "delta" and source.ref not in changed:
+                    body = b"".join(line for _, _, line in obligations)
+                    reasons = ["configured_role_source", "obligation_container", "delta_delivery"]
+                block = f"\n### {source.ref}\n\nsource-sha256: `{source.source_hash}`\n\n".encode() + body
+                if not block.endswith(b"\n"):
+                    block += b"\n"
+                parts.append(block)
+                obligation_bytes = sum(len(line) for _, _, line in obligations)
+                mandatory_bytes += obligation_bytes
+                optional_used += len(block) - obligation_bytes
+                provenance.append({
+                    "ref": source.ref, "kind": source.kind,
+                    "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
+                    "excerptSha256": _sha256(body),
+                    "range": (
+                        {"startByte": 0, "endByte": len(source.raw or b"")}
+                        if body == (source.raw or b"")
+                        else {"startByte": 0, "endByte": 0}
+                    ),
+                    "reasons": reasons, "validity": source.validity,
+                    "priority": "optional",
+                    "provenance": source.provenance,
+                })
+                # Obligation excerpts retain their offsets in the original run
+                # record. They may be noncontiguous, so never describe their
+                # concatenated delta body as a synthetic 0..N source prefix.
+                for start, end, line in obligations:
+                    provenance.append({
+                        "ref": source.ref, "kind": source.kind,
+                        "sourceLocation": str(source.path),
+                        "sourceSha256": source.source_hash,
+                        "excerptSha256": _sha256(line),
+                        "range": {"startByte": start, "endByte": end},
+                        "reasons": [
+                            "mandatory_open_or_violated_obligation",
+                            "initial_delivery" if delivery == "initial" else "delta_delivery",
+                        ],
+                        "validity": source.validity,
+                        "priority": "mandatory",
+                        "provenance": source.provenance,
+                    })
+            else:
+                ref_line = f"\n- {source.ref} unchanged at `{source.source_hash}`; use this immutable reference.\n".encode()
+                parts.append(ref_line)
+                optional_used += len(ref_line)
+                provenance.append({
+                    "ref": source.ref, "kind": source.kind,
+                    "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
+                    "excerptSha256": _sha256(ref_line),
+                    "range": {"startByte": 0, "endByte": 0},
+                    "reasons": ["unchanged_immutable_reference", "delta_delivery"],
+                    "validity": source.validity, "priority": "optional",
+                    "provenance": source.provenance,
+                })
+        if revoked:
+            revoked_notice = ("\nRevoked since the prior bundle: " + ", ".join(revoked) +
+                              ". Do not rely on prior bytes.\n").encode()
+            parts.append(revoked_notice)
+            mandatory_bytes += len(revoked_notice)
+
+        if prior and prior_path is not None:
+            prior_notice = (
+                "\nRetained prior context bundle: `" + str(prior_path) + "` "
+                "(" + str(prior.get("bundleId")) + "). Unchanged-source references "
+                "resolve through this immutable host artifact.\n"
+            ).encode()
+            parts.append(prior_notice)
+            optional_used += len(prior_notice)
+
+        if required_evidence:
+            evidence_header = b"\n\n## Complete host-delivered review evidence\n"
+            parts.append(evidence_header)
+            mandatory_bytes += len(evidence_header)
+            for item in required_evidence:
+                ref = item.get("ref")
+                data = item.get("data")
+                source_location = item.get("sourceLocation", "")
+                if not isinstance(ref, str) or not ref or not isinstance(data, bytes):
+                    raise ContextError("required evidence snapshot is invalid")
+                digest = _sha256(data)
+                block = (
+                    ("\nArtifact: " + ref + " SHA256: " + digest.removeprefix("sha256:") + "\n").encode()
+                    + data + b"\n"
+                )
+                parts.append(block)
+                mandatory_bytes += len(block)
+                provenance.append({
+                    "ref": "evidence:" + ref,
+                    # Required review evidence is part of the invocation's
+                    # task contract. Keep the strict v1 kind vocabulary while
+                    # identifying its host origin in nested provenance.
+                    "kind": "task",
+                    "sourceLocation": str(source_location),
+                    "sourceSha256": digest,
+                    "excerptSha256": digest,
+                    "range": {"startByte": 0, "endByte": len(data)},
+                    "reasons": ["required_host_evidence", "mandatory_review_input"],
+                    "validity": "snapshot-read",
+                    "priority": "mandatory",
+                    "provenance": {"origin": "host-evidence", "evidenceRef": ref},
+                })
+
+        prompt_raw = b"".join(parts)
+        if len(prompt_raw) > budget_bytes:
+            raise ContextOverflow(
+                f"mandatory-overflow: aggregate invocation requires {len(prompt_raw)} "
+                f"UTF-8 bytes but budget is {budget_bytes}"
+            )
+        if final_budget_bytes is not None and len(prompt_raw) > final_budget_bytes:
+            raise ContextOverflow(
+                f"complete review input exceeds composed budget: {len(prompt_raw)} "
+                f"UTF-8 bytes > {final_budget_bytes}"
+            )
+        try:
+            if base_path.read_bytes() != base_raw:
+                raise ContextError(f"mandatory base prompt changed during invocation: {base_path}")
+            if task_path.read_bytes() != task_raw:
+                raise ContextError(f"mandatory task source changed during invocation: {task_path}")
+        except OSError as exc:
+            raise ContextError(f"mandatory invocation source changed during invocation: {exc}") from exc
+        self.validate_snapshot()
+        identity = dict(self.identity)
+        identity["phase"] = phase
+        bundle: dict[str, Any] = {
+            "schema": BUNDLE_SCHEMA,
+            "contractVersion": 1,
+            "status": "ok",
+            "identity": identity,
+            "policy": self.policy_identity,
+            "invocation": {
+                "invocationId": invocation_id,
+                "campaignBinding": campaign_binding,
+                "workspace": str(self.root),
+            },
+            "prompt": prompt_raw.decode("utf-8"),
+            "promptSha256": _sha256(prompt_raw),
+            "provenance": provenance,
+            "omissions": [
+                {"ref": ref, "reason": "revoked_since_prior_bundle"}
+                for ref in revoked
+            ],
+            "budget": {
+                "unit": "utf8-bytes", "limitBytes": budget_bytes,
+                "usedBytes": len(prompt_raw), "remainingBytes": budget_bytes - len(prompt_raw),
+                "mandatoryBytes": mandatory_bytes,
+                "optionalBytes": optional_used,
                 "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
                 "providerVisibleBytes": None,
                 "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
@@ -785,6 +1301,43 @@ class ContextService:
             "omissions": bundle["omissions"],
             "limitations": bundle["limitations"],
         }
+
+
+def context_policy_view(
+    config: str | os.PathLike[str],
+    *,
+    workspace: str | os.PathLike[str],
+    environment: Mapping[str, str],
+    roles: Sequence[str] = ("planner", "implementer", "review-target", "assistant"),
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Produce the shared effective context-policy view for diagnostics."""
+    descriptions: dict[str, dict[str, Any]] = {}
+    for role in roles:
+        descriptions[role] = ContextService.from_config(
+            config,
+            role=role,
+            phase="diagnostic",
+            workspace=workspace,
+            environment=environment,
+        ).describe()
+    representative = descriptions[roles[0]]
+    policy = representative["policy"]
+    return {
+        "status": "ok" if representative["enabled"] else "disabled",
+        "configuration": {
+            "path": policy["configPath"],
+            "source": source,
+            "status": "ok",
+            "sha256": policy["configSha256"],
+        },
+        "workspace": str(Path(os.path.abspath(workspace)).resolve()),
+        "enabled": representative["enabled"],
+        "projectId": representative["projectId"],
+        "budgetBytes": representative["budgetBytes"],
+        "budgetSource": representative["budgetSource"],
+        "roles": descriptions,
+    }
 
 
 def publish_bundle(bundle: dict[str, Any], destination: str | os.PathLike[str]) -> None:

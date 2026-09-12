@@ -65,6 +65,35 @@ singular_ctx_planner_session_transcript_path() {
   printf '%s/sessions/planner/%s.log' "$state_dir" "$node"
 }
 
+# Last immutable context bundle delivered to this node's planner session. It is
+# separate from model transcript state and contains only bounded host-selected
+# prompt/provenance data, allowing resumed planners to receive deltas.
+singular_ctx_planner_context_path() {
+  local node="$1"
+  [[ -n "$node" ]] || { printf '%s' ""; return 0; }
+  local state_dir="${SINGULAR_STATE_DIR:-$SINGULAR_ROOT/.singular-state}"
+  printf '%s/sessions/planner/%s.context-bundle.json' "$state_dir" "$node"
+}
+
+# Atomically move the mutable per-node pointer to one immutable invocation
+# bundle. The pointer is a relative symlink; bundle bytes are never copied over
+# or replaced when a later planner invocation succeeds.
+singular_ctx_planner_context_point() {
+  local node="$1" bundle="$2" pointer temporary
+  pointer="$(singular_ctx_planner_context_path "$node")"
+  [[ -n "$pointer" && -f "$bundle" ]] || return 2
+  mkdir -p "$(dirname "$pointer")" || return $?
+  temporary="$pointer.tmp.${BASHPID:-$$}"
+  rm -f "$temporary"
+  python3 - "$bundle" "$pointer" "$temporary" <<'PY'
+import os, sys
+bundle, pointer, temporary = map(os.path.abspath, sys.argv[1:4])
+relative = os.path.relpath(bundle, os.path.dirname(pointer))
+os.symlink(relative, temporary)
+os.replace(temporary, pointer)
+PY
+}
+
 # Guarded finalize wrapper. No-op unless the knob is ON and the planner run
 # exited successfully (rc 0). Delegates the session-meta.v0 shape to the shared
 # singular_session_meta_finalize (role "planner"), then adds the additive optional

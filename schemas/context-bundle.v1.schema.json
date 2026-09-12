@@ -4,13 +4,15 @@
   "title": "Singular immutable context bundle v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "contractVersion", "status", "identity", "prompt", "promptSha256", "provenance", "omissions", "budget", "limitations", "bundleId"],
+  "required": ["schema", "contractVersion", "status", "identity", "policy", "invocation", "prompt", "promptSha256", "provenance", "omissions", "budget", "limitations", "bundleId"],
   "properties": {
     "schema": {"const": "singular.context.bundle.v1"},
     "contractVersion": {"const": 1},
     "status": {"enum": ["ok", "disabled"]},
     "reason": {"type": "string", "minLength": 1},
     "identity": {"$ref": "#/$defs/identity"},
+    "policy": {"$ref": "#/$defs/policy"},
+    "invocation": {"$ref": "#/$defs/invocation"},
     "prompt": {"type": "string"},
     "promptSha256": {"$ref": "#/$defs/hash"},
     "provenance": {"type": "array", "items": {"$ref": "#/$defs/provenance"}},
@@ -34,6 +36,26 @@
         "policyVersion": {"const": "singular.context.policy.v1"},
         "retrievalVersion": {"const": "exact-lexical.v1"},
         "snapshotId": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "configPath", "configSha256"],
+      "properties": {
+        "version": {"const": "singular.context.policy-binding.v1"},
+        "configPath": {"type": "string", "minLength": 1},
+        "configSha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocationId", "campaignBinding", "workspace"],
+      "properties": {
+        "invocationId": {"type": ["string", "null"]},
+        "campaignBinding": {"type": ["string", "null"]},
+        "workspace": {"type": "string", "minLength": 1}
       }
     },
     "range": {

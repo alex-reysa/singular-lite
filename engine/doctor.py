@@ -860,9 +860,23 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
             if projection.get("schema") != "singular.effective-configuration.v1":
                 raise ValueError("effective configuration projection has the wrong schema")
             if not isinstance(configuration, dict) or configuration.get("status") not in {"ok", "absent"}:
-                raise ValueError(
-                    str((configuration or {}).get("message") or "effective configuration is unavailable")
+                message = str(
+                    (configuration or {}).get("message")
+                    or "effective configuration is unavailable"
                 )
+                self.runtime_env = {}
+                self.effective_config_projection = projection
+                self.add(
+                    "runtime.config-load", "fail", message,
+                    required_for=("all-runs",),
+                    remediation="Repair the selected effective configuration input.",
+                )
+                if not self.blocking:
+                    self.blocking = {
+                        "checkId": "runtime.config-load",
+                        "code": "SINGULAR_CONFIGURATION_UNAVAILABLE",
+                    }
+                return
             paths = projection.get("paths")
             if not isinstance(paths, dict) or not all(
                 isinstance(paths.get(key), str) and paths.get(key)
@@ -916,6 +930,7 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
         """
         if self.blocked("config.source-conflict"):
             return
+
         if not self.repo or not (self.engine / "engine/lib.sh").is_file():
             return
         config_path = (
@@ -1010,6 +1025,71 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
             ),
             details={"config": str(config_path), "conflicts": conflicts},
         )
+
+    def context_service_check(self) -> None:
+        """Expose effective role policy and latest invocation provenance."""
+        if self.blocked("runtime.context-service"):
+            return
+        if not self.repo or self.effective_config_projection is None:
+            return
+        policy = self.effective_config_projection.get("contextService")
+        if not isinstance(policy, dict):
+            self.add(
+                "runtime.context-service", "fail",
+                "effective context policy is unavailable",
+                required_for=("configured-runs",),
+            )
+            return
+        invalid = [
+            {"role": role, "ref": source.get("ref"), "validity": source.get("validity")}
+            for role, description in (policy.get("roles") or {}).items()
+            for source in description.get("sources", [])
+            if source.get("validity") not in {"current", "current-reviewed"}
+        ]
+        latest: list[dict[str, Any]] = []
+        state_path = (self.effective_config_projection.get("paths") or {}).get("state")
+        if state_path:
+            candidates = sorted(
+                Path(state_path).glob("runs/*/context-*.bundle.json"),
+                key=lambda path: path.stat().st_mtime, reverse=True,
+            )[:8]
+            for path in candidates:
+                try:
+                    bundle = json.loads(path.read_text(encoding="utf-8"))
+                    provenance = [item for item in bundle.get("provenance", []) if isinstance(item, dict)]
+                    reasons = [reason for item in provenance for reason in item.get("reasons", [])]
+                    prior = next((reason.split(":", 1)[1] for reason in reasons
+                                  if reason.startswith("prior_bundle:")), None)
+                    latest.append({
+                        "bundleRef": str(path), "bundleId": bundle.get("bundleId"),
+                        "role": (bundle.get("identity") or {}).get("role"),
+                        "phase": (bundle.get("identity") or {}).get("phase"),
+                        "delivery": {"mode": "delta" if prior else "initial", "priorBundleId": prior},
+                        "budget": bundle.get("budget"), "omissions": bundle.get("omissions", []),
+                        "sourceProvenance": [
+                            {key: item.get(key) for key in (
+                                "ref", "kind", "sourceSha256", "validity", "reasons"
+                            )}
+                            for item in provenance
+                        ],
+                    })
+                except (OSError, ValueError, TypeError):
+                    continue
+        details = {"effectivePolicy": policy, "invalidSources": invalid, "latestBundles": latest}
+        if invalid:
+            self.add(
+                "runtime.context-service", "fail",
+                "enabled context service has missing or ineligible invocation sources",
+                required_for=("configured-runs",),
+                remediation="Restore, review, or remove every invalid configured source.", details=details,
+            )
+        else:
+            self.add(
+                "runtime.context-service", "pass",
+                "context service is enabled; role selection, budgets, omissions, and provenance are observable"
+                if policy.get("enabled") else "context service is disabled",
+                details=details,
+            )
 
     def blocked(self, *check_ids: str) -> bool:
         """Cascade guard: one primary diagnosis instead of a dozen derivatives.
@@ -3522,6 +3602,7 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
         self.pin_checks()
         self.schema_checks()
         self.effective_environment()
+        self.context_service_check()
         self.brain_checks()
         self.config_source_conflict()
         self.host_hygiene_checks()

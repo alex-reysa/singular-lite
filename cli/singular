@@ -312,14 +312,19 @@ cmd_manifest() {
 }
 
 cmd_context() {
-  local home root cwd
+  local home root cwd bash_path
   home="$(resolve_engine_home)"
   root="$(repo_root)"
   cwd="$(pwd -P)"
+  bash_path="${BASH:-${SINGULAR_BASH_BIN:-bash}}"
   [[ -f "$home/engine/context_cli.py" ]] \
     || die "engine $home has no engine/context_cli.py"
-  exec python3 "$home/engine/context_cli.py" \
-    --engine-home "$home" --repo-root "$root" --cwd "$cwd" -- "$@"
+  SINGULAR_ROOT="$root" SINGULAR_ENGINE_HOME="$home" exec "$bash_path" -c '
+    home="$1"; root="$2"; cwd="$3"; shift 3
+    source "$home/engine/lib.sh" >/dev/null
+    exec python3 "$home/engine/context_cli.py" \
+      --engine-home "$home" --repo-root "$root" --cwd "$cwd" -- "$@"
+  ' _ "$home" "$root" "$cwd" "$@"
 }
 
 cmd_init() {

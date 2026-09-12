@@ -9,14 +9,15 @@ trap 'rm -rf "$tmp"' EXIT
 repo="$tmp/repo with spaces"
 mkdir -p "$repo/config dir" "$repo/tasks custom" "$repo/state custom" \
   "$repo/docs/orchestration" "$repo/shell-state" "$repo/local-tasks" \
-  "$repo/local-state" "$repo/custom-runner"
+  "$repo/local-state" "$repo/custom-runner" "$repo/nested/invocation"
 git -C "$repo" init -q
 git -C "$repo" -c user.name=test -c user.email=test@example.com \
   commit -q --allow-empty -m init
 
 cat >"$repo/singular.config.json" <<'JSON'
-{"schemaVersion":"v2","targetBranch":"wrong","env":{"SINGULAR_CODEX_MODEL":"wrong-model"}}
+{"schemaVersion":"v2","targetBranch":"wrong","env":{"SINGULAR_CODEX_MODEL":"wrong-model"},"contextService":{"enabled":true,"projectId":"main-policy","budgetBytes":2048,"codePaths":["main-source.md"],"rolePolicy":{"assistant":["code"]}}}
 JSON
+printf '%s\n' 'MAIN POLICY SOURCE' >"$repo/main-source.md"
 cat >"$repo/docs/orchestration/dag.v0.json" <<'JSON'
 {"schema":"singular.orchestration.dag.v0","nodes":[{"id":"config-parity","stage":"S0","area":"brain","layer":"test","kind":"contract","dependsOn":[],"requiredCompletion":"done"}]}
 JSON
@@ -32,16 +33,26 @@ cat >"$repo/config dir/custom.json" <<'JSON'
     "SINGULAR_CODEX_AUDITOR_REASONING_EFFORT":"medium",
     "SINGULAR_CODEX_SERVICE_TIER":"",
     "SINGULAR_TASKS_DIR":"tasks custom",
-    "SINGULAR_STATE_DIR":"state custom"
+    "SINGULAR_STATE_DIR":"state custom",
+    "SINGULAR_CONTEXT_CONFIG_FILE":"config dir/context-policy.json",
+    "SINGULAR_CONTEXT_BUDGET_BYTES":"11111"
   }
 }
 JSON
+cat >"$repo/config dir/context-policy.json" <<'JSON'
+{"contextService":{"enabled":true,"projectId":"alternate-policy","budgetBytes":16384,"codePaths":["context-source.md"],"rolePolicy":{"planner":["code"],"implementer":["code"],"review-target":["code"],"assistant":["code"]}}}
+JSON
+cat >"$repo/config dir/disabled-policy.json" <<'JSON'
+{"contextService":{"enabled":false,"projectId":"alternate-disabled","budgetBytes":4096,"rolePolicy":{}}}
+JSON
+printf '%s\n' 'ROOT WORKSPACE CONTEXT SOURCE' >"$repo/context-source.md"
 cat >"$repo/config dir/runtime.sh" <<'SH'
 SINGULAR_RUNNER="$SINGULAR_ENGINE_HOME/engine/gemini-run.sh"
 SINGULAR_GEMINI_MODEL="shell-model"
 SINGULAR_TASKS_DIR="shell-tasks"
 SINGULAR_STATE_DIR="shell-state"
-export SINGULAR_RUNNER SINGULAR_GEMINI_MODEL SINGULAR_TASKS_DIR SINGULAR_STATE_DIR
+SINGULAR_CONTEXT_BUDGET_BYTES="12222"
+export SINGULAR_RUNNER SINGULAR_GEMINI_MODEL SINGULAR_TASKS_DIR SINGULAR_STATE_DIR SINGULAR_CONTEXT_BUDGET_BYTES
 SH
 printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/custom-runner/codex-run.sh"
 chmod +x "$repo/custom-runner/codex-run.sh"
@@ -50,7 +61,8 @@ SINGULAR_GEMINI_MODEL=""
 SINGULAR_TASKS_DIR="local-tasks"
 SINGULAR_STATE_DIR="local-state"
 SINGULAR_DIAGNOSTIC_SECRET="must-not-escape"
-export SINGULAR_GEMINI_MODEL SINGULAR_TASKS_DIR SINGULAR_STATE_DIR SINGULAR_DIAGNOSTIC_SECRET
+SINGULAR_CONTEXT_BUDGET_BYTES="13333"
+export SINGULAR_GEMINI_MODEL SINGULAR_TASKS_DIR SINGULAR_STATE_DIR SINGULAR_DIAGNOSTIC_SECRET SINGULAR_CONTEXT_BUDGET_BYTES
 SH
 
 before="$(find "$repo" -path "$repo/.git" -prune -o -type f -print0 | sort -z | xargs -0 shasum -a 256)"
@@ -76,13 +88,19 @@ cli_json="$(cd "$repo" && env SINGULAR_JSON_CONFIG_FILE="$selector" \
   SINGULAR_CONFIG_FILE="$shell_selector" SINGULAR_LOCAL_CONFIG_FILE="$local_selector" \
   SINGULAR_ENGINE_HOME="$ROOT" SINGULAR_CODEX_BIN=/bin/true \
   bash "$ROOT/cli/singular" health --json)"
+context_json="$(cd "$repo/nested/invocation" && env SINGULAR_JSON_CONFIG_FILE="$selector" \
+  SINGULAR_CONFIG_FILE="$shell_selector" SINGULAR_LOCAL_CONFIG_FILE="$local_selector" \
+  SINGULAR_ENGINE_HOME="$ROOT" SINGULAR_CODEX_BIN=/bin/true \
+  bash "$ROOT/cli/singular" context effective-config)"
 
-python3 - "$doctor_json" "$console_json" "$effective_json" "$cli_json" \
-  "$repo/config dir/custom.json" <<'PY' \
+python3 - "$doctor_json" "$console_json" "$effective_json" "$cli_json" "$context_json" \
+  "$repo/config dir/custom.json" "$repo/config dir/context-policy.json" "$repo" <<'PY' \
   || fail "CLI, doctor and console did not resolve the same custom config"
 import json, os, sys
-doctor, console, effective, cli = map(json.loads, sys.argv[1:5])
-path = os.path.realpath(sys.argv[5])
+doctor, console, effective, cli, context = map(json.loads, sys.argv[1:6])
+path = os.path.realpath(sys.argv[6])
+context_path = os.path.realpath(sys.argv[7])
+root = os.path.realpath(sys.argv[8])
 check = next(item for item in doctor["checks"] if item["id"] == "repo.config")
 assert check["status"] == "pass", check
 assert check["details"]["path"] == path, check
@@ -106,6 +124,40 @@ for role in ("implementer", "auditor"):
     assert effective["roles"][role]["reasoningEffort"] == console["roles"][role]["effort"]
 blob = json.dumps([doctor, console, effective, cli])
 assert "must-not-escape" not in blob, blob
+policy = effective["contextService"]
+assert policy["status"] == "ok" and policy["enabled"] is True, policy
+assert policy["configuration"]["path"] == context_path, policy
+assert policy["workspace"] == root, policy
+assert policy["budgetBytes"] == 13333, policy
+assert policy["budgetSource"] == "SINGULAR_CONTEXT_BUDGET_BYTES", policy
+assert policy["roles"]["implementer"]["sources"][0]["sourceLocation"] == os.path.join(root, "context-source.md"), policy
+assert context["contextService"] == policy["roles"]["assistant"], (context, policy)
+doctor_policy = next(row for row in doctor["checks"] if row["id"] == "runtime.context-service")
+assert doctor_policy["details"]["effectivePolicy"] == policy, doctor_policy
+PY
+
+# Explicit context --config wins over a resolved alternate selector. This also
+# covers the reverse policy state: alternate disabled while main JSON is on.
+reverse_implicit="$(cd "$repo/nested/invocation" && env \
+  SINGULAR_CONTEXT_CONFIG_FILE="config dir/disabled-policy.json" \
+  SINGULAR_ENGINE_HOME="$ROOT" SINGULAR_CODEX_BIN=/bin/true \
+  bash "$ROOT/cli/singular" context effective-config)"
+reverse_explicit="$(cd "$repo/nested/invocation" && env \
+  SINGULAR_CONTEXT_CONFIG_FILE="config dir/disabled-policy.json" \
+  SINGULAR_ENGINE_HOME="$ROOT" SINGULAR_CODEX_BIN=/bin/true \
+  bash "$ROOT/cli/singular" context effective-config \
+    --config ../../singular.config.json)"
+python3 - "$reverse_implicit" "$reverse_explicit" "$repo" <<'PY' \
+  || fail "explicit context config did not override the disabled alternate"
+import json, os, sys
+implicit, explicit = map(json.loads, sys.argv[1:3])
+root = os.path.realpath(sys.argv[3])
+assert implicit["status"] == "disabled", implicit
+assert implicit["contextService"]["projectId"] == "alternate-disabled", implicit
+assert explicit["status"] == "ok", explicit
+assert explicit["contextService"]["projectId"] == "main-policy", explicit
+assert explicit["contextService"]["identity"]["worktree"] == root, explicit
+assert explicit["contextService"]["sources"][0]["sourceLocation"] == os.path.join(root, "main-source.md"), explicit
 PY
 
 after="$(find "$repo" -path "$repo/.git" -prune -o -type f -print0 | sort -z | xargs -0 shasum -a 256)"
@@ -282,11 +334,16 @@ for mode in malformed missing-selected shell-false shell-exit local-false local-
   (cd "$bad_repo" && "${common[@]}" "$BASH_BIN" "$ROOT/cli/singular" health --json \
     >"$tmp/$mode-cli.stdout" 2>"$tmp/$mode-cli.stderr")
   cli_rc=$?
+  (cd "$bad_repo" && "${common[@]}" "$BASH_BIN" "$ROOT/cli/singular" \
+    context effective-config >"$tmp/$mode-context.stdout" 2>"$tmp/$mode-context.stderr")
+  context_rc=$?
   set -e
   [[ "$doctor_rc" -eq 1 ]] || fail "$mode doctor exited $doctor_rc, expected 1"
   [[ "$console_rc" -eq 0 && "$lifecycle_rc" -eq 0 ]] \
     || fail "$mode console entrypoint failed unexpectedly"
   [[ "$cli_rc" -ne 0 ]] || fail "$mode CLI health fabricated a successful startup"
+  [[ "$context_rc" -ne 0 && ! -s "$tmp/$mode-context.stdout" ]] \
+    || fail "$mode context CLI fabricated effective policy"
   "$PY" - "$mode" "$tmp/$mode-doctor.json" "$tmp/$mode-console.json" \
     "$tmp/$mode-lifecycle.json" <<'PY' || fail "$mode exposed authority after failed resolution"
 import json, sys
@@ -312,6 +369,40 @@ assert config_load["status"] == "fail", (mode, config_load)
 for ident in ("runner.selected", "provider.executable", "model.availability", "governance.posture"):
     rows = [row for row in doctor["checks"] if row["id"] == ident]
     assert rows and all(row["status"] == "skip" for row in rows), (mode, ident, rows)
+PY
+done
+
+for bad_context in missing-context.json malformed-context.json; do
+  [[ "$bad_context" != malformed-context.json ]] || printf '{bad\n' >"$repo/$bad_context"
+  bad_context_local="$tmp/$bad_context.local.sh"
+  printf 'export SINGULAR_CONTEXT_CONFIG_FILE=%q\n' "$bad_context" >"$bad_context_local"
+  set +e
+  bad_console="$(env SINGULAR_JSON_CONFIG_FILE="$selector" \
+    SINGULAR_LOCAL_CONFIG_FILE="$bad_context_local" SINGULAR_ENGINE_HOME="$ROOT" \
+    python3 "$ROOT/plugin/scripts/singular_graph_server.py" --repo "$repo" --config)"
+  bad_doctor="$(env HOME="$tmp/home" SINGULAR_JSON_CONFIG_FILE="$selector" \
+    SINGULAR_LOCAL_CONFIG_FILE="$bad_context_local" SINGULAR_ENGINE_HOME="$ROOT" \
+    python3 "$ROOT/engine/doctor.py" --engine-home "$ROOT" --repo-root "$repo" \
+      --bash "${BASH:-/bin/bash}" --bash-version "${BASH_VERSION:-5.0}" --json 2>/dev/null)"
+  doctor_rc=$?
+  (cd "$repo" && env SINGULAR_JSON_CONFIG_FILE="$selector" \
+    SINGULAR_LOCAL_CONFIG_FILE="$bad_context_local" SINGULAR_ENGINE_HOME="$ROOT" \
+    bash "$ROOT/cli/singular" context effective-config \
+      >"$tmp/$bad_context.stdout" 2>"$tmp/$bad_context.stderr")
+  context_rc=$?
+  set -e
+  [[ "$doctor_rc" -eq 1 && "$context_rc" -ne 0 ]] \
+    || fail "$bad_context did not fail closed (doctor=$doctor_rc context=$context_rc)"
+  python3 - "$bad_console" "$bad_doctor" "$repo/$bad_context" <<'PY' \
+    || fail "$bad_context substituted unrelated context policy"
+import json, os, sys
+console, doctor = map(json.loads, sys.argv[1:3])
+selected = os.path.realpath(sys.argv[3])
+assert console["configuration"]["status"] == "error", console
+assert console["contextService"]["configuration"]["path"] == selected, console
+assert console["contextService"]["status"] == "unavailable", console
+check = next(row for row in doctor["checks"] if row["id"] == "runtime.context-service")
+assert check["status"] == "skip", check
 PY
 done
 

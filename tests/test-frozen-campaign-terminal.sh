@@ -17,7 +17,8 @@ PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
 [[ -x "$BASH_BIN" ]] || { echo "missing pinned Bash: $BASH_BIN" >&2; exit 1; }
 [[ -x "$PYTHON_BIN" ]] || { echo "missing pinned Python: $PYTHON_BIN" >&2; exit 1; }
 unset SINGULAR_CONFIG_FILE SINGULAR_LOCAL_CONFIG_FILE SINGULAR_JSON_CONFIG_FILE \
-  SINGULAR_JSON_CONFIG_SOURCE 2>/dev/null || true
+  SINGULAR_JSON_CONFIG_SOURCE SINGULAR_CONTEXT_CONFIG_FILE \
+  SINGULAR_CONTEXT_BUDGET_BYTES 2>/dev/null || true
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "$3: want '$2', got '$1'"; }
@@ -347,6 +348,33 @@ PY
     frozen-fixture "$ENGINE_HOME/engine/lib.sh"
   git -C "$FIXTURE_ROOT" add .
   git -C "$FIXTURE_ROOT" commit -qm 'frozen terminal fixture baseline'
+}
+
+enable_context_service() {
+  mkdir -p "$FIXTURE_ROOT/policy/nested"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/singular.config.json" \
+    "$FIXTURE_ROOT/policy/nested/context.json" <<'PY'
+import json, sys
+path, alternate = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["contextService"] = {"enabled": False, "budgetBytes": 1, "rolePolicy": {}}
+data.setdefault("env", {})["SINGULAR_CONTEXT_CONFIG_FILE"] = "policy/nested/context.json"
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+policy = {
+    "enabled": True,
+    "projectId": "frozen-terminal-fixture",
+    "budgetBytes": 65536,
+    "codePaths": ["docs/orchestration/tasks/TASK-0001.md"],
+    "rolePolicy": {
+        "planner": ["code"],
+        "implementer": ["code"],
+        "review-target": ["code"],
+    },
+}
+json.dump({"contextService": policy}, open(alternate, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+  git -C "$FIXTURE_ROOT" add singular.config.json policy/nested/context.json
+  git -C "$FIXTURE_ROOT" commit -qm 'enable frozen context service'
 }
 
 run_engine() {
@@ -700,6 +728,89 @@ PY
   echo "ok: frozen campaign publishes one accepted terminal attempt through real reconcile"
 }
 
+test_context_success() {
+  local name=context-success
+  make_fixture "$name"
+  enable_context_service
+  start_campaign success
+  reconcile success "$name-first"
+  assert_eq "$(calls worker)" "1" "$name worker calls"
+  assert_eq "$(calls auditor)" "1" "$name auditor calls"
+  reconcile success "$name-reap"
+  reconcile success "$name-no-duplicate"
+  assert_terminal_contract completed "" accepted
+  assert_eq "$(calls worker)" "1" "$name did not redispatch worker"
+  assert_eq "$(calls auditor)" "1" "$name did not redispatch auditor"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/runs" \
+    "$FIXTURE_ROOT/policy/nested/context.json" "$FIXTURE_ROOT/.worktrees/TASK-0001" \
+    "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" <<'PY'
+import hashlib, json, pathlib, sys
+runs, config, workspace, manifest_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).resolve(), pathlib.Path(sys.argv[3]).resolve(), pathlib.Path(sys.argv[4])
+bundles = [json.load(open(path, encoding="utf-8")) for path in runs.glob("*/context-*.bundle.json")]
+roles = {bundle["identity"]["role"] for bundle in bundles}
+assert {"implementer", "review-target"} <= roles, roles
+for bundle in bundles:
+    assert pathlib.Path(bundle["policy"]["configPath"]).resolve() == config, bundle
+    assert pathlib.Path(bundle["invocation"]["workspace"]).resolve() == workspace, bundle
+    assert bundle["invocation"]["campaignBinding"].startswith("campaign:"), bundle
+    assert not any("host_invocation_identity" in item.get("reasons", [])
+                   for item in bundle["provenance"]), bundle
+receipts = [json.load(open(path, encoding="utf-8"))
+            for path in runs.glob("*/context-invocation-*.json")]
+assert receipts and all(item["status"] == "admitted" for item in receipts), receipts
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+expected = "sha256:" + hashlib.sha256(json.dumps(
+    manifest["configuration"]["resolvedSettings"], sort_keys=True,
+    separators=(",", ":"),
+).encode()).hexdigest()
+assert all(item["policy"]["resolvedPolicySha256"] == expected for item in receipts), receipts
+events = [json.loads(line) for line in (runs.parent / "events.ndjson").read_text().splitlines()]
+context_events = [item for item in events if item.get("type") == "context.bundle_selected"]
+assert context_events, events
+assert all(item["data"]["policy"]["resolvedPolicySha256"] == expected
+           for item in context_events), context_events
+PY
+  echo "ok: enabled frozen context uses selected nested policy, explicit worker workspace, and frozen receipt identity"
+}
+
+test_missing_context_policy_refuses_campaign_start() {
+  local name=context-missing-policy
+  make_fixture "$name"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/singular.config.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data.setdefault("env", {})["SINGULAR_CONTEXT_CONFIG_FILE"] = "policy/missing.json"
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+  git -C "$FIXTURE_ROOT" add singular.config.json
+  git -C "$FIXTURE_ROOT" commit -qm 'select missing context policy'
+  if run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/campaign.sh" start \
+      --id frozen-context-missing >"$scratch/$name.log" 2>&1; then
+    fail "$name campaign silently treated missing selected policy as disabled"
+  fi
+  [[ ! -e "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" ]] \
+    || fail "$name published a campaign manifest"
+  echo "ok: already-missing selected context policy refuses campaign creation"
+}
+
+test_context_infra_exhaustion() {
+  local name=context-infra
+  make_fixture "$name"
+  enable_context_service
+  start_campaign infra
+  reconcile infra "$name-first"
+  assert_eq "$(calls worker)" "2" "$name bounded worker calls"
+  assert_eq "$(calls auditor)" "0" "$name auditor calls"
+  set_task_ready
+  reconcile infra "$name-reap"
+  reconcile infra "$name-no-duplicate"
+  assert_eq "$(calls worker)" "2" "$name restart did not redispatch"
+  assert_eq "$(calls auditor)" "0" "$name restart did not audit"
+  assert_terminal_contract blocked worker-infra escalate-infra
+  echo "ok: enabled frozen context preserves bounded infra terminal handling"
+}
+
 prepare_native_repair() {
   local name="$1"
   make_fixture "$name"
@@ -939,7 +1050,22 @@ assert stat.S_IMODE(target.stat().st_mode) == int(original_mode), proof
 assert expected["sha256"] != actual["sha256"], (expected, actual)
 PY
   assert_eq "$(calls worker)" "1" "drift worker calls"
-  assert_eq "$(calls auditor)" "1" "drift semantic audit completed before refusal"
+  assert_eq "$(calls auditor)" "0" "drift early policy guard prevented semantic audit"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/runs" \
+    "$FIXTURE_ROOT/.singular-state/evidence-deliveries.sqlite3" <<'PY'
+import json, pathlib, sqlite3, sys
+runs, ledger = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+receipts = [json.load(open(path, encoding="utf-8"))
+            for path in runs.glob("*/context-invocation-review-target-*.json")]
+assert len(receipts) == 1, receipts
+assert receipts[0]["status"] == "denied", receipts
+assert receipts[0]["denial"]["reason"] == "campaign-mismatch", receipts
+assert receipts[0]["retrievalDebitBytes"] == 0, receipts
+assert not list(runs.glob("*/delivery-prompt-*.md")), list(runs.glob("*/delivery-prompt-*.md"))
+if ledger.exists():
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("select count(*) from deliveries").fetchone()[0] == 0
+PY
   manifest_reader_controls="$scratch/drift-manifest-reader-controls"
   mkdir -p "$manifest_reader_controls"
   "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/events.ndjson" \
@@ -965,7 +1091,7 @@ drift_events = [event for event in events if event.get("type") == "campaign.drif
 assert len(drift_events) == 2, drift_events
 assert [(event["data"]["entrypoint"], event["data"]["phase"])
         for event in drift_events] == [
-    ("l1-drive", "post-accepted-audit-checkpoint"),
+    ("evidence-delivery", "provider-boundary"),
     ("reconcile", "pre-control-state-commit"),
 ], drift_events
 for event in drift_events:
@@ -1029,7 +1155,7 @@ PY
   reconcile drift drift-reconcile-2
   reconcile drift drift-reconcile-3
   assert_eq "$(calls worker)" "1" "drift restart did not duplicate worker"
-  assert_eq "$(calls auditor)" "1" "drift restart did not manufacture audit"
+  assert_eq "$(calls auditor)" "0" "drift restart did not manufacture audit"
   assert_terminal_contract campaign-mismatch campaign-mismatch re-audit-current-campaign
   assert_contains "$(cat "$scratch/drift-reconcile-2.log" "$scratch/drift-reconcile-3.log")" \
     'reservation refused for TASK-0001' "drift restart durable reservation refusal"
@@ -1045,7 +1171,10 @@ PY
 
 case "${FROZEN_TERMINAL_CASE:-all}" in
   success) test_success ;;
+  context-success) test_context_success ;;
+  context-missing) test_missing_context_policy_refuses_campaign_start ;;
   infra) test_infra_exhaustion ;;
+  context-infra) test_context_infra_exhaustion ;;
   drift) test_policy_drift ;;
   drift-injection-failure) test_policy_drift_injection_failure_is_fail_closed ;;
   continuation-budget)
@@ -1064,7 +1193,10 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     ;;
   all)
     test_success
+    test_context_success
+    test_missing_context_policy_refuses_campaign_start
     test_infra_exhaustion
+    test_context_infra_exhaustion
     test_policy_drift_injection_failure_is_fail_closed
     test_policy_drift
     test_public_continuation_budget continuation-budget-available 0

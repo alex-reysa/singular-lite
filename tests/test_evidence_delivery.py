@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -86,15 +85,29 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
             doc['artifacts'].append({'ref': name, 'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()})
         manifest.write_text(json.dumps(doc))
     publish_required()
-    prompt = t / 'prompt.md'; prompt.write_text('Review this task.')
+    prompt = t / 'prompt.md'
+    prompt.write_text('Review this task.')
     marker_file = t / 'launched'
     provider = t / 'provider.py'
-    provider.write_text("import pathlib,sys; text=pathlib.Path(sys.argv[2]).read_text(); assert 'Complete host-delivered' in text and 'audit-verification.json' in text; pathlib.Path(sys.argv[3]).write_text('launched')")
+    provider.write_text("import pathlib,sys; prompt=pathlib.Path(sys.argv[2]); text=prompt.read_text(); assert 'Complete host-delivered' in text and 'audit-verification.json' in text; pathlib.Path(sys.argv[3]).write_text(str(prompt))")
     launch = host + ['--manifest', str(manifest), '--ledger', str(ledger), '--required', 'packet.json',
                      '--required', 'audit-verification.json', '--', sys.executable, str(provider),
                      '--prompt-file', str(prompt), str(marker_file)]
     result = subprocess.run(launch, capture_output=True)
     assert result.returncode == 0 and marker_file.exists(), result.stderr
+    delivered_prompt = Path(marker_file.read_text())
+    delivered = delivered_prompt.read_bytes()
+    delivered_sha = hashlib.sha256(delivered).hexdigest()
+    assert delivered_prompt.name == 'delivery-prompt-' + delivered_sha + '.md'
+    with sqlite3.connect(ledger) as db:
+        required_rows = [json.loads(row[0]) for row in db.execute('select detail from deliveries')]
+    required_rows = [row for row in required_rows if row.get('kind') == 'required-prompt']
+    assert len(required_rows) == 1, required_rows
+    assert required_rows[0]['promptSha256'] == delivered_sha
+    assert required_rows[0]['promptBytes'] == len(delivered)
+    assert required_rows[0]['requiredEvidenceBytes'] == sum(
+        item['bytes'] for item in doc['artifacts']
+    )
     marker_file.unlink()
     for field, invalid in [('headSha', 'b' * 40), ('runId', 'wrong-run'), ('taskId', 'TASK-0000'),
                            ('outcome', 'inconclusive-infrastructure'), ('commandSha256', '0' * 64)]:
@@ -103,6 +116,9 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
         publish_required()
         result = subprocess.run(launch, capture_output=True)
         assert result.returncode and not marker_file.exists(), (field, result.stderr)
+        with sqlite3.connect(ledger) as db:
+            rows = [json.loads(row[0]) for row in db.execute('select detail from deliveries')]
+        assert len([row for row in rows if row.get('kind') == 'required-prompt']) == 1
         report[field] = original
     publish_required()
     result = subprocess.run(host + ['--manifest', str(manifest), '--ledger', str(ledger), '--',

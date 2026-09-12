@@ -37,6 +37,12 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$count" =~ ^[0-9]+$ && "$count" -ge 1 ]] || { echo "--count must be >= 1" >&2; exit 2; }
 
+singular_campaign_verify_or_refuse generate-tasks entry || exit 2
+planner_campaign_binding="$(singular_campaign_binding)" || {
+  echo "generate-tasks: campaign identity is inconsistent at entry" >&2
+  exit 2
+}
+
 # Task fatness knob: how many mutually-independent strict-test-first slices the
 # planner may fold into one L2 task. Default 1 (byte-identical to prior behavior).
 # Clamped to SINGULAR_L2_SLICE_BUDGET_MAX; the per-node layer guardrail below forces 1
@@ -351,6 +357,8 @@ fi
 planner_resume_id=""
 planner_lease_path=""
 planner_transcript=""
+planner_strategy="fresh"
+planner_strategy_reason="context-routing-disabled"
 planner_base_args=("${planner_runner_args[@]}")
 if [[ "${SINGULAR_PLANNER_SESSION:-0}" == "1" ]]; then
   # Gate 12 (window-pressure) measures the CANONICAL per-node planner transcript,
@@ -388,15 +396,55 @@ if [[ "${SINGULAR_PLANNER_SESSION:-0}" == "1" ]]; then
   fi
 fi
 
+# Shared context is an invocation concern, not a rehydration strategy. Build the
+# exact planner prompt from the integrated service for fresh and resumed runs.
+# A resumed planner compares against the last node-bound bundle and receives
+# changed bytes plus immutable references for unchanged sources.
+planner_context_bundle="$run_dir/context-planner.bundle.json"
+planner_context_receipt="$run_dir/context-invocation-planner.json"
+planner_context_actual=""
+planner_context_config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
+planner_context_settings="$(singular_context_invocation_settings "$planner_context_config")" || {
+  echo "planner-failed (context service invocation assembly failed)"
+  exit 1
+}
+planner_context_enabled="${planner_context_settings%%$'\t'*}"
+planner_context_prior=""
+if [[ "$planner_strategy" == "resume" ]]; then
+  planner_context_prior="$(singular_ctx_planner_context_path "$active_node")"
+elif [[ -f "$planner_context_bundle" ]]; then
+  planner_context_prior="$planner_context_bundle"
+fi
 rm -f "$runner_result"
+rm -f "$planner_context_receipt"
 singular_runner_contract_prepare \
   "$codex_runner" planner planner-core "$runner_result"
+codex_exit=0
 SINGULAR_RUNNER_ROLE=planner \
 SINGULAR_RUNNER_CAPABILITY_PROFILE=planner-core \
 SINGULAR_RUNNER_RESULT_FILE="$runner_result" \
 SINGULAR_RUNNER_RUN_ID="$run_id" \
-  "$codex_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
-    "${planner_runner_args[@]}" >"$codex_log" 2>&1 || codex_exit=$?
+  singular_context_invocation_run planner plan \
+    "$SINGULAR_ORCH_DIR/dag.v0.json" "$planner_context_bundle" \
+    "$planner_context_prior" "$run_id:planner:$active_node:primary" \
+    "$planner_context_receipt" "$planner_campaign_binding" "$SINGULAR_ROOT" -- \
+    "$codex_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
+      "${planner_runner_args[@]}" >"$codex_log" 2>&1 || codex_exit=$?
+planner_context_status="$(singular_context_receipt_status "$planner_context_receipt" 2>/dev/null || true)"
+if [[ "$planner_context_status" == "denied" ]]; then
+  planner_context_denial="$(singular_context_receipt_denial_reason "$planner_context_receipt" 2>/dev/null || true)"
+  cat "$codex_log" >&2
+  echo "planner-failed (context admission denied: $planner_context_denial)"
+  [[ "$planner_context_denial" != "campaign-mismatch" ]] || exit 2
+  exit 1
+elif [[ "$planner_context_status" == "admitted" ]]; then
+  planner_context_actual="$(singular_context_receipt_bundle_path "$planner_context_receipt" 2>/dev/null || true)"
+elif [[ "$planner_context_enabled" == "1" ]]; then
+  cat "$codex_log" >&2
+  [[ "$codex_exit" -ne 2 ]] || exit 2
+  echo "planner-failed (context service invocation assembly failed)"
+  exit 1
+fi
 
 # rc-86 in-run fresh fallback: the runner refused the resume. Drop
 # --resume-session and re-run the planner FRESH within the SAME run (a pure
@@ -408,14 +456,35 @@ if [[ "$codex_exit" -eq 86 && -n "$planner_resume_id" ]]; then
   planner_runner_args=("${planner_base_args[@]}")
   codex_exit=0
   rm -f "$runner_result"
+  planner_context_receipt="$run_dir/context-invocation-planner-fallback.json"
+  rm -f "$planner_context_receipt"
   singular_runner_contract_prepare \
     "$codex_runner" planner planner-core "$runner_result"
   SINGULAR_RUNNER_ROLE=planner \
   SINGULAR_RUNNER_CAPABILITY_PROFILE=planner-core \
   SINGULAR_RUNNER_RESULT_FILE="$runner_result" \
   SINGULAR_RUNNER_RUN_ID="$run_id" \
-    "$codex_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
-      "${planner_runner_args[@]}" >"$codex_log" 2>&1 || codex_exit=$?
+    singular_context_invocation_run planner plan \
+      "$SINGULAR_ORCH_DIR/dag.v0.json" "$planner_context_bundle" \
+      "$planner_context_actual" "$run_id:planner:$active_node:fallback" \
+      "$planner_context_receipt" "$planner_campaign_binding" "$SINGULAR_ROOT" -- \
+      "$codex_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
+        "${planner_runner_args[@]}" >"$codex_log" 2>&1 || codex_exit=$?
+  planner_context_status="$(singular_context_receipt_status "$planner_context_receipt" 2>/dev/null || true)"
+  if [[ "$planner_context_status" == "denied" ]]; then
+    planner_context_denial="$(singular_context_receipt_denial_reason "$planner_context_receipt" 2>/dev/null || true)"
+    cat "$codex_log" >&2
+    echo "planner-failed (context fallback admission denied: $planner_context_denial)"
+    [[ "$planner_context_denial" != "campaign-mismatch" ]] || exit 2
+    exit 1
+  elif [[ "$planner_context_status" == "admitted" ]]; then
+    planner_context_actual="$(singular_context_receipt_bundle_path "$planner_context_receipt" 2>/dev/null || true)"
+  elif [[ "$planner_context_enabled" == "1" ]]; then
+    cat "$codex_log" >&2
+    [[ "$codex_exit" -ne 2 ]] || exit 2
+    echo "planner-failed (context service invocation assembly failed)"
+    exit 1
+  fi
 fi
 
 # Release the planner session-lease after the run returns — including after an
@@ -432,6 +501,13 @@ fi
 if [[ "$codex_exit" -eq 0 && -n "$planner_transcript" && -f "$codex_log" ]]; then
   mkdir -p "$(dirname "$planner_transcript")" 2>/dev/null || true
   cat "$codex_log" >>"$planner_transcript" 2>/dev/null || true
+fi
+if [[ "$codex_exit" -eq 0 && -n "$planner_context_actual" && -f "$planner_context_actual" ]]; then
+  planner_context_session="$(singular_ctx_planner_context_path "$active_node")"
+  if [[ -n "$planner_context_session" ]]; then
+    singular_ctx_planner_context_point "$active_node" "$planner_context_actual" \
+      >/dev/null 2>&1 || true
+  fi
 fi
 
 if [[ "$codex_exit" -ne 0 ]]; then
