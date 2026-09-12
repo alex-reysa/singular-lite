@@ -886,6 +886,8 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
     test_public_continuation_bootstrap_reissue
+    test_native_repair_scheduler
+    test_native_repair_started_crash
     ;;
   *) fail "unknown FROZEN_TERMINAL_CASE=${FROZEN_TERMINAL_CASE}" ;;
 esac
