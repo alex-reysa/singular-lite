@@ -2,6 +2,20 @@
 
 ## Decision Log
 
+### 2026-09-12T11:06:31Z — TASK-1108 — escalate-parked
+
+- Run: `RUN-20260912T105132Z-55981`
+- Branch: `codex/brain-rescue/TASK-1108`
+- Authority: policy
+- Rationale: durable product pass ceiling reached for this invocation; refusing a retry that would exceed the risk budget across re-entry
+
+### 2026-09-12T11:06:31Z — TASK-1108 — decide:retry
+
+- Run: `RUN-20260912T105132Z-55981`
+- Branch: `codex/brain-rescue/TASK-1108`
+- Authority: policy
+- Rationale: fast-path: audit-needs-fix -> retry
+
 ### 2026-09-12T10:50:10Z — TASK-1108 — authorize-continuation
 
 - Run: `ORIGIN-20260912T105010Z-51866`
