@@ -159,12 +159,24 @@ absent_doctor="$(cd / && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
 absent_console="$(cd / && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
   SINGULAR_CODEX_BIN=/bin/true python3 "$ROOT/plugin/scripts/singular_graph_server.py" \
   --repo "$absent_repo" --config)"
-python3 - "$absent_doctor" "$absent_console" "$absent_repo" <<'PY' \
+bound_args=(SINGULAR_JSON_CONFIG_FILE="$absent_repo/./singular.config.json" \
+  SINGULAR_JSON_CONFIG_SOURCE=default SINGULAR_JSON_CONFIG_DEFAULT_ROOT="$absent_repo/." \
+  SINGULAR_JSON_CONFIG_DEFAULT_FILE="$absent_repo/./singular.config.json")
+bound_doctor="$(cd / && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
+  SINGULAR_CODEX_BIN=/bin/true "${bound_args[@]}" \
+  python3 "$ROOT/engine/doctor.py" --engine-home "$ROOT" --repo-root "$absent_repo" \
+  --bash /opt/homebrew/bin/bash --bash-version 5.3 --json 2>/dev/null || true)"
+bound_console="$(cd / && env HOME="$tmp/home" SINGULAR_ENGINE_HOME="$ROOT" \
+  SINGULAR_CODEX_BIN=/bin/true "${bound_args[@]}" \
+  python3 "$ROOT/plugin/scripts/singular_graph_server.py" --repo "$absent_repo" --config)"
+python3 - "$absent_doctor" "$absent_console" "$bound_doctor" "$bound_console" \
+  "$absent_repo" "$ROOT" <<'PY' \
   || fail "absent optional JSON became an explicit selector"
 import json, os, sys
-doctor, console = map(json.loads, sys.argv[1:3])
-root = os.path.realpath(sys.argv[3])
-for view in (doctor["effectiveConfiguration"], console):
+doctor, console, bound_doctor, bound_console = map(json.loads, sys.argv[1:5])
+root = os.path.realpath(sys.argv[5])
+for view in (doctor["effectiveConfiguration"], console,
+             bound_doctor["effectiveConfiguration"], bound_console):
     assert view["configuration"]["status"] == "absent", view
     assert view["configuration"]["source"] == "default", view
     assert view["paths"]["state"] == os.path.join(root, "shell state"), view
@@ -174,6 +186,36 @@ repo_check = next(row for row in doctor["checks"] if row["id"] == "repo.config")
 assert repo_check["status"] == "warn", repo_check
 load = next(row for row in doctor["checks"] if row["id"] == "runtime.config-load")
 assert load["status"] == "pass", load
+
+# Python's direct resolver uses the same complete-binding rule as lib.sh.
+sys.path.insert(0, os.path.join(sys.argv[6], "engine"))
+import provider_resolver as resolver
+default_path = os.path.join(root, "singular.config.json")
+matched = resolver.resolve_json_config(root, {
+    "SINGULAR_JSON_CONFIG_FILE": os.path.join(root, ".", "singular.config.json"),
+    "SINGULAR_JSON_CONFIG_SOURCE": "default",
+    "SINGULAR_JSON_CONFIG_DEFAULT_ROOT": os.path.join(root, "."),
+    "SINGULAR_JSON_CONFIG_DEFAULT_FILE": os.path.join(root, ".", "singular.config.json"),
+})
+assert matched.source == "default" and str(matched.path) == default_path, matched
+unbound = resolver.resolve_json_config(root, {
+    "SINGULAR_JSON_CONFIG_FILE": default_path,
+    "SINGULAR_JSON_CONFIG_SOURCE": "default",
+})
+assert unbound.source == "selector", unbound
+unbound_view = resolver.effective_configuration(root, {
+    "SINGULAR_JSON_CONFIG_FILE": default_path,
+    "SINGULAR_JSON_CONFIG_SOURCE": "default",
+})
+assert unbound_view["configuration"]["status"] == "error", unbound_view
+assert unbound_view["configuration"]["source"] == "selector", unbound_view
+different = resolver.resolve_json_config(root, {
+    "SINGULAR_JSON_CONFIG_FILE": os.path.join(root, "other.json"),
+    "SINGULAR_JSON_CONFIG_SOURCE": "default",
+    "SINGULAR_JSON_CONFIG_DEFAULT_ROOT": root,
+    "SINGULAR_JSON_CONFIG_DEFAULT_FILE": default_path,
+})
+assert different.source == "selector", different
 PY
 
 for bad in missing.json malformed.json; do

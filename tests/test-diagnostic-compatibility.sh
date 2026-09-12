@@ -144,8 +144,9 @@ after="$(find "$repo" -path "$repo/.git" -prune -o -type f -print0 | sort -z | x
 # settings refresh. A sandbox that denies loopback bind is reported distinctly
 # as infrastructure-unavailable; on a normal host every assertion is mandatory.
 http_repo="$tmp/http-main"
-mkdir -p "$http_repo/docs/orchestration/tasks" "$http_repo/state-a/runs" \
-  "$http_repo/state-a/leases" "$http_repo/state-b/runs" "$http_repo/state-b/leases"
+mkdir -p "$http_repo/docs/orchestration" "$http_repo/tasks-a" "$http_repo/tasks-b" \
+  "$http_repo/state-a/runs/RUN-OLD" "$http_repo/state-a/leases" "$http_repo/state-a/plans" \
+  "$http_repo/state-b/runs/RUN-NEW" "$http_repo/state-b/leases" "$http_repo/state-b/plans"
 git -C "$http_repo" init -q
 git -C "$http_repo" -c user.name=test -c user.email=test@example.com \
   commit -q --allow-empty -m init
@@ -154,7 +155,19 @@ printf '%s\n' '{"schema":"singular.orchestration.dag.v0","nodes":[]}' \
 printf '%s\n' '{"schemaVersion":"v2","runner":"codex-run.sh","env":{"SINGULAR_CODEX_MODEL":"model-a"}}' \
   >"$http_repo/singular.config.json"
 printf '%s\n' 'printf "startup\n" >> "$SINGULAR_ROOT/startup-marker"' \
-  'export SINGULAR_STATE_DIR=state-a' >"$http_repo/singular.config.sh"
+  'export SINGULAR_STATE_DIR=state-a SINGULAR_TASKS_DIR=tasks-a' >"$http_repo/singular.config.sh"
+printf '%s\n' '# TASK-4101: old fixture' '' 'Status: ready' 'Area: diagnostic' \
+  >"$http_repo/tasks-a/TASK-4101.md"
+printf '%s\n' '# TASK-4202: new fixture' '' 'Status: ready' 'Area: diagnostic' \
+  >"$http_repo/tasks-b/TASK-4202.md"
+printf '%s\n' '{"schema":"singular.orchestration.run-status.v0","runId":"RUN-OLD","taskId":"TASK-4101","state":"failed","phase":"auditing","updatedAt":"2026-09-12T12:00:00Z"}' \
+  >"$http_repo/state-a/runs/RUN-OLD/run-status.json"
+printf '%s\n' '{"schema":"singular.orchestration.run-status.v0","runId":"RUN-NEW","taskId":"TASK-4202","state":"failed","phase":"auditing","updatedAt":"2026-09-12T12:00:00Z"}' \
+  >"$http_repo/state-b/runs/RUN-NEW/run-status.json"
+printf '%s\n' '{"plans":[{"id":"plan-old","name":"old fixture","archivedAt":"2026-09-12T12:00:00Z"}]}' \
+  >"$http_repo/state-a/plans/index.json"
+printf '%s\n' '{"plans":[{"id":"plan-new","name":"new fixture","archivedAt":"2026-09-12T12:00:00Z"}]}' \
+  >"$http_repo/state-b/plans/index.json"
 set +e
 PYTHONDONTWRITEBYTECODE=1 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 \
   - "$ROOT" "$http_repo" <<'PY'
@@ -214,29 +227,35 @@ try:
     warm = {route: request("GET", route) for route in routes}
     assert all(status == 200 for status, _raw, _data in warm.values()), warm
     initial = warm["/api/config"][2]["generation"]["id"]
+    assert "TASK-4101" in {row["id"] for row in warm["/api/state"][2]["l2Tasks"]}
+    assert "RUN-OLD" in {row["id"] for row in warm["/api/sessions"][2]["sessions"]}
+    assert [row["id"] for row in warm["/api/plans"][2]["plans"]] == ["plan-old"]
     (repo / "singular.config.json").write_text(json.dumps({
         "schemaVersion": "v2", "runner": "gemini-run.sh",
         "env": {"SINGULAR_CODEX_MODEL": "model-b"},
     }))
     (repo / "singular.config.sh").write_text(
         'printf "startup\\n" >> "$SINGULAR_ROOT/startup-marker"\n'
-        'export SINGULAR_STATE_DIR=state-b\n'
+        'export SINGULAR_STATE_DIR=state-b SINGULAR_TASKS_DIR=tasks-b\n'
     )
     started = time.monotonic()
     changed = {route: request("GET", route) for route in routes}
     assert time.monotonic() - started < 6.0
     assert not any(changed[route][1] == warm[route][1] for route in routes), changed
-    for route in ("/api/config", "/api/providers", "/api/lifecycle", "/api/settings"):
+    for route in ("/api/config", "/api/providers", "/api/lifecycle"):
         status, _raw, data = changed[route]
         assert status == 200, (route, status, data)
         assert data["generation"]["status"] == "changed", (route, data)
     providers = changed["/api/providers"][2]
     assert providers["activeProvider"] == "unknown" and providers["activeRunner"] is None
     assert not any(row["isDefaultRunner"] for row in providers["providers"])
-    for route in set(routes) - {"/api/config", "/api/providers", "/api/lifecycle", "/api/settings"}:
+    for route in set(routes) - {"/api/config", "/api/providers", "/api/lifecycle"}:
         status, _raw, data = changed[route]
         assert status == 409, (route, status, data)
+        assert data["configuration"]["reason"] == "configuration-changed", (route, data)
         assert data["generation"]["status"] == "changed", (route, data)
+        assert data["configuration"]["restartRequired"] is True, (route, data)
+        assert data["generation"]["restartRequired"] is True, (route, data)
 
     status, _raw, posted = request(
         "POST", "/api/settings", {"changes": {"SINGULAR_MAX_CONCURRENT": "4"}}
@@ -249,6 +268,19 @@ try:
         assert status == 200, (route, status, data)
         assert data["generation"]["id"] == replacement, (route, data)
         assert data["generation"]["status"] == "current", (route, data)
+    state = refreshed["/api/state"][2]
+    sessions = refreshed["/api/sessions"][2]
+    plans = refreshed["/api/plans"][2]
+    lifecycle = refreshed["/api/lifecycle"][2]
+    assert "TASK-4202" in {row["id"] for row in state["l2Tasks"]}
+    assert "TASK-4101" not in {row["id"] for row in state["l2Tasks"]}
+    assert "RUN-NEW" in {row["id"] for row in sessions["sessions"]}
+    assert "RUN-OLD" not in {row["id"] for row in sessions["sessions"]}
+    assert [row["id"] for row in plans["plans"]] == ["plan-new"]
+    assert lifecycle["paths"] == {
+        "tasks": str((repo / "tasks-b").resolve()),
+        "state": str((repo / "state-b").resolve()),
+    }, lifecycle
     assert (repo / "startup-marker").read_text().splitlines() == ["startup", "startup"]
 finally:
     proc.terminate()

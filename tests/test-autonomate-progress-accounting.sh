@@ -11,6 +11,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 repo="$tmp/repo"
 mkdir -p "$repo/.singular-state" "$repo/docs/orchestration/tasks"
+repo_resolved="$(cd "$repo" && pwd -P)"
 git -C "$tmp" init -q repo
 git -C "$repo" checkout -q -b target
 git -C "$repo" -c user.email=test@example.com -c user.name=test \
@@ -41,6 +42,10 @@ write_stub() {
   local imported="$1" integrated="$2" promoted="$3" generated="$4"
   cat >"$repo/reconcile-stub.sh" <<SH
 #!/usr/bin/env bash
+[[ "\${SINGULAR_JSON_CONFIG_SOURCE:-}" == "default" ]] || exit 91
+[[ "\${SINGULAR_JSON_CONFIG_FILE:-}" == "$repo_resolved/singular.config.json" ]] || exit 92
+[[ "\${SINGULAR_JSON_CONFIG_DEFAULT_ROOT:-}" == "$repo_resolved" ]] || exit 93
+[[ "\${SINGULAR_JSON_CONFIG_DEFAULT_FILE:-}" == "$repo_resolved/singular.config.json" ]] || exit 94
 echo "imported_this_run=$imported"
 echo "dispatched_this_run=1"
 echo "integrated_this_run=$integrated"
@@ -67,6 +72,20 @@ run_once() {
       return 1
     }
 }
+
+# Exercise the same absent-default boundary through the two real child
+# entrypoints used by autonomate. Provider executables remain unavailable.
+env_common bash "$ROOT/engine/campaign.sh" verify --quiet
+resource_plan="$(env_common bash "$ROOT/engine/resource-plan.sh" \
+  --configured-slots 3 --reserve-bytes 0 --estimated-worktree-bytes 1 \
+  --free-bytes 2 --json)"
+python3 - "$resource_plan" <<'PY'
+import json, sys
+plan = json.loads(sys.argv[1])
+assert plan["configuredSlots"] == 3, plan
+assert plan["effectiveSlots"] == 2, plan
+assert plan["reason"] == "disk-limited-concurrency", plan
+PY
 
 # A wake that is already pending must be consumed before the first sleep
 # chunk.  This keeps detached completion/refill notifications truly immediate.

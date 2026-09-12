@@ -218,14 +218,39 @@ def resolve_json_config(repo: Path | str, env: Mapping[str, str]) -> JsonConfigR
     selector even when each process starts in a different directory.
     """
     root = Path(repo).resolve()
+    default_path = (root / "singular.config.json").resolve()
     selected = str(env.get("SINGULAR_JSON_CONFIG_FILE", "") or "").strip()
     if selected:
         path = Path(selected).expanduser()
         if not path.is_absolute():
             path = root / path
-        source = "default" if env.get("SINGULAR_JSON_CONFIG_SOURCE") == "default" else "selector"
-        return JsonConfigResolution(path=path.resolve(), source=source)
-    return JsonConfigResolution(path=root / "singular.config.json", source="default")
+        path = path.resolve()
+
+        bound_root_raw = str(
+            env.get("SINGULAR_JSON_CONFIG_DEFAULT_ROOT", "") or ""
+        ).strip()
+        bound_file_raw = str(
+            env.get("SINGULAR_JSON_CONFIG_DEFAULT_FILE", "") or ""
+        ).strip()
+
+        def bound_path(raw: str) -> Path | None:
+            if not raw:
+                return None
+            value = Path(raw).expanduser()
+            if not value.is_absolute():
+                value = root / value
+            return value.resolve()
+
+        source = "selector"
+        if (
+            env.get("SINGULAR_JSON_CONFIG_SOURCE") == "default"
+            and bound_path(bound_root_raw) == root
+            and bound_path(bound_file_raw) == default_path
+            and path == default_path
+        ):
+            source = "default"
+        return JsonConfigResolution(path=path, source=source)
+    return JsonConfigResolution(path=default_path, source="default")
 
 
 def load_json_config(

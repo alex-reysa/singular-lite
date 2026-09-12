@@ -10,6 +10,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: missing [$2] in [$1]"; }
 
 tmp="$(mktemp -d)"
+tmp_resolved="$(cd "$tmp" && pwd -P)"
 canary="$tmp/CANARY"
 cat > "$tmp/singular.config.json" <<EOF
 {
@@ -103,6 +104,7 @@ assert_contains "$missing_out" "selected JSON configuration is missing:" \
 
 absent="$tmp/absent-default"
 mkdir -p "$absent"
+absent_resolved="$(cd "$absent" && pwd -P)"
 SINGULAR_ROOT="$absent" /opt/homebrew/bin/bash -c \
   'source "$1/lib.sh"; singular_effective_configuration_json' _ "$SCRIPT_DIR" \
   >"$tmp/absent.json"
@@ -112,6 +114,127 @@ view = json.load(open(sys.argv[1], encoding="utf-8"))
 assert view["configuration"]["status"] == "absent", view
 assert view["configuration"]["source"] == "default", view
 PY
+
+# Default provenance is a bound handoff, not a basename heuristic. It survives
+# same-root re-entry even when the path is equivalently spelled, while a fresh
+# explicit selection of that same default-named path remains strict.
+reentry="$(SINGULAR_ROOT="$tmp" bash -c '
+  source "$1/lib.sh"
+  SINGULAR_JSON_CONFIG_FILE="$SINGULAR_ROOT/./singular.config.json"
+  source "$1/lib.sh"
+  printf "%s|%s\n" "$SINGULAR_JSON_CONFIG_SOURCE" "$SINGULAR_JSON_CONFIG_FILE"
+' _ "$SCRIPT_DIR")"
+[[ "$reentry" == "default|$tmp_resolved/singular.config.json" ]] \
+  || fail "present default provenance did not survive normalized re-entry: $reentry"
+
+absent_reentry="$(SINGULAR_ROOT="$absent" bash -c '
+  source "$1/lib.sh"
+  source "$1/lib.sh"
+  printf "%s|%s\n" "$SINGULAR_JSON_CONFIG_SOURCE" "$SINGULAR_JSON_CONFIG_FILE"
+' _ "$SCRIPT_DIR")"
+[[ "$absent_reentry" == "default|$absent_resolved/singular.config.json" ]] \
+  || fail "absent default provenance did not survive re-entry: $absent_reentry"
+
+set +e
+explicit_default_out="$(SINGULAR_ROOT="$absent" \
+  SINGULAR_JSON_CONFIG_FILE="$absent/singular.config.json" \
+  bash -c 'source "$1/lib.sh"' _ "$SCRIPT_DIR" 2>&1)"
+explicit_default_rc=$?
+set -e
+[[ "$explicit_default_rc" -eq 2 ]] \
+  || fail "explicit default-named missing JSON exited $explicit_default_rc, expected 2"
+assert_contains "$explicit_default_out" "selected JSON configuration is missing:" \
+  "explicit default-named missing JSON diagnostic"
+
+# A complete normalized binding is recognized; SOURCE=default alone never
+# exempts an arbitrary selection from strict missing-input handling.
+normalized="$(SINGULAR_ROOT="$tmp" SINGULAR_JSON_CONFIG_FILE=./singular.config.json \
+  SINGULAR_JSON_CONFIG_SOURCE=default SINGULAR_JSON_CONFIG_DEFAULT_ROOT=. \
+  SINGULAR_JSON_CONFIG_DEFAULT_FILE=./singular.config.json bash -c '
+    source "$1/lib.sh"
+    printf "%s|%s\n" "$SINGULAR_JSON_CONFIG_SOURCE" "$SINGULAR_JSON_CONFIG_FILE"
+  ' _ "$SCRIPT_DIR")"
+[[ "$normalized" == "default|$tmp_resolved/singular.config.json" ]] \
+  || fail "normalized default binding was not recognized: $normalized"
+
+set +e
+arbitrary_out="$(SINGULAR_ROOT="$absent" SINGULAR_JSON_CONFIG_FILE=other.json \
+  SINGULAR_JSON_CONFIG_SOURCE=default bash -c 'source "$1/lib.sh"' \
+  _ "$SCRIPT_DIR" 2>&1)"
+arbitrary_rc=$?
+set -e
+[[ "$arbitrary_rc" -eq 2 ]] \
+  || fail "unbound SOURCE=default bypassed strict selection (rc=$arbitrary_rc)"
+assert_contains "$arbitrary_out" "$absent_resolved/other.json" \
+  "unbound SOURCE=default selected path diagnostic"
+
+# The engine handoff spans two generations of child processes. Shell/local
+# layers must be re-applied at the consumer root on every level.
+mkdir -p "$absent/shell-state"
+printf '%s\n' \
+  "export SINGULAR_STATE_DIR='shell-state' SINGULAR_CODEX_MODEL='shell-model'" \
+  >"$absent/singular.config.sh"
+printf '%s\n' "export SINGULAR_TASKS_DIR='local-tasks'" \
+  >"$absent/shell-state/config.local.sh"
+cat >"$tmp/provenance-handoff.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+level="$1"
+lib="$2"
+source "$lib"
+printf '%s|%s|%s|%s|%s\n' "$level" "$SINGULAR_JSON_CONFIG_SOURCE" \
+  "$SINGULAR_JSON_CONFIG_FILE" "$SINGULAR_STATE_DIR" "$SINGULAR_TASKS_DIR"
+if [[ "$level" -lt 3 ]]; then
+  export SINGULAR_ROOT SINGULAR_JSON_CONFIG_FILE SINGULAR_JSON_CONFIG_SOURCE \
+    SINGULAR_JSON_CONFIG_DEFAULT_ROOT SINGULAR_JSON_CONFIG_DEFAULT_FILE \
+    PROVENANCE_BASH
+  "$PROVENANCE_BASH" "$0" "$((level + 1))" "$lib"
+fi
+SH
+chmod +x "$tmp/provenance-handoff.sh"
+handoff="$(SINGULAR_ROOT="$absent" PROVENANCE_BASH="${BASH:-/bin/bash}" \
+  "${BASH:-/bin/bash}" "$tmp/provenance-handoff.sh" 1 "$SCRIPT_DIR/lib.sh")"
+for level in 1 2 3; do
+  assert_contains "$handoff" \
+    "$level|default|$absent_resolved/singular.config.json|$absent/shell-state|$absent/local-tasks" \
+    "default provenance child level $level"
+done
+present_handoff="$(SINGULAR_ROOT="$tmp" PROVENANCE_BASH="${BASH:-/bin/bash}" \
+  "${BASH:-/bin/bash}" "$tmp/provenance-handoff.sh" 1 "$SCRIPT_DIR/lib.sh")"
+for level in 1 2 3; do
+  assert_contains "$present_handoff" \
+    "$level|default|$tmp_resolved/singular.config.json|" \
+    "present default provenance child level $level"
+done
+
+# Re-entry with a genuinely new selector stays a selector. Stale binding from
+# another root also cannot turn a newly default-named missing path into optional.
+printf '%s\n' '{"targetBranch":"other"}' >"$tmp/other.json"
+new_selector="$(SINGULAR_ROOT="$tmp" bash -c '
+  source "$1/lib.sh"
+  SINGULAR_JSON_CONFIG_FILE=other.json
+  source "$1/lib.sh"
+  printf "%s|%s|%s\n" "$SINGULAR_JSON_CONFIG_SOURCE" \
+    "$SINGULAR_JSON_CONFIG_FILE" "$SINGULAR_TARGET_BRANCH"
+' _ "$SCRIPT_DIR")"
+[[ "$new_selector" == "selector|$tmp_resolved/other.json|other" ]] \
+  || fail "new selector inherited default provenance: $new_selector"
+
+stale="$tmp/stale-root"
+mkdir -p "$stale"
+stale_resolved="$(cd "$stale" && pwd -P)"
+set +e
+stale_out="$(SINGULAR_ROOT="$tmp" STALE_ROOT="$stale" bash -c '
+  source "$1/lib.sh"
+  SINGULAR_ROOT="$STALE_ROOT"
+  SINGULAR_JSON_CONFIG_FILE="$STALE_ROOT/singular.config.json"
+  source "$1/lib.sh"
+' _ "$SCRIPT_DIR" 2>&1)"
+stale_rc=$?
+set -e
+[[ "$stale_rc" -eq 2 ]] || fail "stale provenance exited $stale_rc, expected 2"
+assert_contains "$stale_out" "$stale_resolved/singular.config.json" \
+  "stale provenance/new-root strict diagnostic"
 
 # Keep lib.sh's native errexit behavior observable by callers: ordinary false
 # and explicit exit in either trusted shell layer are startup failures.

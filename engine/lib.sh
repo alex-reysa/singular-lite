@@ -131,13 +131,65 @@ singular_normalize_consumer_path_var() {
   [[ -z "$value" || "$value" == /* ]] || printf -v "$key" '%s/%s' "$SINGULAR_ROOT" "$value"
 }
 
-if [[ -n "${SINGULAR_JSON_CONFIG_FILE:-}" ]]; then
-  SINGULAR_JSON_CONFIG_SOURCE="selector"
+# Resolve a path whose parent exists without requiring platform-specific
+# realpath flags. JSON selectors may themselves be absent, but their parent is
+# enough to normalize the default path and ordinary relative selectors.
+singular_normalize_config_path_var() {
+  local key="$1" value parent leaf normalized_parent
+  value="${!key:-}"
+  [[ -n "$value" ]] || return 0
+  [[ "$value" == /* ]] || value="$SINGULAR_ROOT/$value"
+  parent="${value%/*}"
+  leaf="${value##*/}"
+  [[ "$parent" != "$value" ]] || parent="/"
+  if [[ -d "$parent" ]]; then
+    normalized_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || normalized_parent=""
+    if [[ -n "$normalized_parent" ]]; then
+      [[ "$normalized_parent" == "/" ]] \
+        && value="/$leaf" \
+        || value="$normalized_parent/$leaf"
+    fi
+  fi
+  printf -v "$key" '%s' "$value"
+}
+
+_singular_json_default_root="$(cd "$SINGULAR_ROOT" 2>/dev/null && pwd -P)" \
+  || _singular_json_default_root="$SINGULAR_ROOT"
+[[ "$_singular_json_default_root" == "/" ]] \
+  && _singular_json_default_file="/singular.config.json" \
+  || _singular_json_default_file="$_singular_json_default_root/singular.config.json"
+_singular_incoming_json_config_file="${SINGULAR_JSON_CONFIG_FILE:-}"
+_singular_incoming_json_config_source="${SINGULAR_JSON_CONFIG_SOURCE:-}"
+_singular_incoming_json_default_root="${SINGULAR_JSON_CONFIG_DEFAULT_ROOT:-}"
+_singular_incoming_json_default_file="${SINGULAR_JSON_CONFIG_DEFAULT_FILE:-}"
+
+if [[ -n "$_singular_incoming_json_config_file" ]]; then
+  SINGULAR_JSON_CONFIG_FILE="$_singular_incoming_json_config_file"
+  singular_normalize_config_path_var SINGULAR_JSON_CONFIG_FILE
+  singular_normalize_config_path_var _singular_incoming_json_default_file
+  if [[ -n "$_singular_incoming_json_default_root" \
+      && "$_singular_incoming_json_default_root" != /* ]]; then
+    _singular_incoming_json_default_root="$SINGULAR_ROOT/$_singular_incoming_json_default_root"
+  fi
+  if [[ -n "$_singular_incoming_json_default_root" \
+      && -d "$_singular_incoming_json_default_root" ]]; then
+    _singular_incoming_json_default_root="$(cd "$_singular_incoming_json_default_root" 2>/dev/null && pwd -P)" \
+      || _singular_incoming_json_default_root=""
+  fi
+  if [[ "$_singular_incoming_json_config_source" == "default" \
+      && "$_singular_incoming_json_default_root" == "$_singular_json_default_root" \
+      && "$_singular_incoming_json_default_file" == "$_singular_json_default_file" \
+      && "$SINGULAR_JSON_CONFIG_FILE" == "$_singular_json_default_file" ]]; then
+    SINGULAR_JSON_CONFIG_SOURCE="default"
+  else
+    SINGULAR_JSON_CONFIG_SOURCE="selector"
+  fi
 else
+  SINGULAR_JSON_CONFIG_FILE="$_singular_json_default_file"
   SINGULAR_JSON_CONFIG_SOURCE="default"
 fi
-SINGULAR_JSON_CONFIG_FILE="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
-singular_normalize_consumer_path_var SINGULAR_JSON_CONFIG_FILE
+SINGULAR_JSON_CONFIG_DEFAULT_ROOT="$_singular_json_default_root"
+SINGULAR_JSON_CONFIG_DEFAULT_FILE="$_singular_json_default_file"
 _singular_selected_json_config_file="$SINGULAR_JSON_CONFIG_FILE"
 _singular_selected_json_config_source="$SINGULAR_JSON_CONFIG_SOURCE"
 if [[ "$SINGULAR_JSON_CONFIG_SOURCE" == "selector" && ! -f "$SINGULAR_JSON_CONFIG_FILE" ]]; then
@@ -163,6 +215,13 @@ if [[ -f "$SINGULAR_LOCAL_CONFIG_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$SINGULAR_LOCAL_CONFIG_FILE"
 fi
+# These four values describe the input selected before any configuration layer
+# ran. A JSON env{} block or shell layer cannot rewrite its own provenance for a
+# descendant process.
+SINGULAR_JSON_CONFIG_FILE="$_singular_selected_json_config_file"
+SINGULAR_JSON_CONFIG_SOURCE="$_singular_selected_json_config_source"
+SINGULAR_JSON_CONFIG_DEFAULT_ROOT="$_singular_json_default_root"
+SINGULAR_JSON_CONFIG_DEFAULT_FILE="$_singular_json_default_file"
 for _singular_path_var in SINGULAR_STATE_DIR SINGULAR_TASKS_DIR SINGULAR_ORCH_DIR; do
   singular_normalize_consumer_path_var "$_singular_path_var"
 done
@@ -268,6 +327,7 @@ singular_effective_configuration_json() {
   local key python_bin
   for key in \
     SINGULAR_ENGINE_HOME SINGULAR_JSON_CONFIG_FILE SINGULAR_JSON_CONFIG_SOURCE \
+    SINGULAR_JSON_CONFIG_DEFAULT_ROOT SINGULAR_JSON_CONFIG_DEFAULT_FILE \
     SINGULAR_CONFIG_FILE SINGULAR_LOCAL_CONFIG_FILE \
     SINGULAR_RUNNER SINGULAR_TARGET_BRANCH \
     SINGULAR_TASKS_DIR SINGULAR_STATE_DIR SINGULAR_AREA_PATHS \
@@ -297,6 +357,8 @@ singular_effective_configuration_json() {
   python_bin="${1:-python3}"
   SINGULAR_JSON_CONFIG_FILE="$_singular_selected_json_config_file" \
   SINGULAR_JSON_CONFIG_SOURCE="$_singular_selected_json_config_source" \
+  SINGULAR_JSON_CONFIG_DEFAULT_ROOT="$SINGULAR_JSON_CONFIG_DEFAULT_ROOT" \
+  SINGULAR_JSON_CONFIG_DEFAULT_FILE="$SINGULAR_JSON_CONFIG_DEFAULT_FILE" \
   PYTHONDONTWRITEBYTECODE=1 "$python_bin" "$SINGULAR_LIB_DIR/provider_resolver.py" \
     effective-config --repo "$SINGULAR_ROOT" --environment-effective
 }

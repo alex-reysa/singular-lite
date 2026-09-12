@@ -3799,6 +3799,41 @@ class ProvidersRouteTests(unittest.TestCase):
         self.assertEqual(data["configuration"]["reason"], "configuration-changed")
 
     def test_warmed_http_routes_share_invalidation_and_refresh_generation(self) -> None:
+        fixtures = (
+            ("old", "TASK-4101", "RUN-OLD", "plan-old"),
+            ("new", "TASK-4202", "RUN-NEW", "plan-new"),
+        )
+        for label, task_id, run_id, plan_id in fixtures:
+            tasks = self.repo / f"tasks-{label}"
+            state = self.repo / f"state-{label}"
+            tasks.mkdir()
+            (state / "runs" / run_id).mkdir(parents=True)
+            (state / "leases").mkdir()
+            (state / "plans").mkdir()
+            (tasks / f"{task_id}.md").write_text(
+                f"# {task_id}: {label} fixture\n\nStatus: ready\nArea: diagnostic\n"
+            )
+            (state / "runs" / run_id / "run-status.json").write_text(json.dumps({
+                "schema": "singular.orchestration.run-status.v0",
+                "runId": run_id, "taskId": task_id, "state": "failed",
+                "phase": "auditing", "updatedAt": "2026-09-12T12:00:00Z",
+            }))
+            (state / "plans" / "index.json").write_text(json.dumps({
+                "plans": [{"id": plan_id, "name": f"{label} fixture",
+                           "archivedAt": "2026-09-12T12:00:00Z"}]
+            }))
+        (self.repo / "singular.config.json").write_text(json.dumps({
+            "runner": "codex-run.sh",
+            "env": {"SINGULAR_TASKS_DIR": "tasks-old",
+                    "SINGULAR_STATE_DIR": "state-old"},
+        }))
+        srv.initialize_configuration(self.repo, force=True)
+        for cache in (
+            srv._PROVIDERS_CACHE, srv._CONFIG_CACHE, srv._OVERVIEW_CACHE,
+            srv._HOME_CACHE, srv._DAG_VIEW_CACHE, srv._TIMELINE_CACHE,
+            srv._PLANS_CACHE, srv.SNAPSHOT_CACHE, srv.SESSIONS_CACHE,
+        ):
+            cache.invalidate()
         routes = (
             "/api/config", "/api/providers", "/api/overview", "/api/home",
             "/api/dag", "/api/timeline", "/api/lifecycle", "/api/settings",
@@ -3807,12 +3842,18 @@ class ProvidersRouteTests(unittest.TestCase):
         warm = {route: self._req("GET", route) for route in routes}
         self.assertTrue(all(status == 200 for status, _ in warm.values()))
         initial = warm["/api/config"][1]["generation"]["id"]
+        self.assertIn("TASK-4101", {row["id"] for row in warm["/api/state"][1]["l2Tasks"]})
+        self.assertIn("RUN-OLD", {row["id"] for row in warm["/api/sessions"][1]["sessions"]})
+        self.assertEqual(["plan-old"], [row["id"] for row in warm["/api/plans"][1]["plans"]])
 
         (self.repo / "singular.config.json").write_text(json.dumps({
-            "runner": "gemini-run.sh", "env": {"SINGULAR_MAX_CONCURRENT": "2"}
+            "runner": "gemini-run.sh",
+            "env": {"SINGULAR_MAX_CONCURRENT": "2",
+                    "SINGULAR_TASKS_DIR": "tasks-new",
+                    "SINGULAR_STATE_DIR": "state-new"},
         }))
         changed = {route: self._req("GET", route) for route in routes}
-        for route in ("/api/config", "/api/providers", "/api/lifecycle", "/api/settings"):
+        for route in ("/api/config", "/api/providers", "/api/lifecycle"):
             self.assertEqual(changed[route][0], 200, route)
             self.assertEqual(changed[route][1]["generation"]["status"], "changed", route)
             self.assertNotEqual(changed[route], warm[route], route)
@@ -3822,7 +3863,7 @@ class ProvidersRouteTests(unittest.TestCase):
         self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
         for route in (
             "/api/overview", "/api/home", "/api/dag", "/api/timeline",
-            "/api/state", "/api/sessions", "/api/plans",
+            "/api/settings", "/api/state", "/api/sessions", "/api/plans",
         ):
             self.assertEqual(changed[route][0], 409, route)
             self.assertEqual(
@@ -3831,6 +3872,8 @@ class ProvidersRouteTests(unittest.TestCase):
                 route,
             )
             self.assertEqual(changed[route][1]["generation"]["status"], "changed", route)
+            self.assertTrue(changed[route][1]["generation"]["restartRequired"], route)
+            self.assertTrue(changed[route][1]["configuration"]["restartRequired"], route)
             self.assertNotEqual(changed[route], warm[route], route)
 
         status, response = self._req(
@@ -3845,6 +3888,17 @@ class ProvidersRouteTests(unittest.TestCase):
             self.assertEqual(route_status, 200, route)
             self.assertEqual(data["generation"]["id"], replacement, route)
             self.assertEqual(data["generation"]["status"], "current", route)
+        state = refreshed["/api/state"][1]
+        sessions = refreshed["/api/sessions"][1]
+        plans = refreshed["/api/plans"][1]
+        lifecycle = refreshed["/api/lifecycle"][1]
+        self.assertIn("TASK-4202", {row["id"] for row in state["l2Tasks"]})
+        self.assertNotIn("TASK-4101", {row["id"] for row in state["l2Tasks"]})
+        self.assertIn("RUN-NEW", {row["id"] for row in sessions["sessions"]})
+        self.assertNotIn("RUN-OLD", {row["id"] for row in sessions["sessions"]})
+        self.assertEqual(["plan-new"], [row["id"] for row in plans["plans"]])
+        self.assertEqual(str((self.repo / "tasks-new").resolve()), lifecycle["paths"]["tasks"])
+        self.assertEqual(str((self.repo / "state-new").resolve()), lifecycle["paths"]["state"])
 
     def test_http_reads_share_generation_past_former_ttls_and_concurrently(self) -> None:
         def forbidden(_root):
