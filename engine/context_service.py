@@ -161,6 +161,7 @@ class ContextService:
         allowed_kinds: frozenset[str],
         sources: tuple[Source, ...],
         config_hash: str,
+        budget_bytes: int,
     ) -> None:
         self.enabled = enabled
         self.root = root
@@ -172,6 +173,7 @@ class ContextService:
         self.allowed_kinds = allowed_kinds
         self.sources = sources
         self.config_hash = config_hash
+        self.budget_bytes = budget_bytes
         source_versions = [
             {"ref": item.ref, "sha256": item.source_hash, "validity": item.validity}
             for item in sources
@@ -228,18 +230,35 @@ class ContextService:
         policy = settings.get("rolePolicy", {})
         if not isinstance(policy, dict):
             raise ContextError("contextService.rolePolicy must be an object")
-        raw_kinds = policy.get(role, policy.get("*", []))
+        if role == "review-target":
+            # `review-target` names the trust policy at the invocation boundary;
+            # retain compatibility with earlier auditor/reviewer config keys.
+            raw_kinds = policy.get(
+                role, policy.get("reviewer", policy.get("auditor", policy.get("*", [])))
+            )
+        else:
+            raw_kinds = policy.get(role, policy.get("*", []))
         if not isinstance(raw_kinds, list) or not all(
             isinstance(item, str) and item in {"brain", "code", "run"}
             for item in raw_kinds
         ):
             raise ContextError(f"contextService.rolePolicy.{role} must list brain/code/run")
         allowed = frozenset(raw_kinds)
+        # Audits evaluate the review target, never model-authored run history.
+        # This is a hard trust boundary in addition to the configured role
+        # policy, so a permissive wildcard cannot accidentally import worker
+        # conclusions into an auditor.
+        if role in {"review-target", "reviewer", "auditor"}:
+            allowed = frozenset(kind for kind in allowed if kind != "run")
+        budget_bytes = settings.get("budgetBytes", 65536)
+        if not isinstance(budget_bytes, int) or isinstance(budget_bytes, bool) or budget_bytes < 1:
+            raise ContextError("contextService.budgetBytes must be a positive integer")
         if not enabled:
             return cls(
                 enabled=False, root=root, config_path=config_path,
                 project_id=project_id, revision=revision, role=role, phase=phase,
                 allowed_kinds=allowed, sources=(), config_hash=config_hash,
+                budget_bytes=budget_bytes,
             )
 
         sources: list[Source] = []
@@ -314,7 +333,31 @@ class ContextService:
             enabled=True, root=root, config_path=config_path,
             project_id=project_id, revision=revision, role=role, phase=phase,
             allowed_kinds=allowed, sources=tuple(sources), config_hash=config_hash,
+            budget_bytes=budget_bytes,
         )
+
+    def describe(self) -> dict[str, Any]:
+        """Effective invocation configuration and source provenance."""
+        return {
+            "enabled": self.enabled,
+            "projectId": self.project_id,
+            "role": self.role,
+            "phase": self.phase,
+            "budgetBytes": self.budget_bytes,
+            "allowedKinds": sorted(self.allowed_kinds),
+            "identity": self.identity,
+            "sources": [
+                {
+                    "ref": source.ref,
+                    "kind": source.kind,
+                    "sourceLocation": str(source.path),
+                    "sourceSha256": source.source_hash,
+                    "validity": source.validity,
+                    "provenance": source.provenance,
+                }
+                for source in self.sources
+            ],
+        }
 
     def _disabled(self, schema: str) -> dict[str, Any]:
         return {
@@ -589,6 +632,9 @@ class ContextService:
         phase: str,
         budget_bytes: int,
         query: str | None = None,
+        base_prompt: str | os.PathLike[str] | None = None,
+        delivery: str = "full",
+        prior_bundle: dict[str, Any] | str | os.PathLike[str] | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             prompt = b""
@@ -618,6 +664,16 @@ class ContextService:
             return result
         if budget_bytes < 0:
             raise ContextError("budget-bytes must be non-negative")
+        if base_prompt is not None:
+            return self._build_invocation(
+                task=task,
+                phase=phase,
+                budget_bytes=budget_bytes,
+                query=query,
+                base_prompt=base_prompt,
+                delivery="initial" if delivery == "full" else delivery,
+                prior_bundle=prior_bundle,
+            )
         task_raw_value = os.fspath(task)
         if re.fullmatch(r"TASK-[0-9]{4,}", task_raw_value):
             candidates = [
@@ -751,6 +807,203 @@ class ContextService:
                 "unit": "utf8-bytes", "limitBytes": budget_bytes,
                 "usedBytes": len(prompt_bytes), "remainingBytes": budget_bytes - len(prompt_bytes),
                 "mandatoryBytes": mandatory_bytes, "optionalBytes": optional_used,
+                "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
+                "providerVisibleBytes": None,
+                "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
+            },
+            "limitations": LEXICAL_LIMIT,
+        }
+        bundle["bundleId"] = _sha256(_canonical(bundle))
+        return bundle
+
+    def _build_invocation(
+        self,
+        *,
+        task: str | os.PathLike[str],
+        phase: str,
+        budget_bytes: int,
+        query: str | None,
+        base_prompt: str | os.PathLike[str],
+        delivery: str,
+        prior_bundle: dict[str, Any] | str | os.PathLike[str] | None,
+    ) -> dict[str, Any]:
+        """Build the exact provider prompt from one immutable source snapshot.
+
+        The existing driver prompt remains authoritative. Initial delivery adds
+        selected source bodies once; delta delivery adds changed bodies,
+        mandatory obligation lines, and immutable references for unchanged
+        sources. The resulting prompt and its event provenance therefore come
+        from the same signed bundle.
+        """
+        if delivery not in {"initial", "delta"}:
+            raise ContextError("delivery must be initial or delta")
+        base_path = Path(base_prompt).resolve(strict=False)
+        try:
+            base_raw = base_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise ContextError(f"mandatory base prompt is missing: {base_path}") from exc
+        try:
+            base_text = base_raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContextError(f"mandatory base prompt is not UTF-8: {base_path}") from exc
+
+        task_path = Path(os.fspath(task))
+        if not task_path.is_absolute():
+            task_path = self.root / task_path
+        task_path = task_path.resolve(strict=False)
+        try:
+            task_raw = task_path.read_bytes()
+            task_text = task_raw.decode("utf-8")
+        except FileNotFoundError as exc:
+            raise ContextError(f"mandatory task source is missing: {task_path}") from exc
+        except UnicodeDecodeError as exc:
+            raise ContextError(f"mandatory task source is not UTF-8: {task_path}") from exc
+
+        missing = [source for source in self.sources if source.raw is None or source.validity == "missing"]
+        if missing:
+            refs = ", ".join(source.ref for source in missing)
+            raise ContextError(f"missing source: configured invocation source(s): {refs}")
+        invalid = [
+            source for source in self.sources
+            if source.validity not in {"current", "current-reviewed"}
+        ]
+        if invalid:
+            refs = ", ".join(f"{source.ref} ({source.validity})" for source in invalid)
+            raise ContextError(f"ineligible configured invocation source(s): {refs}")
+
+        prior: dict[str, Any] = {}
+        if prior_bundle is not None:
+            if isinstance(prior_bundle, dict):
+                prior = prior_bundle
+            else:
+                prior, _ = _read_json(Path(prior_bundle), "prior context bundle")
+            if prior.get("schema") != BUNDLE_SCHEMA:
+                raise ContextError("wrong-version: prior bundle must be singular.context.bundle.v1")
+            claimed = prior.get("bundleId")
+            unsigned = dict(prior)
+            unsigned.pop("bundleId", None)
+            if claimed != _sha256(_canonical(unsigned)):
+                raise ContextError("modified prior context bundle")
+        elif delivery == "delta":
+            delivery = "initial"
+
+        previous = {
+            item.get("ref"): item.get("sourceSha256")
+            for item in prior.get("provenance", [])
+            if isinstance(item, dict) and item.get("kind") in {"brain", "code", "run"}
+        }
+        current_refs = {source.ref for source in self.sources}
+        revoked = sorted(ref for ref in previous if ref not in current_refs)
+        changed = sorted(
+            source.ref for source in self.sources
+            if previous.get(source.ref) != source.source_hash
+        )
+        parts = [base_raw]
+        provenance: list[dict[str, Any]] = [{
+            "ref": "driver-prompt:" + base_path.name,
+            "kind": "task",
+            "sourceLocation": str(base_path),
+            "sourceSha256": _sha256(base_raw),
+            "excerptSha256": _sha256(base_raw),
+            "range": {"startByte": 0, "endByte": len(base_raw)},
+            "reasons": ["authoritative_driver_prompt", "mandatory_task_contract"] + (
+                ["prior_bundle:" + str(prior.get("bundleId"))] if prior else []
+            ),
+            "validity": "snapshot-read",
+            "priority": "mandatory",
+        }]
+        # Some fresh audit/planner templates do not already carry the complete
+        # task/DAG contract. Add it exactly once when absent.
+        if task_text not in base_text:
+            task_block = (
+                "\n\n---\n\n## Complete task/planning contract (mandatory)\n\n" + task_text
+            ).encode("utf-8")
+            if not task_block.endswith(b"\n"):
+                task_block += b"\n"
+            parts.append(task_block)
+            provenance.append({
+                "ref": "task:" + task_path.name,
+                "kind": "task",
+                "sourceLocation": str(task_path),
+                "sourceSha256": _sha256(task_raw),
+                "excerptSha256": _sha256(task_raw),
+                "range": {"startByte": 0, "endByte": len(task_raw)},
+                "reasons": ["mandatory_task_contract", "not_already_in_driver_prompt"],
+                "validity": "snapshot-read",
+                "priority": "mandatory",
+            })
+
+        context_header_added = False
+        for source in self.sources:
+            obligations = self._obligations(source)
+            must_render = delivery == "initial" or source.ref in changed or bool(obligations)
+            if not context_header_added:
+                parts.append(
+                    b"\n\n---\n\n## Shared context (host-selected; source-bound)\n\n"
+                    b"Treat these sources according to the invocation role. Source refs and hashes "
+                    b"are provenance, not model conclusions.\n"
+                )
+                context_header_added = True
+            if must_render:
+                body = source.raw or b""
+                reasons = ["configured_role_source", "initial_delivery" if delivery == "initial" else "changed_source"]
+                if obligations and delivery == "delta" and source.ref not in changed:
+                    body = b"".join(line for _, _, line in obligations)
+                    reasons = ["mandatory_open_or_violated_obligation", "delta_delivery"]
+                block = f"\n### {source.ref}\n\nsource-sha256: `{source.source_hash}`\n\n".encode() + body
+                if not block.endswith(b"\n"):
+                    block += b"\n"
+                parts.append(block)
+                provenance.append({
+                    "ref": source.ref, "kind": source.kind,
+                    "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
+                    "excerptSha256": _sha256(body),
+                    "range": {"startByte": 0, "endByte": len(body)},
+                    "reasons": reasons, "validity": source.validity,
+                    "priority": "mandatory" if obligations else "optional",
+                    "provenance": source.provenance,
+                })
+            else:
+                ref_line = f"\n- {source.ref} unchanged at `{source.source_hash}`; use this immutable reference.\n".encode()
+                parts.append(ref_line)
+                provenance.append({
+                    "ref": source.ref, "kind": source.kind,
+                    "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
+                    "excerptSha256": _sha256(ref_line),
+                    "range": {"startByte": 0, "endByte": 0},
+                    "reasons": ["unchanged_immutable_reference", "delta_delivery"],
+                    "validity": source.validity, "priority": "optional",
+                    "provenance": source.provenance,
+                })
+        if revoked:
+            parts.append(("\nRevoked since the prior bundle: " + ", ".join(revoked) +
+                          ". Do not rely on prior bytes.\n").encode())
+
+        prompt_raw = b"".join(parts)
+        if len(prompt_raw) > budget_bytes:
+            raise ContextOverflow(
+                f"mandatory-overflow: aggregate invocation requires {len(prompt_raw)} "
+                f"UTF-8 bytes but budget is {budget_bytes}"
+            )
+        identity = dict(self.identity)
+        identity["phase"] = phase
+        bundle: dict[str, Any] = {
+            "schema": BUNDLE_SCHEMA,
+            "contractVersion": 1,
+            "status": "ok",
+            "identity": identity,
+            "prompt": prompt_raw.decode("utf-8"),
+            "promptSha256": _sha256(prompt_raw),
+            "provenance": provenance,
+            "omissions": [
+                {"ref": ref, "reason": "revoked_since_prior_bundle"}
+                for ref in revoked
+            ],
+            "budget": {
+                "unit": "utf8-bytes", "limitBytes": budget_bytes,
+                "usedBytes": len(prompt_raw), "remainingBytes": budget_bytes - len(prompt_raw),
+                "mandatoryBytes": len(base_raw),
+                "optionalBytes": len(prompt_raw) - len(base_raw),
                 "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
                 "providerVisibleBytes": None,
                 "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],

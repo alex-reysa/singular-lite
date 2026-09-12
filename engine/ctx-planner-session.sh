@@ -65,6 +65,16 @@ singular_ctx_planner_session_transcript_path() {
   printf '%s/sessions/planner/%s.log' "$state_dir" "$node"
 }
 
+# Last immutable context bundle delivered to this node's planner session. It is
+# separate from model transcript state and contains only bounded host-selected
+# prompt/provenance data, allowing resumed planners to receive deltas.
+singular_ctx_planner_context_path() {
+  local node="$1"
+  [[ -n "$node" ]] || { printf '%s' ""; return 0; }
+  local state_dir="${SINGULAR_STATE_DIR:-$SINGULAR_ROOT/.singular-state}"
+  printf '%s/sessions/planner/%s.context-bundle.json' "$state_dir" "$node"
+}
+
 # Guarded finalize wrapper. No-op unless the knob is ON and the planner run
 # exited successfully (rc 0). Delegates the session-meta.v0 shape to the shared
 # singular_session_meta_finalize (role "planner"), then adds the additive optional

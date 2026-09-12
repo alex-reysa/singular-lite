@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -43,6 +44,10 @@ def _commands() -> argparse.ArgumentParser:
     build.add_argument("--budget-bytes", required=True, type=int)
     build.add_argument("--query")
     build.add_argument("--output")
+    build.add_argument("--base-prompt")
+    build.add_argument("--prompt-output")
+    build.add_argument("--prior-bundle")
+    build.add_argument("--delivery", choices=("full", "initial", "delta"), default="full")
 
     search = subparsers.add_parser("search", help="exact-reference and lexical search")
     common(search)
@@ -63,7 +68,34 @@ def _commands() -> argparse.ArgumentParser:
     explain = subparsers.add_parser("explain", help="verify and explain a retained bundle")
     common(explain)
     explain.add_argument("--bundle", required=True)
+
+    effective = subparsers.add_parser(
+        "effective-config", help="show effective context invocation policy and provenance"
+    )
+    common(effective)
     return parser
+
+
+def _publish_prompt(prompt: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=".context-prompt.", suffix=".tmp",
+            dir=destination.parent, delete=False,
+        ) as handle:
+            temporary = handle.name
+            handle.write(prompt)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
 
 def _config(args: argparse.Namespace, repo_root: Path, cwd: Path) -> Path:
@@ -103,15 +135,30 @@ def main(argv: list[str] | None = None) -> int:
                 max_bytes=args.max_bytes, cursor=args.cursor,
             )
         elif args.command == "build":
+            prior = args.prior_bundle if args.prior_bundle else None
             result = service.build(
                 task=args.task, phase=args.phase or "unspecified",
                 budget_bytes=args.budget_bytes, query=args.query,
+                base_prompt=args.base_prompt,
+                delivery=args.delivery,
+                prior_bundle=prior,
             )
             if args.output and service.enabled:
                 output = Path(args.output)
                 if not output.is_absolute():
                     output = cwd / output
                 publish_bundle(result, output)
+            if args.prompt_output and service.enabled:
+                prompt_output = Path(args.prompt_output)
+                if not prompt_output.is_absolute():
+                    prompt_output = cwd / prompt_output
+                _publish_prompt(result["prompt"], prompt_output)
+        elif args.command == "effective-config":
+            result = {
+                "schema": "singular.context.effective-configuration.v1",
+                "status": "ok" if service.enabled else "disabled",
+                "contextService": service.describe(),
+            }
         else:
             result = service.explain(args.bundle)
         json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

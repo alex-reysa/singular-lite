@@ -527,12 +527,13 @@ Python dependency. Enable it in the effective `singular.config.json`:
   "contextService": {
     "enabled": true,
     "projectId": "my-project",
+    "budgetBytes": 65536,
     "codePaths": ["engine/example.py"],
     "runRecordPaths": [".singular-state/runs/RUN-ID/runner-result.json"],
     "rolePolicy": {
       "planner": ["brain", "code", "run"],
       "implementer": ["brain", "code", "run"],
-      "auditor": ["brain", "code"]
+      "review-target": ["brain", "code"]
     }
   }
 }
@@ -544,6 +545,16 @@ command role is an input from the host invocation boundary; the B2 CLI does not
 authenticate a caller by itself. An absent or false `enabled` value returns a
 versioned `disabled` result and performs no source discovery.
 
+When enabled, context is assembled at the actual provider boundary. Planners
+and first implementers receive an initial bundle independently of session
+rehydration routing. Product retries and resumed planners compare a freshly
+validated snapshot with the prior bundle, carrying changed bytes plus immutable
+references for unchanged sources. Missing, revoked, modified, or newly
+ineligible configured sources stop the affected invocation before the provider
+runs. Final and sampled paired audits always start fresh under the
+`review-target` policy; audit roles cannot read `run` sources, so worker
+conclusions are not imported as trusted review knowledge.
+
 ```bash
 singular context search --role implementer --query "serialized migration"
 singular context get --role implementer --ref REF --version sha256:... \
@@ -554,6 +565,7 @@ singular context build --role implementer --phase implement --task TASK.md \
   --budget-bytes 12000 --output .singular-state/runs/RUN-ID/context-bundle.json
 singular context explain --role implementer \
   --bundle .singular-state/runs/RUN-ID/context-bundle.json
+singular context effective-config --role review-target --phase final-audit
 ```
 
 Search is deterministic exact-reference and lexical-token matching
@@ -576,7 +588,12 @@ than being counted as zero. The output contract is
 `singular.context.bundle.v1` in `schemas/context-bundle.v1.schema.json`.
 Prompt bytes and their provenance are fields of the same hash-addressed JSON
 object; `--output` publishes that object with a same-directory atomic replace.
-Search, get, and explain never write accounting or retrieval state.
+Driver bundles are retained beside run evidence as `context-*.bundle.json` and
+the matching `context.bundle_selected` event records the same bundle id, prompt
+hash, delivery mode, byte budget, omissions, and source provenance. `singular
+doctor --json` projects the effective service policy and recent bundle details.
+Search, get, effective-config, and explain never write accounting or retrieval
+state.
 
 **Note on overrides.** `singular.config.json`’s `env{}` block is applied over the
 process environment, so in a repo that pins a knob there, `VAR=0 singular …` will

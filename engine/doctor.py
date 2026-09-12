@@ -41,6 +41,7 @@ from provider_resolver import (
     unavailable_effective_configuration,
 )
 from health_details import collect_lifecycle, unavailable_lifecycle
+from context_service import ContextError as ContextServiceError, ContextService
 
 
 CHECK_SCHEMA = "singular.doctor-report.v1"
@@ -916,6 +917,7 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
         """
         if self.blocked("config.source-conflict"):
             return
+
         if not self.repo or not (self.engine / "engine/lib.sh").is_file():
             return
         config_path = (
@@ -1010,6 +1012,96 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
             ),
             details={"config": str(config_path), "conflicts": conflicts},
         )
+
+    def context_service_check(self) -> None:
+        """Expose effective role policy and latest invocation provenance."""
+        if not self.repo or not self.config_resolution or not self.config:
+            return
+        settings = self.config.get("contextService")
+        if settings is None:
+            details = {"enabled": False, "reason": "contextService is absent"}
+            if self.effective_config_projection is not None:
+                self.effective_config_projection["contextService"] = details
+            self.add("runtime.context-service", "pass", "context service is disabled", details=details)
+            return
+        try:
+            roles = {}
+            invalid: list[dict[str, str]] = []
+            for role in ("planner", "implementer", "review-target"):
+                service = ContextService.from_config(self.config_resolution.path, role=role, phase="doctor")
+                description = service.describe()
+                roles[role] = description
+                invalid.extend(
+                    {"role": role, "ref": source["ref"], "validity": source["validity"]}
+                    for source in description["sources"]
+                    if source["validity"] not in {"current", "current-reviewed"}
+                )
+            latest: list[dict[str, Any]] = []
+            state_path = (
+                (self.effective_config_projection.get("paths") or {}).get("state")
+                if self.effective_config_projection else None
+            )
+            if state_path:
+                candidates = sorted(
+                    Path(state_path).glob("runs/*/context-*.bundle.json"),
+                    key=lambda path: path.stat().st_mtime, reverse=True,
+                )[:8]
+                for path in candidates:
+                    try:
+                        bundle = json.loads(path.read_text(encoding="utf-8"))
+                        provenance = [item for item in bundle.get("provenance", []) if isinstance(item, dict)]
+                        reasons = [reason for item in provenance for reason in item.get("reasons", [])]
+                        prior = next((reason.split(":", 1)[1] for reason in reasons
+                                      if reason.startswith("prior_bundle:")), None)
+                        latest.append({
+                            "bundleRef": str(path), "bundleId": bundle.get("bundleId"),
+                            "role": (bundle.get("identity") or {}).get("role"),
+                            "phase": (bundle.get("identity") or {}).get("phase"),
+                            "delivery": {
+                                "mode": "delta" if prior else "initial",
+                                "priorBundleId": prior,
+                            },
+                            "budget": bundle.get("budget"),
+                            "omissions": bundle.get("omissions", []),
+                            "sourceProvenance": [
+                                {key: item.get(key) for key in (
+                                    "ref", "kind", "sourceSha256", "validity", "reasons"
+                                )}
+                                for item in provenance
+                            ],
+                        })
+                    except (OSError, ValueError, TypeError):
+                        continue
+            details = {
+                "enabled": bool(settings.get("enabled", False)) if isinstance(settings, dict) else False,
+                "roles": roles, "invalidSources": invalid, "latestBundles": latest,
+            }
+            if self.effective_config_projection is not None:
+                self.effective_config_projection["contextService"] = details
+            if invalid:
+                self.add(
+                    "runtime.context-service", "fail",
+                    "enabled context service has missing or ineligible invocation sources",
+                    required_for=("configured-runs",),
+                    remediation="Restore, review, or remove every invalid configured source.",
+                    details=details,
+                )
+            else:
+                self.add(
+                    "runtime.context-service", "pass",
+                    "context service is enabled; role selection, budgets, omissions, and provenance are observable"
+                    if details["enabled"] else "context service is disabled",
+                    details=details,
+                )
+        except ContextServiceError as exc:
+            details = {"enabled": True, "error": str(exc)}
+            if self.effective_config_projection is not None:
+                self.effective_config_projection["contextService"] = details
+            self.add(
+                "runtime.context-service", "fail", f"context service configuration is invalid: {exc}",
+                required_for=("configured-runs",),
+                remediation="Repair contextService role policy, budget, and source paths.", details=details,
+            )
 
     def blocked(self, *check_ids: str) -> bool:
         """Cascade guard: one primary diagnosis instead of a dozen derivatives.
@@ -3522,6 +3614,7 @@ exec "$2" -c 'import json,os,sys; print(json.dumps({"environment":dict(os.enviro
         self.pin_checks()
         self.schema_checks()
         self.effective_environment()
+        self.context_service_check()
         self.brain_checks()
         self.config_source_conflict()
         self.host_hygiene_checks()

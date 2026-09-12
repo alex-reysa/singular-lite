@@ -83,16 +83,39 @@ singular_ctx_paired_audit_record() {
   local sample_key="${run_id}:${task_id}"
   singular_ctx_paired_audit_should_sample "$sample_key" || return 0
 
-  local prompt="$SINGULAR_ORCH_DIR/prompts/auditor.md"
+  local prompt="$run_dir/paired-audit-prompt.md"
+  local base_prompt="$SINGULAR_ORCH_DIR/prompts/auditor.md"
   local raw="$run_dir/paired-audit-raw.json"
   local record="$run_dir/paired-audit.json"
   local runner="${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}"
 
   mkdir -p "$run_dir"
 
+  # A paired audit is a brand-new review-target invocation. Assemble its exact
+  # prompt from the task contract and role-filtered source snapshot; never reuse
+  # the worker or primary reviewer bundle/session.
+  cp "$base_prompt" "$prompt" || return $?
+  local context_config="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
+  local context_task="$SINGULAR_TASKS_DIR/$task_id.md"
+  if [[ "$context_config" == "$SINGULAR_ROOT/"* ]]; then
+    local candidate_config="$worktree/${context_config#$SINGULAR_ROOT/}"
+    [[ -f "$candidate_config" ]] && context_config="$candidate_config"
+  fi
+  if [[ "$context_task" == "$SINGULAR_ROOT/"* ]]; then
+    local candidate_task="$worktree/${context_task#$SINGULAR_ROOT/}"
+    [[ -f "$candidate_task" ]] && context_task="$candidate_task"
+  fi
+  SINGULAR_CONTEXT_CONFIG_FILE="$context_config" \
+    singular_context_invocation_prepare review-target paired-audit \
+      "$context_task" "$prompt" "$run_dir/context-review-target-paired.bundle.json" \
+    || return $?
+  if [[ ! -f "$run_dir/context-review-target-paired.bundle.json" ]]; then
+    rm -f "$prompt" 2>/dev/null || true
+    prompt="$base_prompt"
+  fi
+
   # Exactly ONE fresh, read-only auditor pass over the accepted result. FRESH =
-  # no --resume-session / session reuse; read-only = --level readonly. The base
-  # auditor prompt is used unchanged. Runner failure is non-fatal (record still
+  # no --resume-session / session reuse; read-only = --level readonly. Runner failure is non-fatal (record still
   # captures what happened) and never feeds back into any outcome.
   local result_file="$run_dir/paired-audit-runner-result.json"
   rm -f "$result_file" 2>/dev/null || true

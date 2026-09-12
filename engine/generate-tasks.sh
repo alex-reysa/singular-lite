@@ -351,6 +351,8 @@ fi
 planner_resume_id=""
 planner_lease_path=""
 planner_transcript=""
+planner_strategy="fresh"
+planner_strategy_reason="context-routing-disabled"
 planner_base_args=("${planner_runner_args[@]}")
 if [[ "${SINGULAR_PLANNER_SESSION:-0}" == "1" ]]; then
   # Gate 12 (window-pressure) measures the CANONICAL per-node planner transcript,
@@ -386,6 +388,24 @@ if [[ "${SINGULAR_PLANNER_SESSION:-0}" == "1" ]]; then
     singular_append_event "context.strategy_selected" "planner fresh-run strategy selected" \
       "{\"node\":\"$active_node\",\"runId\":\"$run_id\",\"role\":\"planner\",\"strategy\":\"fresh\",\"reason\":\"$planner_strategy_reason\"}" || true
   fi
+fi
+
+# Shared context is an invocation concern, not a rehydration strategy. Build the
+# exact planner prompt from the integrated service for fresh and resumed runs.
+# A resumed planner compares against the last node-bound bundle and receives
+# changed bytes plus immutable references for unchanged sources.
+planner_context_bundle="$run_dir/context-planner.bundle.json"
+planner_context_prior=""
+if [[ "$planner_strategy" == "resume" ]]; then
+  planner_context_prior="$(singular_ctx_planner_context_path "$active_node")"
+elif [[ -f "$planner_context_bundle" ]]; then
+  planner_context_prior="$planner_context_bundle"
+fi
+if ! singular_context_invocation_prepare planner plan \
+    "$SINGULAR_ORCH_DIR/dag.v0.json" "$prompt_file" \
+    "$planner_context_bundle" "$planner_context_prior"; then
+  echo "planner-failed (context service invocation assembly failed)"
+  exit 1
 fi
 
 rm -f "$runner_result"
@@ -432,6 +452,13 @@ fi
 if [[ "$codex_exit" -eq 0 && -n "$planner_transcript" && -f "$codex_log" ]]; then
   mkdir -p "$(dirname "$planner_transcript")" 2>/dev/null || true
   cat "$codex_log" >>"$planner_transcript" 2>/dev/null || true
+fi
+if [[ "$codex_exit" -eq 0 && -f "$planner_context_bundle" ]]; then
+  planner_context_session="$(singular_ctx_planner_context_path "$active_node")"
+  if [[ -n "$planner_context_session" ]]; then
+    mkdir -p "$(dirname "$planner_context_session")" 2>/dev/null || true
+    cp "$planner_context_bundle" "$planner_context_session" 2>/dev/null || true
+  fi
 fi
 
 if [[ "$codex_exit" -ne 0 ]]; then

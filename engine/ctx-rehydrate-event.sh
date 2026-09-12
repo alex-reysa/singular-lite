@@ -162,3 +162,92 @@ sys.stdout.write(json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_a
 sys.stdout.write("\n")
 PY
 }
+
+# Build and publish the exact prompt crossing a provider boundary. This hook is
+# independent of resume/rehydrate routing: contextService.enabled is its only
+# feature gate. The prompt bytes and the context.bundle_selected event are read
+# from one immutable bundle, preventing prompt/provenance skew.
+#
+# singular_context_invocation_prepare ROLE PHASE TASK PROMPT BUNDLE [PRIOR]
+singular_context_invocation_prepare() {
+  local role="$1" phase="$2" task="$3" prompt="$4" bundle="$5" prior="${6:-}"
+  local config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
+  [[ -f "$config" ]] || return 0
+
+  local settings
+  settings="$(python3 - "$config" 2>/dev/null <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    settings = value.get("contextService") or {}
+    if not isinstance(settings, dict):
+        raise ValueError("contextService must be an object")
+    enabled = settings.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("contextService.enabled must be boolean")
+    budget = settings.get("budgetBytes", 65536)
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1:
+        raise ValueError("contextService.budgetBytes must be a positive integer")
+    print(("1" if enabled else "0") + "\t" + str(budget))
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(2)
+PY
+  )" || {
+    echo "context service: invalid configuration: $config" >&2
+    return 2
+  }
+  local enabled="${settings%%$'\t'*}" budget="${settings#*$'\t'}"
+  [[ "$enabled" == "1" ]] || return 0
+  [[ -z "${SINGULAR_CONTEXT_BUDGET_BYTES:-}" ]] || budget="$SINGULAR_CONTEXT_BUDGET_BYTES"
+  [[ "$budget" =~ ^[1-9][0-9]*$ ]] || {
+    echo "context service: invocation budget must be a positive integer" >&2
+    return 2
+  }
+
+  local delivery="initial"
+  [[ -n "$prior" && -f "$prior" ]] && delivery="delta"
+  local engine_dir="${SINGULAR_ENGINE_DIR:-${SINGULAR_ENGINE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/engine}"
+  local -a args=(
+    build --config "$config" --role "$role" --phase "$phase"
+    --task "$task" --base-prompt "$prompt" --prompt-output "$prompt"
+    --budget-bytes "$budget" --delivery "$delivery" --output "$bundle"
+  )
+  [[ "$delivery" == "delta" ]] && args+=(--prior-bundle "$prior")
+  python3 "$engine_dir/context_cli.py" "${args[@]}" >/dev/null || return $?
+
+  local event_data
+  event_data="$(python3 - "$bundle" "$role" "$phase" <<'PY'
+import json, os, sys
+path, role, phase = sys.argv[1:4]
+data = json.load(open(path, encoding="utf-8"))
+provenance = data["provenance"]
+all_reasons = [reason for item in provenance for reason in item.get("reasons", [])]
+prior = next((reason.split(":", 1)[1] for reason in all_reasons if reason.startswith("prior_bundle:")), None)
+delivery = {
+    "mode": "delta" if prior else "initial",
+    "priorBundleId": prior,
+    "changedRefs": [item["ref"] for item in provenance if "changed_source" in item.get("reasons", [])],
+    "unchangedRefs": [item["ref"] for item in provenance if "unchanged_immutable_reference" in item.get("reasons", [])],
+    "revokedRefs": [item["ref"] for item in data["omissions"] if item.get("reason") == "revoked_since_prior_bundle"],
+}
+print(json.dumps({
+    "role": role,
+    "phase": phase,
+    "bundleId": data["bundleId"],
+    "promptSha256": data["promptSha256"],
+    "bundleRef": os.path.basename(path),
+    "identity": data["identity"],
+    "delivery": delivery,
+    "budget": data["budget"],
+    "omissions": data["omissions"],
+    "sourceProvenance": [
+        {key: item.get(key) for key in ("ref", "kind", "sourceSha256", "validity", "reasons")}
+        for item in data["provenance"]
+    ],
+}, separators=(",", ":")))
+PY
+  )" || return $?
+  singular_append_event "context.bundle_selected" \
+    "context service prompt bundle selected for provider invocation" "$event_data"
+}
