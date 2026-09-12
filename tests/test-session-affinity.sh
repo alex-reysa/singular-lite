@@ -304,9 +304,6 @@ run_drive() {
   ( cd "$drv_root" && env SINGULAR_ROOT="$drv_root" SINGULAR_STATE_DIR="$drv_root/.singular-state" \
       SINGULAR_ORCH_DIR="$drv_root/docs/orchestration" SINGULAR_TASKS_DIR="$drv_root/docs/orchestration/tasks" \
       SINGULAR_TARGET_BRANCH=target SINGULAR_DISPATCH_BASE_SHA= SINGULAR_DISPATCH_BATCH_ID= \
-      SINGULAR_JSON_CONFIG_FILE="$drv_root/absent-config.json" \
-      SINGULAR_CONFIG_FILE="$drv_root/absent-config.sh" \
-      SINGULAR_LOCAL_CONFIG_FILE="$drv_root/absent-local-config.sh" \
       SINGULAR_CTX_ROUTING=0 SINGULAR_RUNNER="$mock_runner" SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
       "$@" "$SCRIPT_DIR/l1-drive.sh" TASK-0001 )
 }

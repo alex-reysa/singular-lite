@@ -15,9 +15,6 @@ run_lib() {
   SINGULAR_ROOT="$tmp/root" \
   SINGULAR_STATE_DIR="$tmp/root/.singular-state" \
   SINGULAR_TASKS_DIR="$tmp/root/tasks" \
-  SINGULAR_JSON_CONFIG_FILE="$tmp/root/no-config.json" \
-  SINGULAR_CONFIG_FILE="$tmp/root/no-config.sh" \
-  SINGULAR_LOCAL_CONFIG_FILE="$tmp/root/no-local.sh" \
   bash -c "source '$ENGINE_HOME/engine/lib.sh'; $1"
 }
 
@@ -126,8 +123,7 @@ write_valid_task "$repo/docs/orchestration/tasks/TASK-4242.md"
 mkdir -p "$repo/private"
 printf 'changed\n' >"$repo/private/no touch.md"
 scope_out="$(
-  SINGULAR_ROOT="$repo" SINGULAR_JSON_CONFIG_FILE="$repo/no-config.json" \
-    SINGULAR_CONFIG_FILE="$repo/no-config.sh" SINGULAR_LOCAL_CONFIG_FILE="$repo/no-local.sh" \
+  SINGULAR_ROOT="$repo" \
     bash "$ENGINE_HOME/engine/scope-check.sh" --worktree "$repo" \
       --allow-prefix private --forbid-prefix 'private/no touch.md' 2>&1
 )" && fail "space-bearing forbidden path was not enforced"
@@ -135,8 +131,7 @@ assert_contains "$scope_out" "private/no touch.md" "scope check lost forbidden p
 rm -f "$repo/private/no touch.md"
 printf 'changed\n' >"$repo/Do Not Touch.md"
 root_scope_out="$(
-  SINGULAR_ROOT="$repo" SINGULAR_JSON_CONFIG_FILE="$repo/no-config.json" \
-    SINGULAR_CONFIG_FILE="$repo/no-config.sh" SINGULAR_LOCAL_CONFIG_FILE="$repo/no-local.sh" \
+  SINGULAR_ROOT="$repo" \
     bash "$ENGINE_HOME/engine/scope-check.sh" --worktree "$repo" \
       --allow-prefix 'Do Not Touch.md' --forbid-prefix 'Do Not Touch.md' 2>&1
 )" && fail "root-level forbidden path with spaces was not enforced"
@@ -150,9 +145,6 @@ driver_out="$(
   SINGULAR_STATE_DIR="$repo/.singular-state" \
   SINGULAR_TARGET_BRANCH=target \
   SINGULAR_WORKTREES_DIR="$repo/.worktrees" \
-  SINGULAR_JSON_CONFIG_FILE="$repo/no-config.json" \
-  SINGULAR_CONFIG_FILE="$repo/no-config.sh" \
-  SINGULAR_LOCAL_CONFIG_FILE="$repo/no-local.sh" \
   SINGULAR_PREFLIGHT_REQUIRE_ACCEPTANCE=1 \
     bash "$ENGINE_HOME/engine/l1-drive.sh" TASK-4242 --dry-run 2>&1
 )" || fail "real driver dry-run failed: $driver_out"

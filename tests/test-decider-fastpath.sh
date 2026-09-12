@@ -60,7 +60,9 @@ make_repo() {
 
 with_fixture() {
   local tmp
-  tmp="$(mktemp -d)"
+  tmp="${1:-}"
+  [[ -n "$tmp" ]] || tmp="$(mktemp -d)"
+  mkdir -p "$tmp"
   FIXTURE_TMP="$tmp"
   make_repo "$tmp/repo"
   export SINGULAR_ROOT="$tmp/repo"
@@ -85,6 +87,78 @@ with_fixture() {
   unset MOCK_AUDIT_FINDINGS 2>/dev/null || true
   # shellcheck source=/dev/null
   source "$SCRIPT_DIR/lib.sh"
+}
+
+assert_fixture_configuration_context() {
+  local root root_resolved
+  root="$1"
+  root_resolved="$(cd "$root" && pwd -P)"
+  assert_eq "$SINGULAR_ROOT" "$root" "fixture consumer root"
+  assert_eq "$SINGULAR_JSON_CONFIG_SOURCE" "default" "fixture JSON provenance"
+  assert_eq "$SINGULAR_JSON_CONFIG_FILE" "$root_resolved/singular.config.json" \
+    "fixture optional JSON default"
+  assert_eq "$SINGULAR_JSON_CONFIG_DEFAULT_ROOT" "$root_resolved" \
+    "fixture JSON default root"
+  assert_eq "$SINGULAR_JSON_CONFIG_DEFAULT_FILE" "$root_resolved/singular.config.json" \
+    "fixture JSON default file"
+  assert_eq "$SINGULAR_CONFIG_FILE" "$root/singular.config.sh" \
+    "fixture shell configuration"
+  assert_eq "$SINGULAR_STATE_DIR" "$root/.singular-state" "fixture state directory"
+  assert_eq "$SINGULAR_ORIGIN_STATE_FILE" "$root/.singular-state/origin-state.json" \
+    "fixture origin state"
+  assert_eq "$SINGULAR_GIT_LOCK_DIR" "$root/.singular-state/locks/git-op.lock" \
+    "fixture git lock"
+  assert_eq "$SINGULAR_PLANNER_BACKOFF_FILE" "$root/.singular-state/planner-backoff.json" \
+    "fixture planner backoff"
+  assert_eq "$SINGULAR_RECONCILE_INDEX_FILE" "$root/.singular-state/reconcile-index.json" \
+    "fixture reconcile index"
+}
+
+fixture_tree_digest() {
+  find "$1" -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256
+}
+
+test_fixture_configuration_context_isolated() {
+  local boundary_tmp first_tmp second_tmp first_root second_root before after out
+  boundary_tmp="$(mktemp -d)"
+  first_tmp="$boundary_tmp/first"
+  second_tmp="$boundary_tmp/second"
+  first_root="$first_tmp/repo"
+  second_root="$second_tmp/repo"
+
+  (
+    with_fixture "$first_tmp"
+    assert_fixture_configuration_context "$first_root"
+    printf 'first-consumer-canary\n' >"$SINGULAR_STATE_DIR/config-boundary.canary"
+    (cd "$SINGULAR_ROOT" && "$SCRIPT_DIR/gate-check.sh" RUN-CONFIG-FIRST \
+      --task-id TASK-0001 -- true) >/dev/null
+    out="$(SINGULAR_DRAIN_TIMEOUT_SECS=5 SINGULAR_DRAIN_POLL_SECS=0 \
+      "$SCRIPT_DIR/reconcile.sh" --drain)"
+    assert_contains "$out" "workers_running=0" "first fixture bounded reconcile"
+    assert_file "$SINGULAR_RUNS_DIR/RUN-CONFIG-FIRST/gate-report.json" \
+      "first fixture real gate report"
+  )
+  before="$(fixture_tree_digest "$first_root")"
+
+  (
+    with_fixture "$second_tmp"
+    assert_fixture_configuration_context "$second_root"
+    (cd "$SINGULAR_ROOT" && "$SCRIPT_DIR/gate-check.sh" RUN-CONFIG-SECOND \
+      --task-id TASK-0001 -- true) >/dev/null
+    out="$(SINGULAR_DRAIN_TIMEOUT_SECS=5 SINGULAR_DRAIN_POLL_SECS=0 \
+      "$SCRIPT_DIR/reconcile.sh" --drain)"
+    assert_contains "$out" "workers_running=0" "second fixture bounded reconcile"
+    assert_file "$SINGULAR_RUNS_DIR/RUN-CONFIG-SECOND/gate-report.json" \
+      "second fixture real gate report"
+  )
+
+  after="$(fixture_tree_digest "$first_root")"
+  assert_eq "$after" "$before" "second consumer left first fixture byte-identical"
+  assert_eq "$(cat "$first_root/.singular-state/config-boundary.canary")" \
+    "first-consumer-canary" "first fixture canary"
+  assert_no_file "$first_root/.singular-state/runs/RUN-CONFIG-SECOND/gate-report.json" \
+    "second fixture gate artifacts contained"
+  echo "ok: fixture configuration context and entrypoint containment"
 }
 
 write_generic_task() {
@@ -374,15 +448,17 @@ test_driver_decider_when_fast_disabled() {
 # tasks receive two; an unknown explicit category fails safe to the same high
 # policy instead of silently becoming ordinary.
 test_driver_risk_bounded_product_repairs() {
+  local stub out rc events calls_before
+  (
   with_fixture
   write_generic_task
-  local stub="$FIXTURE_TMP/mock-runner.sh"; make_seq_runner "$stub"
+  stub="$FIXTURE_TMP/mock-runner.sh"; make_seq_runner "$stub"
   export SINGULAR_RUNNER="$stub"
   export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-risk-normal"
   export MOCK_AUDIT_VERDICT_SEQ="needs-fix needs-fix accepted"
   export SINGULAR_MAX_RETRIES=99
 
-  local out rc=0 events
+  rc=0
   out="$("$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
   assert_eq "$rc" "3" "ordinary risk parks after one product repair ($out)"
   assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "2" \
@@ -404,7 +480,6 @@ test_driver_risk_bounded_product_repairs() {
   # A reset/re-entry without the explicit unpark budget reset must not mint a
   # second initial pass after the durable lease already consumed its ceiling.
   singular_task_set_status "$SINGULAR_TASKS_DIR/TASK-0001.md" ready
-  local calls_before
   calls_before="$(cat "$MOCK_COUNTER_DIR/worker-calls")"
   rc=0
   out="$("$SCRIPT_DIR/l1-drive.sh" --reset TASK-0001 2>&1)" || rc=$?
@@ -413,7 +488,9 @@ test_driver_risk_bounded_product_repairs() {
     "ordinary re-entry: no additional product pass"
   assert_contains "$(cat "$SINGULAR_EVENTS_FILE")" '"priorLease":true' \
     "ordinary re-entry: durable lease provenance is observable"
+  )
 
+  (
   with_fixture
   write_generic_task
   python3 - "$SINGULAR_TASKS_DIR/TASK-0001.md" <<'PY'
@@ -439,7 +516,9 @@ PY
     "high risk: lease exposes two-repair ceiling"
   assert_contains "$(cat "$SINGULAR_EVENTS_FILE")" '"riskTier":"high"' \
     "high risk: resolved tier is observable"
+  )
 
+  (
   with_fixture
   write_generic_task
   export SINGULAR_TASK_RISK_TIER="unrecognized-category"
@@ -455,6 +534,7 @@ PY
   assert_contains "$events" 'fail-safe-unknown' "unknown risk: fail-safe provenance"
   assert_contains "$events" '"productRepairMax":2' "unknown risk: two-repair ceiling"
   unset SINGULAR_MAX_RETRIES SINGULAR_TASK_RISK_TIER
+  )
   echo "ok: risk-bounded product repair policy (normal=1, high/unknown=2)"
 }
 
@@ -566,6 +646,7 @@ test_driver_crash_reentry_budget_is_monotonic() {
 
   # Normal risk: the first crash re-entry consumes the only repair before the
   # worker. A second re-entry is refused without another worker invocation.
+  (
   with_fixture
   write_generic_task
   stub="$FIXTURE_TMP/crash-runner.sh"; make_crash_runner "$stub"
@@ -590,10 +671,12 @@ test_driver_crash_reentry_budget_is_monotonic() {
     "normal repeated crash cannot invoke an unbudgeted worker"
   assert_eq "$(singular_lease_field TASK-0001 retryCount)" "1" \
     "normal repeated crash leaves monotonic count at ceiling"
+  )
 
   # High risk: exactly two crash re-entries are authorized. The third is
   # refused, proving that repeated process death cannot exceed the two-repair
   # policy either.
+  (
   with_fixture
   write_generic_task
   python3 - "$SINGULAR_TASKS_DIR/TASK-0001.md" <<'PY'
@@ -635,6 +718,7 @@ PY
   assert_contains "$(cat "$SINGULAR_EVENTS_FILE")" '"consumedBeforeWorker":true' \
     "crash re-entry consumption is machine-readable"
   unset MOCK_CRASH_COUNTER SINGULAR_WORKER_INFRA_MAX
+  )
   echo "ok: crash re-entry repair budgets are monotonic (normal=1, high=2)"
 }
 
@@ -1057,21 +1141,22 @@ PY
   echo "ok: accepted exact-head audit resumes evidence-only publication without product retry"
 }
 
-test_fast_action_table
-test_fast_action_repeat_and_disabled
-test_candidate_signature_ignores_empty_commit_identity
-test_driver_scrubs_origin_capability_from_provider_runner
-test_driver_fastpath_provenance
-test_driver_decider_when_fast_disabled
-test_driver_risk_bounded_product_repairs
-test_driver_detached_planned_lease_preserves_product_budget
-test_driver_crash_reentry_budget_is_monotonic
-test_driver_identical_findings_park_before_third_pass
-test_driver_audit_infra_retry
-test_driver_worker_infra_parks
-test_driver_integrity_violation_parks
-test_driver_empty_output_is_no_packet_not_infra
-test_driver_campaign_transition_refuses_publication
-test_driver_accepted_audit_awaits_evidence
+( test_fixture_configuration_context_isolated )
+( test_fast_action_table )
+( test_fast_action_repeat_and_disabled )
+( test_candidate_signature_ignores_empty_commit_identity )
+( test_driver_scrubs_origin_capability_from_provider_runner )
+( test_driver_fastpath_provenance )
+( test_driver_decider_when_fast_disabled )
+( test_driver_risk_bounded_product_repairs )
+( test_driver_detached_planned_lease_preserves_product_budget )
+( test_driver_crash_reentry_budget_is_monotonic )
+( test_driver_identical_findings_park_before_third_pass )
+( test_driver_audit_infra_retry )
+( test_driver_worker_infra_parks )
+( test_driver_integrity_violation_parks )
+( test_driver_empty_output_is_no_packet_not_infra )
+( test_driver_campaign_transition_refuses_publication )
+( test_driver_accepted_audit_awaits_evidence )
 
 echo "decider-fastpath tests passed"

@@ -34,20 +34,13 @@ assert_eq() { # <got> <want> <label>
 }
 pass() { echo "ok: $*"; }
 
-# This file measures ENGINE DEFAULTS, so both operator-config layers must be
-# neutralized or it measures this repo's own configuration instead:
-#   - config.local.sh   the gitignored operator overrides
-#   - singular.config.json  whose `env` block is eval'd OVER the process
-#     environment (engine/lib.sh), so a repo that pins a knob there wins even
-#     against an explicit `VAR=0 singular ...`. Both paths are skipped when the
-#     file is not a regular file, which /dev/null is not.
-export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
-export SINGULAR_JSON_CONFIG_FILE=/dev/null
-
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-export SINGULAR_ROOT="$ENGINE_HOME"
-export SINGULAR_STATE_DIR="$tmp/state"
+# This file measures ENGINE DEFAULTS through a configuration-free consumer.
+# Keeping the consumer separate from ENGINE_HOME prevents this checkout's own
+# JSON and operator layers from participating without manufacturing selectors.
+export SINGULAR_ROOT="$tmp/consumer"
+export SINGULAR_STATE_DIR="$SINGULAR_ROOT/.singular-state"
 mkdir -p "$SINGULAR_STATE_DIR"
 # shellcheck disable=SC1090
 source "$LIB" || fail "sourcing lib.sh failed"
@@ -98,9 +91,6 @@ route_at() { # <step> <routing-value|unset>
   if [[ "$routing" == "unset" ]]; then
     env -u SINGULAR_CTX_ROUTING bash -c '
       set -uo pipefail
-      export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
-    export SINGULAR_JSON_CONFIG_FILE=/dev/null
-      export SINGULAR_JSON_CONFIG_FILE=/dev/null
       source "$1" >/dev/null 2>&1
       singular_ctx_route_decide reviewer "$2" "$3" TASK-0001 RUN-0001 \
         codex-run.sh deadbeef "$4" "$5"
@@ -108,9 +98,6 @@ route_at() { # <step> <routing-value|unset>
   else
     SINGULAR_CTX_ROUTING="$routing" bash -c '
       set -uo pipefail
-      export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
-    export SINGULAR_JSON_CONFIG_FILE=/dev/null
-      export SINGULAR_JSON_CONFIG_FILE=/dev/null
       source "$1" >/dev/null 2>&1
       singular_ctx_route_decide reviewer "$2" "$3" TASK-0001 RUN-0001 \
         codex-run.sh deadbeef "$4" "$5"
@@ -139,9 +126,6 @@ got="$(SINGULAR_CTX_ROUTING=1 SINGULAR_REHYDRATE=1 SINGULAR_SESSION_AFFINITY=1 \
        SINGULAR_SESSION_WINDOW_TOKENS=100000000 SINGULAR_SESSION_DIFF_MAX_LINES=999999 \
        bash -c '
          set -uo pipefail
-         export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
-    export SINGULAR_JSON_CONFIG_FILE=/dev/null
-      export SINGULAR_JSON_CONFIG_FILE=/dev/null
          source "$1" >/dev/null 2>&1
          singular_ctx_route_decide reviewer final-audit "$2" TASK-0001 RUN-0001 \
            codex-run.sh deadbeef "$3" "$4"
@@ -152,13 +136,9 @@ pass "no SINGULAR_* knob combination reaches a pinned step"
 # --- 5: governance defaults are ON, and an explicit 0 still wins -------------
 for knob in SINGULAR_CTX_ROUTING SINGULAR_PLANNER_SESSION SINGULAR_CTX_PACKET SINGULAR_PLAN_CRITIQUE; do
   got="$(env -u "$knob" bash -c '
-    export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
-    export SINGULAR_JSON_CONFIG_FILE=/dev/null
     source "$1" >/dev/null 2>&1; printf "%s" "${!2}"' _ "$LIB" "$knob")"
   assert_eq "$got" "1" "default of $knob"
   got="$(env "$knob=0" bash -c '
-    export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
-    export SINGULAR_JSON_CONFIG_FILE=/dev/null
     source "$1" >/dev/null 2>&1; printf "%s" "${!2}"' _ "$LIB" "$knob")"
   assert_eq "$got" "0" "explicit 0 override of $knob"
 done

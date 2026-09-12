@@ -228,8 +228,6 @@ EOF
     SINGULAR_TASKS_DIR="$repo/docs/orchestration/tasks" \
     SINGULAR_TARGET_BRANCH=target \
     SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
-    SINGULAR_JSON_CONFIG_FILE=/dev/null \
-    SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
     bash "$SCRIPT_DIR/gate-check.sh" RUN-MISSING --task-id TASK-0001 \
       --verification-request "$run_dir/verification-request-1.json" \
       --task-contract "$run_dir/verification-task-contract-1.md" \

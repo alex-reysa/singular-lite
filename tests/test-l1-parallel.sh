@@ -20,9 +20,6 @@ SCRIPT_DIR="$ENGINE_HOME/engine"
 # empty root so no consumer config (runner, areaPrefix, env{}) leaks into
 # test sandboxes; each test exports its own SINGULAR_ROOT afterwards.
 export SINGULAR_ROOT="$(mktemp -d)"
-export SINGULAR_JSON_CONFIG_FILE="$SINGULAR_ROOT/no-config.json"
-export SINGULAR_CONFIG_FILE="$SINGULAR_ROOT/no-config.sh"
-export SINGULAR_LOCAL_CONFIG_FILE="$SINGULAR_ROOT/no-local.sh"
 
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib.sh"
@@ -89,7 +86,11 @@ with_fixture() {
 	  export SINGULAR_DISPATCH_DIR="$SINGULAR_STATE_DIR/dispatch"
 	  export SINGULAR_WORKTREES_DIR="$SINGULAR_ROOT/.worktrees"
 	  export SINGULAR_EVENTS_FILE="$SINGULAR_STATE_DIR/events.ndjson"
+	  export SINGULAR_LOCK_FILE="$SINGULAR_STATE_DIR/locks/origin.lock.json"
+	  export SINGULAR_ORIGIN_STATE_FILE="$SINGULAR_STATE_DIR/origin-state.json"
+	  export SINGULAR_GIT_LOCK_DIR="$SINGULAR_STATE_DIR/locks/git-op.lock"
 	  export SINGULAR_PLANNER_BACKOFF_FILE="$SINGULAR_STATE_DIR/planner-backoff.json"
+	  export SINGULAR_RECONCILE_INDEX_FILE="$SINGULAR_STATE_DIR/reconcile-index.json"
 	  export SINGULAR_PROVIDER_PRESSURE_FILE="$SINGULAR_STATE_DIR/provider-pressure.json"
 	  export SINGULAR_BREAKER_FILE="$SINGULAR_STATE_DIR/circuit.json"
 	  export SINGULAR_STATUS_FILE="$SINGULAR_STATE_DIR/STATUS.md"
@@ -101,6 +102,9 @@ with_fixture() {
   export SINGULAR_L1_LEASES_DIR="$SINGULAR_STATE_DIR/l1-leases"
   export SINGULAR_L1_LEASE_SCHEMA="$SINGULAR_ROOT/schemas/orchestration/l1-lease.v0.schema.json"
   export SINGULAR_GATE_SCHEMA="$SINGULAR_ROOT/schemas/orchestration/gate-result.v0.schema.json"
+  unset SINGULAR_JSON_CONFIG_FILE SINGULAR_JSON_CONFIG_SOURCE \
+    SINGULAR_JSON_CONFIG_DEFAULT_ROOT SINGULAR_JSON_CONFIG_DEFAULT_FILE \
+    SINGULAR_CONFIG_FILE SINGULAR_LOCAL_CONFIG_FILE 2>/dev/null || true
   export SINGULAR_REAL_SCRIPT_DIR="$SCRIPT_DIR"
   # Reset all tunables to a clean baseline each test (the test shell is shared).
   export SINGULAR_MAX_L1_CONCURRENT=2
@@ -109,6 +113,7 @@ with_fixture() {
 	  export SINGULAR_GENERATE=1
 	  unset SINGULAR_TEST_FAIL_NODE SINGULAR_TEST_BADAREA_NODE SINGULAR_L1_PLAN_NODE SINGULAR_CODEX_RUNNER SINGULAR_L1_PLANNER SINGULAR_ENABLE_L1_PARALLEL SINGULAR_AUTO_INTEGRATE SINGULAR_PUSH SINGULAR_AUTO_PROMOTE_GATES SINGULAR_MAX_CONSEC_FAILS 2>/dev/null || true
 	  unset SINGULAR_PROVIDER_PRESSURE_ADAPT SINGULAR_PROVIDER_PRESSURE_CLUSTER SINGULAR_PROVIDER_PRESSURE_RECOVER_QUIET SINGULAR_RUNNER SINGULAR_MAX_CONCURRENT 2>/dev/null || true
+	  source "$SCRIPT_DIR/lib.sh"
 	}
 
 make_structured_quota_evidence() {

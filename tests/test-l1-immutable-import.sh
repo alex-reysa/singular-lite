@@ -15,9 +15,6 @@ export SINGULAR_TASKS_DIR="$SINGULAR_ROOT/bootstrap-tasks"
 export SINGULAR_LEASES_DIR="$SINGULAR_STATE_DIR/leases"
 export SINGULAR_DISPATCH_DIR="$SINGULAR_STATE_DIR/dispatch"
 export SINGULAR_WORKTREES_DIR="$SINGULAR_ROOT/worktrees"
-export SINGULAR_JSON_CONFIG_FILE="$SINGULAR_ROOT/no-config.json"
-export SINGULAR_CONFIG_FILE="$SINGULAR_ROOT/no-config.sh"
-export SINGULAR_LOCAL_CONFIG_FILE="$SINGULAR_ROOT/no-local.sh"
 source "$ENGINE_HOME/engine/lib.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
