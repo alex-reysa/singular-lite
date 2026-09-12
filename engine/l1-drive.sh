@@ -337,18 +337,25 @@ elif [[ -f "$(singular_lease_path "$task_id")" ]]; then
     prior_product_lease="no"
   fi
 fi
-if [[ "$prior_product_lease" == "yes" ]]; then
+if [[ "$prior_product_lease" == "yes" && "${#authorized_continuation[@]}" -ne 10 ]]; then
   product_passes_remaining=$((max_retries - product_repairs_used))
 else
   product_passes_remaining=$((max_retries + 1))
 fi
 [[ "$product_passes_remaining" -lt 0 ]] && product_passes_remaining=0
 if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
-  # This authority contributes exactly one visible worker invocation. Preserve
-  # the predecessor counters, charge re-entry through the ordinary path below,
-  # and suppress the otherwise automatic worker-infrastructure retry.
+  # This authority contributes exactly one visible worker invocation through
+  # its own durable allowance. Preserve every predecessor product counter and
+  # suppress the otherwise automatic worker-infrastructure retry.
   product_passes_remaining=1
   worker_infra_max=0
+fi
+continuation_preparation_failures=0
+if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
+  continuation_preparation_failures="$(singular_lease_field "$task_id" \
+    continuationAuthorization.preparationFailureCount 2>/dev/null || true)"
+  [[ "$continuation_preparation_failures" =~ ^[0-9]+$ ]] \
+    || continuation_preparation_failures=0
 fi
 repo_schema_version="$(python3 - "$SINGULAR_ROOT/singular.config.json" <<'PY' 2>/dev/null || true
 import json
@@ -586,9 +593,9 @@ fi
 
 # Selection is read-only for dry runs. A real repair launch claims and
 # revalidates host authority before touching its branch or worktree. A partial
-# continuation is claimed only after its preserved worktree prepares
-# successfully, so a host preparation failure does not spend the one-shot
-# worker authority. No provider process starts before either claim.
+# continuation is claimed atomically with its started-attempt disposition at
+# the provider invocation boundary below. No provider process starts before
+# either recovery authority is claimed.
 if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
   python3 "$SCRIPT_DIR/task_lifecycle.py" claim-recovery \
     --lease "$lease_path" --authorization-id "${authorized_repair[0]}" \
@@ -1214,15 +1221,20 @@ singular_lease_write "$task_id" "$worker_branch" "$area" "l2-developer" "${owned
 # Keep decide.sh and operator tooling on the same product-repair ceiling as this
 # driver.  The lease field is the legacy public budget surface; infrastructure
 # retries never touch retryCount or maxRetries.
-python3 - "$(singular_lease_path "$task_id")" "$max_retries" "$l1_campaign_binding" <<'PY'
+python3 - "$(singular_lease_path "$task_id")" "$max_retries" "$l1_campaign_binding" \
+  "$([[ "${#authorized_continuation[@]}" -eq 10 ]] && printf yes || printf no)" <<'PY'
 import json
 import os
 import sys
 
-path, maximum, campaign_binding = sys.argv[1:4]
+path, maximum, campaign_binding, continuation = sys.argv[1:5]
 with open(path, encoding="utf-8") as handle:
     lease = json.load(handle)
-lease["maxRetries"] = int(maximum)
+if continuation == "yes":
+    predecessor = lease.get("continuationAuthorization", {}).get("predecessorAccounting", {})
+    lease["maxRetries"] = int(predecessor.get("maxRetries", lease.get("maxRetries", maximum)) or 0)
+else:
+    lease["maxRetries"] = int(maximum)
 lease["campaignBinding"] = campaign_binding
 temporary = path + ".retry-budget.tmp"
 with open(temporary, "w", encoding="utf-8") as handle:
@@ -1296,16 +1308,6 @@ PY
   echo "worktree provisioning failed for $task_id (see $provision_log)" >&2
   exit 3
 fi
-if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
-  singular_lifecycle_claim_continuation "$task_id" "${authorized_continuation[0]}" \
-    "${authorized_continuation[7]}" "${authorized_continuation[8]}" "$run_id" \
-    "${authorized_continuation[2]}" "${authorized_continuation[3]}" \
-    "${authorized_continuation[6]}" "$task_file" \
-    >/dev/null || exit 2
-  singular_append_event "l1.continuation_preserved" \
-    "one-shot continuation retained the authorized partial worktree" \
-    "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"authorizationId\":\"${authorized_continuation[0]}\",\"candidateSourceSha\":\"${authorized_continuation[2]}\",\"integrationTargetSha\":\"${authorized_continuation[3]}\",\"engineSourceFingerprint\":\"${authorized_continuation[4]}\",\"worktree\":\"$worktree\",\"additionalWorkerAttemptsAuthorized\":1}" || true
-fi
 singular_append_event "l1.provisioned" "worktree provisioning completed" \
   "$(python3 - "$task_id" "$run_id" "${SINGULAR_WORKTREE_ENV_FILE:-}" <<'PY'
 import json, sys
@@ -1324,6 +1326,21 @@ else
   singular_append_event "l1.bootstrap_completed" "worktree bootstrap completed" \
     "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"log\":\"$bootstrap_log\"}" || true
 fi
+if [[ "${#authorized_continuation[@]}" -eq 10 && -n "$bootstrap_failure" ]]; then
+  # The shared preparer intentionally reports required bootstrap failure via a
+  # flag. Treat that flag as pre-invocation preparation failure: the wrapper's
+  # owner-bound finish transaction returns this still-reserved authority to
+  # issued state, with counters and partial bytes untouched.
+  _l1_outcome="terminal"
+  if [[ "$continuation_preparation_failures" -ge 1 ]]; then
+    singular_task_set_status "$task_file" "blocked" 2>/dev/null || true
+  fi
+  l1_status terminal failed "Required worker bootstrap failed before continuation invocation" true \
+    "Repair bootstrap infrastructure, then reserve the exact continuation again" \
+    "continuation-preparation-failed"
+  echo "required bootstrap failed before continuation worker invocation (see $bootstrap_log)" >&2
+  exit 3
+fi
 
 # ---- One attempt: worker -> scope -> gate -> commit -> stamp -> audit ----
 # Sets globals: attempt_failure (class), attempt_ctx (file). worker_rc/audit_rc
@@ -1338,6 +1355,7 @@ attempt_ctx=""
 accepted_audit_pending_evidence="no"
 worker_rc=0
 audit_rc=0
+continuation_invocation_started="no"
 
 # Session affinity (T-E5): per-role meta FILES (separate paths) make cross-role
 # session reuse structurally impossible. Strategy globals are recorded per attempt
@@ -1631,6 +1649,13 @@ run_worker_phase() {
     "$task_id" "$run_id" "$l2_runner_basename" "$worker_prompt_sha" "$worktree" "$worktree_head" 2>/dev/null || echo "fresh decide-error")"
   worker_strategy="${worker_decision%% *}"
   worker_strategy_reason="${worker_decision#* }"
+  if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
+    # A one-shot continuation cannot spend a second provider call on a resume
+    # fallback. It always starts a fresh invocation under the exact immutable
+    # runtime fingerprint authorized by the host.
+    worker_strategy="fresh"
+    worker_strategy_reason="authorized-continuation"
+  fi
 
   # A strict brain descriptor is itself rehydratable authored context. If a
   # would-be resume was refused after all durable artifacts were quarantined,
@@ -1715,6 +1740,21 @@ run_worker_phase() {
     worker_capability_profile="${SINGULAR_IMPLEMENTER_CAPABILITY_PROFILE:-implementer-core}"
     singular_runner_contract_prepare \
       "$l2_runner" implementer "$worker_capability_profile" "$worker_result_file"
+    if [[ "${#authorized_continuation[@]}" -eq 10 \
+        && "$continuation_invocation_started" == "no" ]]; then
+      if ! singular_lifecycle_claim_continuation "$task_id" "${authorized_continuation[0]}" \
+          "${authorized_continuation[7]}" "${authorized_continuation[8]}" "$run_id" \
+          "${authorized_continuation[2]}" "${authorized_continuation[3]}" \
+          "${authorized_continuation[6]}" "$task_file" >/dev/null; then
+        attempt_failure="continuation-claim-failed"
+        attempt_ctx="$(singular_lease_path "$task_id")"
+        return 1
+      fi
+      continuation_invocation_started="yes"
+      singular_append_event "l1.continuation_claimed" \
+        "one-shot continuation claimed at the worker invocation boundary" \
+        "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"authorizationId\":\"${authorized_continuation[0]}\",\"candidateSourceSha\":\"${authorized_continuation[2]}\",\"integrationTargetSha\":\"${authorized_continuation[3]}\",\"engineSourceFingerprint\":\"${authorized_continuation[4]}\",\"worktree\":\"$worktree\",\"additionalWorkerAttemptsClaimed\":1}" || true
+    fi
     SINGULAR_RUNNER_ROLE=implementer \
     SINGULAR_RUNNER_CAPABILITY_PROFILE="$worker_capability_profile" \
     SINGULAR_RUNNER_RESULT_FILE="$worker_result_file" \
@@ -3091,7 +3131,7 @@ attempt_started_at=""
 # precomputed product_passes_remaining intentionally includes this first
 # re-entry repair; later in-process repairs continue to use the ordinary bump
 # below.  A crash after this write may conservatively consume the repair.
-if [[ "$prior_product_lease" == "yes" ]]; then
+if [[ "$prior_product_lease" == "yes" && "${#authorized_continuation[@]}" -ne 10 ]]; then
   if ! l1_campaign_publication_begin \
       "$l1_campaign_binding" pre-reentry-budget-mutation; then
     l1_campaign_mismatch_exit \
@@ -3135,19 +3175,21 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
     l1_campaign_mismatch_exit \
       "campaign identity changed before another product pass"
   fi
-  if ! singular_lease_mark_product_pass_started "$task_id" "$run_id"; then
-    singular_append_event "l1.product_pass_marker_failed" \
-      "refusing to run product work without durable pass accounting" \
-      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$((attempt + 1))}" || true
-    echo "cannot durably mark product pass started for $task_id; refusing unaccounted execution" >&2
-    exit 1
-  fi
-  if ! l1_record_attempt started; then
-    singular_append_event "l1.attempt_lifecycle_record_failed" \
-      "refusing to run product work without owner-bound attempt disposition" \
-      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$((attempt + 1))}" || true
-    echo "cannot durably bind product attempt to its dispatch reservation" >&2
-    exit 1
+  if [[ "${#authorized_continuation[@]}" -ne 10 ]]; then
+    if ! singular_lease_mark_product_pass_started "$task_id" "$run_id"; then
+      singular_append_event "l1.product_pass_marker_failed" \
+        "refusing to run product work without durable pass accounting" \
+        "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$((attempt + 1))}" || true
+      echo "cannot durably mark product pass started for $task_id; refusing unaccounted execution" >&2
+      exit 1
+    fi
+    if ! l1_record_attempt started; then
+      singular_append_event "l1.attempt_lifecycle_record_failed" \
+        "refusing to run product work without owner-bound attempt disposition" \
+        "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$((attempt + 1))}" || true
+      echo "cannot durably bind product attempt to its dispatch reservation" >&2
+      exit 1
+    fi
   fi
   l1_campaign_publication_end
   [[ "$attempt" -gt 0 ]] && echo "  retry attempt $attempt/$max_retries (last: $attempt_failure)"
@@ -3167,6 +3209,21 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
   assumptions_inject_fix || true
   if run_worker_phase "$n"; then
     if run_audit_phase "$n"; then attempt_ok="yes"; fi
+  fi
+  if [[ "${#authorized_continuation[@]}" -eq 10 \
+      && "$continuation_invocation_started" == "no" ]]; then
+    _l1_outcome="terminal"
+    if [[ "$continuation_preparation_failures" -ge 1 ]]; then
+      singular_task_set_status "$task_file" "blocked" 2>/dev/null || true
+    fi
+    l1_status terminal failed "Continuation preparation failed before worker invocation" true \
+      "Repair the recorded preparation condition, then reserve the exact continuation again" \
+      "continuation-preparation-failed"
+    singular_append_event "l1.continuation_preparation_failed" \
+      "one-shot continuation remains unspent because provider invocation did not start" \
+      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"authorizationId\":\"${authorized_continuation[0]}\",\"failureClass\":\"$attempt_failure\"}" || true
+    echo "continuation preparation failed before worker invocation; authority remains unspent" >&2
+    exit 3
   fi
   if [[ "$attempt_ok" == "yes" ]]; then
     accepted="yes"

@@ -417,13 +417,18 @@ def reserve(args: argparse.Namespace) -> None:
             and continuation.get("state") == "issued"
             else None
         )
+        if (
+            isinstance(continuation, dict)
+            and continuation_issued is None
+            and repair is None
+        ):
+            raise LifecycleError("continuation authority is not reservable")
         terminal = lease.get("terminalDisposition")
         attempt = lease.get("attemptLifecycle")
-        if isinstance(terminal, dict) or (
-            isinstance(attempt, dict) and attempt.get("state") in {"started", "terminal"}
-        ):
-            if continuation_issued is None:
-                raise LifecycleError("terminal or started work requires explicit continuation authority")
+        predecessor_attempt = isinstance(attempt, dict) and attempt.get("state") in {
+            "started", "terminal"
+        }
+        if continuation_issued is not None:
             exact_continuation = (
                 args.branch == continuation_issued.get("branch")
                 and str(Path(args.worktree).resolve())
@@ -439,6 +444,13 @@ def reserve(args: argparse.Namespace) -> None:
             )
             if not exact_continuation:
                 raise LifecycleError("reservation does not match the one-shot continuation authority")
+        elif isinstance(terminal, dict) or predecessor_attempt:
+            # A validated accepted-candidate repair is the other existing form
+            # of explicit successor authority. Its predecessor terminal state
+            # remains history, but must not force the unrelated partial-work
+            # continuation protocol.
+            if repair is None:
+                raise LifecycleError("terminal or started work requires explicit successor authority")
         if status in {"accepted", "integrated"}:
             raise LifecycleError(f"{status} work cannot be reserved for implementation")
         current_owner = str(lease.get("reservationOwner", ""))
@@ -453,6 +465,40 @@ def reserve(args: argparse.Namespace) -> None:
             raise LifecycleError(f"reservation already owned by {current_owner}@{current_generation}")
         generation = current_generation + 1
         timestamp = now()
+        # Admission has succeeded. Move the predecessor generation's immutable
+        # outcome aside before binding a fresh current generation. The guards
+        # above inspect these fields before they are archived, so history can
+        # never turn into implicit redispatch authority.
+        if isinstance(attempt, dict):
+            history = lease.setdefault("attemptHistory", [])
+            identity = (
+                attempt.get("reservationOwner"), attempt.get("reservationGeneration"),
+                attempt.get("runId"), attempt.get("state"),
+            )
+            if not any(
+                isinstance(item, dict) and (
+                    item.get("reservationOwner"), item.get("reservationGeneration"),
+                    item.get("runId"), item.get("state"),
+                ) == identity
+                for item in history
+            ):
+                history.append(copy.deepcopy(attempt))
+            lease.pop("attemptLifecycle", None)
+        if isinstance(terminal, dict):
+            history = lease.setdefault("terminalDispositionHistory", [])
+            identity = (
+                terminal.get("reservationOwner"), terminal.get("reservationGeneration"),
+                terminal.get("runId"), terminal.get("kind"),
+            )
+            if not any(
+                isinstance(item, dict) and (
+                    item.get("reservationOwner"), item.get("reservationGeneration"),
+                    item.get("runId"), item.get("kind"),
+                ) == identity
+                for item in history
+            ):
+                history.append(copy.deepcopy(terminal))
+            lease.pop("terminalDisposition", None)
         lease.update({
             "taskId": args.task,
             "branch": args.branch,
@@ -498,6 +544,31 @@ def bind_dispatch(args: argparse.Namespace) -> None:
             record, args.owner, args.generation
         ):
             raise LifecycleError("dispatch record already belongs to another reservation")
+        same_generation = reservation_matches(record, args.owner, args.generation)
+        if record and not same_generation:
+            # Per-task dispatch files are reused. Preserve the complete prior
+            # generation record, including its terminal attempt and exit
+            # evidence, then remove only generation-local current fields.
+            prior_owner = str(record.get("reservationOwner", ""))
+            prior_generation = int(record.get("reservationGeneration", 0) or 0)
+            if prior_owner and prior_generation:
+                history = record.setdefault("dispatchHistory", [])
+                prior = {
+                    key: copy.deepcopy(value)
+                    for key, value in record.items()
+                    if key not in {"dispatchHistory", "_deleteRecord"}
+                }
+                if not any(
+                    isinstance(item, dict)
+                    and item.get("reservationOwner") == prior_owner
+                    and int(item.get("reservationGeneration", 0) or 0) == prior_generation
+                    for item in history
+                ):
+                    history.append(prior)
+            for key in (
+                "attemptLifecycle", "exitCode", "outcome", "reapedAt", "finishedAt"
+            ):
+                record.pop(key, None)
         record.update({
             "taskId": args.task,
             "runId": args.run,
@@ -567,6 +638,10 @@ def record_attempt(args: argparse.Namespace) -> None:
             }
             if isinstance(previous, dict):
                 value["startedAt"] = previous.get("startedAt", timestamp)
+                if previous.get("continuationAuthorizationId"):
+                    value["continuationAuthorizationId"] = previous[
+                        "continuationAuthorizationId"
+                    ]
             else:
                 value["startedAt"] = timestamp
             if args.state == "terminal":
@@ -761,6 +836,10 @@ def authorize_continuation(args: argparse.Namespace) -> None:
             "partialSnapshotSha256": partial_before["sha256"],
             "partialSnapshot": partial_after,
             "additionalWorkerAttemptsAuthorized": 1,
+            "additionalWorkerAttemptsClaimed": 0,
+            "additionalWorkerAttemptsRemaining": 1,
+            "preparationFailureCount": 0,
+            "automaticPreparationRetriesRemaining": 1,
             "predecessorAccounting": {
                 "retryCount": int(lease.get("retryCount", 0) or 0),
                 "maxRetries": int(lease.get("maxRetries", 0) or 0),
@@ -782,58 +861,133 @@ def authorize_continuation(args: argparse.Namespace) -> None:
 
 def claim_continuation(args: argparse.Namespace) -> None:
     lease_path = Path(args.lease)
+    record_path = Path(args.record)
     task_path = Path(args.task_contract)
-    with locked(lease_path) as lease:
+    # This is the continuation's invocation boundary. Dispatch is locked first
+    # (the same order as record_attempt/finish), then the authority claim and
+    # started-attempt disposition are published together. A crash before this
+    # transaction leaves an unspent reserved authority; a crash after it leaves
+    # an owner-bound started attempt and therefore fails closed.
+    with locked(record_path) as record:
+        if not reservation_matches(record, args.owner, args.generation):
+            raise LifecycleError("continuation attempt does not own the dispatch")
+        if record.get("runId") != args.reservation_run:
+            raise LifecycleError("continuation reservation run does not match dispatch")
+        if record.get("campaignBinding", "legacy") != args.campaign:
+            raise LifecycleError("continuation campaign does not match dispatch")
+        if isinstance(record.get("attemptLifecycle"), dict):
+            raise LifecycleError("continuation dispatch already has an attempt")
+        with locked(lease_path) as lease:
+            authority = lease.get("continuationAuthorization")
+            if not isinstance(authority, dict) or authority.get("state") != "reserved":
+                raise LifecycleError("continuation authority is not reserved or was already consumed")
+            if authority.get("authorizationId") != args.authorization_id:
+                raise LifecycleError("continuation authorization id mismatch")
+            exact = (
+                authority.get("reservationOwner") == args.owner
+                and authority.get("reservationGeneration") == args.generation
+                and authority.get("reservationRunId") == args.reservation_run
+                and authority.get("campaignBinding") == args.campaign
+                and authority.get("candidateSourceSha") == args.candidate_source
+                and authority.get("integrationTargetSha") == args.integration_target
+                and authority.get("engineSourceFingerprint")
+                == args.engine_source_fingerprint
+                and str(Path(str(authority.get("worktree"))).resolve())
+                == str(Path(args.worktree).resolve())
+            )
+            if not exact or not reservation_matches(lease, args.owner, args.generation):
+                raise LifecycleError("continuation claim does not match the reserved execution")
+            if authority.get("taskContractSha256") != sha256(task_path):
+                raise LifecycleError("continuation task contract changed before claim")
+            worktree = Path(args.worktree)
+            if git_output(worktree, "rev-parse", "HEAD") != args.candidate_source:
+                raise LifecycleError("continuation candidate source changed before claim")
+            if not git_is_ancestor(
+                Path(args.repo_root),
+                str(authority.get("targetHeadAtAuthorization", "")),
+                args.reservation_base,
+            ):
+                raise LifecycleError("continuation target head is not an ancestor of the reservation base")
+            if lease.get("reservationBaseSha") != args.reservation_base:
+                raise LifecycleError("continuation reservation base changed before claim")
+            expected_snapshot = authority.get("partialSnapshot")
+            if not isinstance(expected_snapshot, dict):
+                raise LifecycleError("continuation partial snapshot is missing")
+            actual_snapshot = partial_snapshot(
+                worktree,
+                [str(item) for item in expected_snapshot.get("paths", [])],
+                [str(item) for item in expected_snapshot.get("stagedPaths", [])],
+            )
+            if (actual_snapshot["entries"], actual_snapshot["staged"]) != (
+                expected_snapshot.get("entries"), expected_snapshot.get("staged")
+            ):
+                raise LifecycleError("continuation partial work changed after authorization")
+            timestamp = now()
+            attempt = {
+                "schema": "singular.orchestration.attempt-lifecycle.v0",
+                "taskId": args.task,
+                "runId": args.run,
+                "reservationRunId": args.reservation_run,
+                "reservationOwner": args.owner,
+                "reservationGeneration": args.generation,
+                "campaignBinding": args.campaign,
+                "state": "started",
+                "continuationAuthorizationId": args.authorization_id,
+                "startedAt": timestamp,
+                "updatedAt": timestamp,
+            }
+            authority.update({
+                "state": "claimed",
+                "executionRunId": args.run,
+                "claimedAt": timestamp,
+                "additionalWorkerAttemptsClaimed": 1,
+                "additionalWorkerAttemptsRemaining": 0,
+            })
+            record["attemptLifecycle"] = copy.deepcopy(attempt)
+            lease["attemptLifecycle"] = copy.deepcopy(attempt)
+            lease["updatedAt"] = timestamp
+
+
+def rearm_continuation_preparation(args: argparse.Namespace) -> None:
+    """Rearm an unspent continuation after distinct host-repair evidence."""
+    evidence_path = Path(args.evidence).resolve()
+    if not evidence_path.is_file():
+        raise LifecycleError("continuation preparation recovery evidence is missing")
+    evidence_sha = sha256(evidence_path)
+    with locked(Path(args.lease)) as lease:
         authority = lease.get("continuationAuthorization")
-        if not isinstance(authority, dict) or authority.get("state") != "reserved":
-            raise LifecycleError("continuation authority is not reserved or was already consumed")
+        if not isinstance(authority, dict):
+            raise LifecycleError("missing continuation authority")
         if authority.get("authorizationId") != args.authorization_id:
             raise LifecycleError("continuation authorization id mismatch")
-        exact = (
-            authority.get("reservationOwner") == args.owner
-            and authority.get("reservationGeneration") == args.generation
-            and authority.get("reservationRunId") == args.reservation_run
-            and authority.get("campaignBinding") == args.campaign
-            and authority.get("candidateSourceSha") == args.candidate_source
-            and authority.get("integrationTargetSha") == args.integration_target
-            and authority.get("engineSourceFingerprint")
-            == args.engine_source_fingerprint
-            and str(Path(str(authority.get("worktree"))).resolve())
-            == str(Path(args.worktree).resolve())
-        )
-        if not exact or not reservation_matches(lease, args.owner, args.generation):
-            raise LifecycleError("continuation claim does not match the reserved execution")
-        if authority.get("taskContractSha256") != sha256(task_path):
-            raise LifecycleError("continuation task contract changed before claim")
-        worktree = Path(args.worktree)
-        if git_output(worktree, "rev-parse", "HEAD") != args.candidate_source:
-            raise LifecycleError("continuation candidate source changed before claim")
-        if not git_is_ancestor(
-            Path(args.repo_root),
-            str(authority.get("targetHeadAtAuthorization", "")),
-            args.reservation_base,
+        if authority.get("state") != "preparation-blocked":
+            raise LifecycleError("continuation preparation is not blocked")
+        if int(authority.get("additionalWorkerAttemptsClaimed", 0) or 0) != 0:
+            raise LifecycleError("claimed continuation cannot be rearmed")
+        if int(authority.get("additionalWorkerAttemptsRemaining", 0) or 0) != 1:
+            raise LifecycleError("continuation has no unspent worker allowance")
+        history = authority.setdefault("preparationRecoveryEvidence", [])
+        if any(
+            isinstance(item, dict) and item.get("sha256") == evidence_sha
+            for item in history
         ):
-            raise LifecycleError("continuation target head is not an ancestor of the reservation base")
-        if lease.get("reservationBaseSha") != args.reservation_base:
-            raise LifecycleError("continuation reservation base changed before claim")
-        expected_snapshot = authority.get("partialSnapshot")
-        if not isinstance(expected_snapshot, dict):
-            raise LifecycleError("continuation partial snapshot is missing")
-        actual_snapshot = partial_snapshot(
-            worktree,
-            [str(item) for item in expected_snapshot.get("paths", [])],
-            [str(item) for item in expected_snapshot.get("stagedPaths", [])],
-        )
-        if (actual_snapshot["entries"], actual_snapshot["staged"]) != (
-            expected_snapshot.get("entries"), expected_snapshot.get("staged")
-        ):
-            raise LifecycleError("continuation partial work changed after authorization")
-        authority.update({
-            "state": "claimed",
-            "executionRunId": args.run,
-            "claimedAt": now(),
+            raise LifecycleError("continuation preparation recovery evidence was already used")
+        timestamp = now()
+        history.append({
+            "path": str(evidence_path),
+            "sha256": evidence_sha,
+            "recordedAt": timestamp,
         })
-        lease["updatedAt"] = now()
+        authority["state"] = "issued"
+        authority["preparationRearmCount"] = int(
+            authority.get("preparationRearmCount", 0) or 0
+        ) + 1
+        authority["lastPreparationRearmedAt"] = timestamp
+        lease["status"] = "ready"
+        lease["failureReason"] = ""
+        lease["nextAction"] = "reserve the same unspent continuation after host preparation repair"
+        lease["updatedAt"] = timestamp
+        print(authority["authorizationId"])
 
 
 def finish(args: argparse.Namespace) -> None:
@@ -900,16 +1054,27 @@ def finish(args: argparse.Namespace) -> None:
                 # make the exact authority reservable again without changing
                 # its predecessor accounting or partial-work snapshot.
                 timestamp = now()
-                continuation["state"] = "issued"
+                failures = int(continuation.get("preparationFailureCount", 0) or 0) + 1
+                retries_remaining = max(
+                    0,
+                    int(continuation.get("automaticPreparationRetriesRemaining", 1) or 0) - 1,
+                )
+                continuation["preparationFailureCount"] = failures
+                continuation["automaticPreparationRetriesRemaining"] = retries_remaining
+                continuation["state"] = "issued" if failures == 1 else "preparation-blocked"
                 continuation["lastPreparationFailure"] = args.reason
                 continuation["lastPreparationFailureAt"] = timestamp
                 for key in (
                     "reservationOwner", "reservationGeneration", "reservationRunId", "reservedAt"
                 ):
                     continuation.pop(key, None)
-                lease["status"] = "ready"
+                lease["status"] = "ready" if failures == 1 else "blocked"
                 lease["failureReason"] = args.reason
-                lease["nextAction"] = "retry the exact one-shot continuation after repairing host preparation"
+                lease["nextAction"] = (
+                    "retry the exact one-shot continuation after repairing host preparation"
+                    if failures == 1
+                    else "inspect the repeated preparation failure; explicit recovery is required"
+                )
                 lease["updatedAt"] = timestamp
                 lease["lastReservationOwner"] = args.owner
                 lease["lastReservationGeneration"] = max(
@@ -1690,13 +1855,18 @@ def parser() -> argparse.ArgumentParser:
 
     claim_cont = commands.add_parser("claim-continuation")
     for flag in (
-        "lease", "task_contract", "authorization_id", "owner", "reservation_run",
+        "lease", "record", "task", "task_contract", "authorization_id", "owner", "reservation_run",
         "campaign", "candidate_source", "integration_target", "engine_source_fingerprint",
         "repo_root", "reservation_base", "worktree", "run",
     ):
         claim_cont.add_argument("--" + flag.replace("_", "-"), required=True)
     claim_cont.add_argument("--generation", type=int, required=True)
     claim_cont.set_defaults(action=claim_continuation)
+
+    rearm_cont = commands.add_parser("rearm-continuation-preparation")
+    for flag in ("lease", "authorization_id", "evidence"):
+        rearm_cont.add_argument("--" + flag.replace("_", "-"), required=True)
+    rearm_cont.set_defaults(action=rearm_continuation_preparation)
 
     retain = commands.add_parser("retain-candidate")
     for flag in ("lease", "packet", "audit", "task_file", "task", "run", "branch", "head", "tree", "campaign", "acceptance_mode"):

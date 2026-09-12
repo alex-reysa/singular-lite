@@ -256,11 +256,15 @@ CONTINUATION_CALLS="$tmp/calls" SINGULAR_RUNNER="$mock" SINGULAR_WORKER_INFRA_MA
 python3 - "$(singular_lease_path TASK-1108)" "$authorization_id" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-assert d["retryCount"] == 1, d
+assert d["retryCount"] == 0, d
+assert d["maxRetries"] == 1, d
 assert d["productPassStarted"] is True, d
 assert d["continuationAuthorization"]["authorizationId"] == sys.argv[2], d
 assert d["continuationAuthorization"]["state"] == "claimed", d
+assert d["continuationAuthorization"]["additionalWorkerAttemptsClaimed"] == 1, d
+assert d["continuationAuthorization"]["additionalWorkerAttemptsRemaining"] == 0, d
 assert d["terminalDisposition"]["kind"] == "blocked", d
+assert d["terminalDispositionHistory"][0]["kind"] == "orphan-reservation", d
 PY
 if singular_lifecycle_reserve TASK-1108 reconcile:RUN-REPLAY:TASK-1108 RUN-REPLAY \
     agent/brain/TASK-1108 brain '["app.txt"]' "$advanced_target" BATCH-REPLAY "$worktree" \

@@ -74,7 +74,8 @@ singular_lifecycle_claim_continuation() {
   engine_source_fingerprint="$(singular_campaign_engine_source_fingerprint 2>/dev/null || true)"
   [[ -n "$engine_source_fingerprint" ]] || return 2
   python3 "$SINGULAR_TASK_LIFECYCLE" claim-continuation \
-    --lease "$(singular_lease_path "$task_id")" --task-contract "$task_contract" \
+    --lease "$(singular_lease_path "$task_id")" --record "$record" --task "$task_id" \
+    --task-contract "$task_contract" \
     --authorization-id "$authorization_id" --owner "$owner" --generation "$generation" \
     --reservation-run "$reservation_run" --campaign "$campaign_binding" \
     --candidate-source "$candidate_source" --integration-target "$integration_target" \

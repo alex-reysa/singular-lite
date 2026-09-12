@@ -381,6 +381,56 @@ PY
   echo "nextAction=run native reconcile once under campaign $current_campaign; the target may advance only as a descendant of $integration_target while candidate $candidate_source remains preserved"
 }
 
+# --- rearm blocked continuation preparation ---------------------------------
+# A permanent bootstrap/setup failure gets one automatic no-provider retry and
+# then parks. Rearming uses the existing host recovery surface and requires a
+# distinct immutable evidence hash from the repaired host condition; it never
+# creates another worker allowance or resets predecessor accounting.
+ops_rearm_continuation_preparation() {
+  local task_id="${1:-}" authorization_id="" evidence=""
+  [[ -n "$task_id" ]] || {
+    echo "usage: singular recover continuation-preparation TASK-XXXX --authorization-id ID --evidence PATH" >&2
+    return 2
+  }
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --authorization-id) authorization_id="${2:-}"; shift 2 ;;
+      --evidence) evidence="${2:-}"; shift 2 ;;
+      *) echo "usage: singular recover continuation-preparation TASK-XXXX --authorization-id ID --evidence PATH" >&2; return 2 ;;
+    esac
+  done
+  [[ -n "$authorization_id" && -n "$evidence" && -f "$evidence" ]] || {
+    echo "continuation-preparation: authorization id and repair evidence file are required" >&2
+    return 2
+  }
+  local lease task_file op_run result
+  lease="$(singular_lease_path "$task_id")"
+  task_file="$SINGULAR_TASKS_DIR/$task_id.md"
+  [[ -f "$lease" && -f "$task_file" ]] || {
+    echo "continuation-preparation: retained lease and task contract are required" >&2
+    return 2
+  }
+  singular_campaign_verify_or_refuse ops rearm-continuation-preparation || return 2
+  op_run="$(singular_run_id)"
+  singular_acquire_lock "$op_run" || {
+    echo "continuation-preparation: origin lock busy" >&2
+    return 2
+  }
+  trap "singular_release_lock '$op_run' 2>/dev/null || true" EXIT
+  if ! result="$(python3 "$SCRIPT_DIR/task_lifecycle.py" rearm-continuation-preparation \
+      --lease "$lease" --authorization-id "$authorization_id" \
+      --evidence "$evidence")"; then
+    return 2
+  fi
+  singular_task_set_status "$task_file" ready
+  singular_append_event "recovery.continuation_preparation_rearmed" \
+    "host repair evidence rearmed the same unspent continuation" \
+    "{\"taskId\":\"$task_id\",\"authorizationId\":\"$authorization_id\",\"evidenceSha256\":\"$(singular_sha256_file "$evidence")\",\"additionalWorkerAttemptsAuthorized\":1}" || true
+  echo "authorizationId=$result"
+  echo "nextAction=run native reconcile once; predecessor accounting and the one-shot worker limit remain unchanged"
+}
+
 # --- recover-candidate ---------------------------------------------------------
 # Mint recovery authority only from the locked host operations surface. The
 # lifecycle helper validates every predecessor binding again before changing
@@ -1790,6 +1840,7 @@ case "$verb" in
   unpark)        ops_unpark "$@" ;;
   reconcile-orphan-reservation) ops_reconcile_orphan_reservation "$@" ;;
   authorize-continuation) ops_authorize_continuation "$@" ;;
+  rearm-continuation-preparation) ops_rearm_continuation_preparation "$@" ;;
   recover-candidate) ops_recover_candidate "$@" ;;
   clear-backoff) singular_planner_backoff_clear ;;
   breaker)       ops_breaker "$@" ;;
@@ -1803,6 +1854,6 @@ case "$verb" in
   ask)           ops_ask "$@" ;;
   report)        ops_report "$@" ;;
   *)
-    echo "usage: ops.sh supersede|unpark|reconcile-orphan-reservation|authorize-continuation|recover-candidate|clear-backoff|breaker|stop|resume|wake|gates|health|gc|plan|ask|report ..." >&2
+    echo "usage: ops.sh supersede|unpark|reconcile-orphan-reservation|authorize-continuation|rearm-continuation-preparation|recover-candidate|clear-backoff|breaker|stop|resume|wake|gates|health|gc|plan|ask|report ..." >&2
     exit 2 ;;
 esac

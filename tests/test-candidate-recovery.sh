@@ -107,7 +107,21 @@ printf 'untracked predecessor bytes\n' >"$tmp/old-worktree/untracked.txt"
 printf 'historical evidence\n' >"$tmp/old-worktree/.singular-evidence/gate.log"
 python3 - "$lease" "$tmp/old-worktree" <<'PY'
 import json, sys
-p=sys.argv[1]; d=json.load(open(p)); d["worktree"]=sys.argv[2]; json.dump(d,open(p,"w"))
+p=sys.argv[1]; d=json.load(open(p)); d["worktree"]=sys.argv[2]
+owner = "reconcile:RUN-OLD-SCHEDULER:TASK-1107"
+d["attemptLifecycle"] = {
+    "schema": "singular.orchestration.attempt-lifecycle.v0", "taskId": "TASK-1107",
+    "runId": "RUN-OLD", "reservationRunId": "RUN-OLD-SCHEDULER",
+    "reservationOwner": owner, "reservationGeneration": 1,
+    "campaignBinding": "legacy", "state": "terminal", "disposition": "completed",
+    "failureClass": "", "action": "accepted",
+}
+d["terminalDisposition"] = {
+    "schema": "singular.orchestration.terminal-disposition.v0", "kind": "completed",
+    "failureClass": "", "action": "accepted", "runId": "RUN-OLD",
+    "reservationOwner": owner, "reservationGeneration": 1, "campaignBinding": "legacy",
+}
+json.dump(d,open(p,"w"))
 PY
 
 # One durable failure identity is counted once across repeated publication and
@@ -219,6 +233,10 @@ assert d["runId"] == "RUN-REPAIR", d
 assert d["branch"] == "agent/repair", d
 assert d["worktree"] == sys.argv[2], d
 assert d["reservationRunId"] == "RUN-REPAIR", d
+assert "attemptLifecycle" not in d, d
+assert "terminalDisposition" not in d, d
+assert d["attemptHistory"][-1]["runId"] == "RUN-OLD", d
+assert d["terminalDispositionHistory"][-1]["kind"] == "completed", d
 PY
 
 # The changed candidate cannot be retained without a fresh accepted audit and

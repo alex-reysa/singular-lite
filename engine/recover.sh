@@ -33,12 +33,16 @@ if [[ "${1:-}" == "continuation" ]]; then
   shift
   exec "$SCRIPT_DIR/ops.sh" authorize-continuation "$@"
 fi
+if [[ "${1:-}" == "continuation-preparation" ]]; then
+  shift
+  exec "$SCRIPT_DIR/ops.sh" rearm-continuation-preparation "$@"
+fi
 
 mode="scan"
 case "${1:-}" in
   --scan|"") mode="scan" ;;
   --prune) mode="prune" ;;
-  *) echo "usage: $0 [--scan|--prune|candidate TASK-XXXX ...|orphan-reservation TASK-XXXX ...|continuation TASK-XXXX ...]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--scan|--prune|candidate TASK-XXXX ...|orphan-reservation TASK-XXXX ...|continuation TASK-XXXX ...|continuation-preparation TASK-XXXX ...]" >&2; exit 2 ;;
 esac
 
 singular_ensure_state_dirs

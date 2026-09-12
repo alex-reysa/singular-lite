@@ -90,6 +90,61 @@ raw_gen2="$(singular_lifecycle_reserve "$raw_task" reconcile:RAW-2:TASK-0003 RAW
   "$SINGULAR_WORKTREES_DIR/$raw_task")"
 [[ "$raw_gen2" == 2 ]] || fail "generation restarted after native compatibility rewrite: $raw_gen2"
 
+# Reusing a per-task dispatch record archives the predecessor generation and
+# presents a fresh current-generation attempt slot.
+reuse_task=TASK-0004
+reuse_record="$(singular_dispatch_record_path "$reuse_task")"
+reuse_lease="$(singular_lease_path "$reuse_task")"
+cat >"$reuse_record" <<'JSON'
+{"taskId":"TASK-0004","runId":"RUN-OLD","state":"reaped","exitCode":3,"outcome":"terminal","reservationOwner":"old-owner","reservationGeneration":1,"campaignBinding":"legacy","attemptLifecycle":{"schema":"singular.orchestration.attempt-lifecycle.v0","taskId":"TASK-0004","runId":"WORKER-OLD","reservationRunId":"RUN-OLD","reservationOwner":"old-owner","reservationGeneration":1,"campaignBinding":"legacy","state":"terminal","disposition":"blocked","failureClass":"worker-infra","action":"escalate-infra"}}
+JSON
+cat >"$reuse_lease" <<'JSON'
+{"taskId":"TASK-0004","runId":"RUN-NEW","status":"planned","reservationOwner":"new-owner","reservationGeneration":2,"reservationRunId":"RUN-NEW","campaignBinding":"legacy"}
+JSON
+python3 "$SINGULAR_TASK_LIFECYCLE" bind-dispatch --record "$reuse_record" \
+  --task "$reuse_task" --run RUN-NEW --pid 999996 --pid-start gone --pgid 0 \
+  --log reuse.log --base reuse-base --batch reuse-batch \
+  --owner new-owner --generation 2 --campaign legacy
+python3 - "$reuse_record" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert "attemptLifecycle" not in d, d
+assert d["dispatchHistory"][-1]["attemptLifecycle"]["runId"] == "WORKER-OLD", d
+assert d["state"] == "launched" and d["reservationGeneration"] == 2, d
+PY
+singular_lifecycle_record_attempt "$reuse_task" new-owner 2 RUN-NEW started
+[[ "$(singular_json_field "$reuse_record" attemptLifecycle.runId)" == RUN-NEW ]] \
+  || fail "successor generation did not acquire the fresh dispatch attempt slot"
+singular_lifecycle_record_attempt "$reuse_task" new-owner 2 RUN-NEW terminal blocked \
+  worker-infra escalate-infra
+singular_lifecycle_finish "$reuse_task" new-owner 2 reuse-batch driver-exit-3 classify
+singular_lifecycle_dispatch_finalize "$reuse_task" 3 terminal new-owner 2
+
+# A real reaper pass must retain an attributed exit and launched dispatch when
+# the old finish token cannot close a successor lease. This evidence keeps the
+# task active and suppresses duplicate reservation.
+cas_task=TASK-0005
+cas_record="$(singular_dispatch_record_path "$cas_task")"
+cas_lease="$(singular_lease_path "$cas_task")"
+cat >"$cas_record" <<'JSON'
+{"taskId":"TASK-0005","runId":"RUN-OLD","pid":999995,"pidStart":"gone","pgid":0,"baseSha":"old-base","batchId":"old-batch","state":"launched","reservationOwner":"old-owner","reservationGeneration":1,"campaignBinding":"legacy"}
+JSON
+cat >"$cas_lease" <<'JSON'
+{"taskId":"TASK-0005","runId":"RUN-NEW","branch":"agent/test/TASK-0005","area":"test","ownedFiles":[],"baseSha":"new-base","batchId":"new-batch","worktree":"/tmp/unused","status":"planned","reservationOwner":"new-owner","reservationGeneration":2,"reservationRunId":"RUN-NEW","campaignBinding":"legacy"}
+JSON
+python3 "$SINGULAR_TASK_LIFECYCLE" write-exit --record "$cas_record" \
+  --exit-file "$(singular_dispatch_exit_path "$cas_task")" \
+  --owner old-owner --generation 1 --exit-code 3
+reap_out="$(singular_lifecycle_reap_dispatches REAPER-CAS)"
+[[ "$reap_out" == *"workers_running=1"* ]] || fail "failed finish CAS was not retained as active evidence"
+[[ -f "$(singular_dispatch_exit_path "$cas_task")" ]] || fail "failed finish CAS consumed exit evidence"
+[[ "$(singular_json_field "$cas_record" state)" == launched ]] || fail "failed finish CAS finalized dispatch evidence"
+[[ "$(singular_json_field "$cas_lease" reservationOwner)" == new-owner ]] || fail "reaper changed successor lease"
+if singular_lifecycle_reserve "$cas_task" duplicate RUN-DUP agent/test/TASK-0005 \
+    test '[]' duplicate-base duplicate-batch /tmp/duplicate 2>/dev/null; then
+  fail "failed finish CAS permitted a duplicate reservation"
+fi
+
 cat >"$SINGULAR_TASKS_DIR/$task.md" <<'EOF'
 # TASK-0001: lifecycle fixture
 

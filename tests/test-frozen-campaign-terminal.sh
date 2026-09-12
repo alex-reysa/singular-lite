@@ -102,12 +102,20 @@ case "$role" in
     [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]] || exit 94
     [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
       "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]] || exit 95
+    if [[ "${FROZEN_CONTINUATION_EXPECTED:-0}" == "1" ]]; then
+      [[ "$(cat "$worktree/internal/widget/parser.go")" == \
+        'preserved tracked candidate bytes' ]] || exit 98
+      [[ "$(cat "$worktree/internal/widget/note.txt")" == \
+        'preserved untracked candidate bytes' ]] || exit 99
+    fi
     if [[ "${FROZEN_FIXTURE_MODE:-success}" == "infra" ]]; then
       : >"$output"
       exit 124
     fi
     mkdir -p "$worktree/internal/widget" "$worktree/.singular-evidence"
     printf 'package widget\n// frozen campaign candidate\n' >"$worktree/internal/widget/parser.go"
+    [[ -f "$worktree/internal/widget/note.txt" ]] \
+      || printf 'worker note\n' >"$worktree/internal/widget/note.txt"
     printf 'intentional red fixture\n' >"$worktree/.singular-evidence/red.log"
     printf 'green fixture\n' >"$worktree/.singular-evidence/green.log"
     printf 'regression fixture\n' >"$worktree/.singular-evidence/regression.log"
@@ -126,8 +134,8 @@ json.dump({
     "branch": "agent/widget/TASK-0001-frozen",
     "headSha": "uncommitted",
     "workspace": worktree,
-    "ownedFiles": ["internal/widget/parser.go"],
-    "changedFiles": ["internal/widget/parser.go"],
+    "ownedFiles": ["internal/widget/parser.go", "internal/widget/note.txt"],
+    "changedFiles": ["internal/widget/parser.go", "internal/widget/note.txt"],
     "commands": [{"cmd": "bash strict-gate.sh", "exitCode": 0,
                   "logRef": ".singular-evidence/regression.log"}],
     "tests": [
@@ -230,6 +238,7 @@ Implement the frozen campaign widget.
 Owned files:
 
 - `internal/widget/parser.go`
+- `internal/widget/note.txt`
 
 Forbidden files:
 
@@ -279,6 +288,8 @@ run_engine() {
       FROZEN_FIXTURE_MODE="$mode" \
       FROZEN_FIXTURE_COUNTER_DIR="$FIXTURE_COUNTERS" \
       FROZEN_FIXTURE_SOURCE_ROOT="$FIXTURE_ROOT" \
+      FROZEN_CONTINUATION_EXPECTED="${FROZEN_CONTINUATION_EXPECTED:-0}" \
+      CONTINUATION_BOOTSTRAP_MARKER="${CONTINUATION_BOOTSTRAP_MARKER:-}" \
       SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
       SINGULAR_BASH_BIN="$BASH_BIN" \
       SINGULAR_RUNNER="$FIXTURE_RUNNER" \
@@ -368,6 +379,216 @@ for record in (attempt, dispatch_attempt):
 assert attempt == dispatch_attempt, (attempt, dispatch_attempt)
 assert dispatch["state"] == "reaped", dispatch
 PY
+}
+
+prepare_public_continuation() {
+  local name="$1" predecessor_retry="$2" require_bootstrap="$3"
+  make_fixture "$name"
+  CONTINUATION_BOOTSTRAP_MARKER="$scratch/$name/bootstrap-ready"
+  CONTINUATION_BOOTSTRAP_SCRIPT="$scratch/$name/bootstrap-check.sh"
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    printf '[[ -f %q ]]\n' "$CONTINUATION_BOOTSTRAP_MARKER"
+  } >"$CONTINUATION_BOOTSTRAP_SCRIPT"
+  chmod +x "$CONTINUATION_BOOTSTRAP_SCRIPT"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/singular.config.json" "$require_bootstrap" \
+    "$CONTINUATION_BOOTSTRAP_SCRIPT" <<'PY'
+import json, sys
+path, required, script = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["bootstrap"] = {
+    "required": required == "yes",
+    "commands": [{"command": script, "required": True, "lockfiles": []}]
+    if required == "yes" else [],
+}
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
+PY
+  mkdir -p "$FIXTURE_ROOT/internal/widget"
+  printf 'candidate baseline\n' >"$FIXTURE_ROOT/internal/widget/parser.go"
+  git -C "$FIXTURE_ROOT" add singular.config.json internal/widget/parser.go
+  git -C "$FIXTURE_ROOT" commit -qm 'older continuation candidate source'
+  CONTINUATION_CANDIDATE="$(git -C "$FIXTURE_ROOT" rev-parse HEAD)"
+  git -C "$FIXTURE_ROOT" branch agent/widget/TASK-0001-frozen
+  mkdir -p "$FIXTURE_ROOT/.worktrees"
+  git -C "$FIXTURE_ROOT" worktree add -q "$FIXTURE_ROOT/.worktrees/TASK-0001" \
+    agent/widget/TASK-0001-frozen
+  CONTINUATION_WORKTREE="$FIXTURE_ROOT/.worktrees/TASK-0001"
+  printf 'preserved tracked candidate bytes\n' >"$CONTINUATION_WORKTREE/internal/widget/parser.go"
+  printf 'preserved untracked candidate bytes\n' >"$CONTINUATION_WORKTREE/internal/widget/note.txt"
+  CONTINUATION_TRACKED_SHA="$(shasum -a 256 "$CONTINUATION_WORKTREE/internal/widget/parser.go" | awk '{print $1}')"
+  CONTINUATION_UNTRACKED_SHA="$(shasum -a 256 "$CONTINUATION_WORKTREE/internal/widget/note.txt" | awk '{print $1}')"
+
+  printf 'new reservation base\n' >"$FIXTURE_ROOT/reservation-base.txt"
+  git -C "$FIXTURE_ROOT" add reservation-base.txt
+  git -C "$FIXTURE_ROOT" commit -qm 'new engine reservation base'
+  CONTINUATION_RESERVATION_BASE="$(git -C "$FIXTURE_ROOT" rev-parse HEAD)"
+  if [[ "$require_bootstrap" == "yes" ]]; then
+    : >"$CONTINUATION_BOOTSTRAP_MARKER"
+  fi
+  start_campaign success
+  if [[ "$require_bootstrap" == "yes" ]]; then
+    rm -f "$CONTINUATION_BOOTSTRAP_MARKER"
+  fi
+  CONTINUATION_CAMPAIGN="$(run_engine success "$BASH_BIN" -c \
+    '. "$1"; singular_campaign_binding' fixture "$ENGINE_HOME/engine/lib.sh")"
+  CONTINUATION_RUNTIME_FINGERPRINT="$(run_engine success "$BASH_BIN" -c \
+    '. "$1"; singular_campaign_engine_source_fingerprint' fixture "$ENGINE_HOME/engine/lib.sh")"
+  CONTINUATION_OWNER='reconcile:ORIGIN-OLD:TASK-0001'
+  CONTINUATION_GENERATION="$(run_engine success "$BASH_BIN" -c \
+    '. "$1"; SCRIPT_DIR="$2"; . "$2/lifecycle.sh"; singular_lifecycle_reserve TASK-0001 "$3" ORIGIN-OLD agent/widget/TASK-0001-frozen widget '\''["internal/widget/parser.go","internal/widget/note.txt"]'\'' "$4" BATCH-OLD "$5"' \
+    fixture "$ENGINE_HOME/engine/lib.sh" "$ENGINE_HOME/engine" \
+    "$CONTINUATION_OWNER" "$CONTINUATION_RESERVATION_BASE" "$CONTINUATION_WORKTREE")"
+  assert_eq "$CONTINUATION_GENERATION" "1" "$name predecessor reservation generation"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+    "$predecessor_retry" <<'PY'
+import json, os, sys
+path, retry = sys.argv[1], int(sys.argv[2])
+data = json.load(open(path, encoding="utf-8"))
+data["productPassStarted"] = True
+data["productPassStartedRunId"] = "WORKER-OLD"
+data["retryCount"] = retry
+data["maxRetries"] = 1
+tmp = path + ".tmp"
+json.dump(data, open(tmp, "w", encoding="utf-8"), indent=2)
+os.replace(tmp, path)
+PY
+
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/recover.sh" orphan-reservation \
+    TASK-0001 --owner "$CONTINUATION_OWNER" --generation "$CONTINUATION_GENERATION" \
+    --run ORIGIN-OLD --campaign "$CONTINUATION_CAMPAIGN" \
+    --reservation-base "$CONTINUATION_RESERVATION_BASE" \
+    --candidate-source "$CONTINUATION_CANDIDATE" --worktree "$CONTINUATION_WORKTREE" \
+    >"$scratch/$name-orphan-recovery.log"
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/recover.sh" continuation \
+    TASK-0001 --predecessor-owner "$CONTINUATION_OWNER" \
+    --predecessor-generation "$CONTINUATION_GENERATION" --predecessor-run ORIGIN-OLD \
+    --predecessor-campaign "$CONTINUATION_CAMPAIGN" \
+    --predecessor-reservation-base "$CONTINUATION_RESERVATION_BASE" \
+    --candidate-source "$CONTINUATION_CANDIDATE" \
+    --integration-target "$CONTINUATION_RESERVATION_BASE" \
+    --worktree "$CONTINUATION_WORKTREE" >"$scratch/$name-continuation-recovery.log"
+
+  printf 'new current target\n' >"$FIXTURE_ROOT/current-target.txt"
+  git -C "$FIXTURE_ROOT" add current-target.txt
+  git -C "$FIXTURE_ROOT" commit -qm 'advance current integration target'
+  CONTINUATION_CURRENT_TARGET="$(git -C "$FIXTURE_ROOT" rev-parse HEAD)"
+  [[ "$CONTINUATION_CANDIDATE" != "$CONTINUATION_RESERVATION_BASE" \
+      && "$CONTINUATION_RESERVATION_BASE" != "$CONTINUATION_CURRENT_TARGET" ]] \
+    || fail "$name did not keep candidate, reservation base, and current target distinct"
+  git -C "$FIXTURE_ROOT" merge-base --is-ancestor "$CONTINUATION_RESERVATION_BASE" \
+    "$CONTINUATION_CURRENT_TARGET" || fail "$name current target broke authorized ancestry"
+}
+
+assert_public_continuation_identity() {
+  local name="$1" predecessor_retry="$2" expected_generation="$3"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+    "$FIXTURE_ROOT/.singular-state/dispatch/TASK-0001.json" \
+    "$CONTINUATION_CANDIDATE" "$CONTINUATION_RESERVATION_BASE" \
+    "$CONTINUATION_CURRENT_TARGET" "$CONTINUATION_RUNTIME_FINGERPRINT" \
+    "$predecessor_retry" "$expected_generation" <<'PY'
+import json, subprocess, sys
+(lease_path, dispatch_path, candidate, reservation_base, current_target,
+ runtime_fingerprint, retry, generation) = sys.argv[1:]
+lease = json.load(open(lease_path, encoding="utf-8"))
+dispatch = json.load(open(dispatch_path, encoding="utf-8"))
+authority = lease["continuationAuthorization"]
+assert authority["candidateSourceSha"] == candidate, lease
+assert authority["integrationTargetSha"] == reservation_base, lease
+assert lease["reservationBaseSha"] == current_target, lease
+assert authority["engineSourceFingerprint"] == runtime_fingerprint, lease
+assert authority["predecessorAccounting"]["retryCount"] == int(retry), lease
+assert lease["retryCount"] == int(retry), lease
+assert lease["maxRetries"] == 1, lease
+assert authority["additionalWorkerAttemptsAuthorized"] == 1, lease
+assert authority["additionalWorkerAttemptsClaimed"] == 1, lease
+assert authority["additionalWorkerAttemptsRemaining"] == 0, lease
+assert authority["state"] == "claimed", lease
+assert lease["terminalDisposition"]["kind"] == "completed", lease
+assert lease["terminalDispositionHistory"][0]["kind"] == "orphan-reservation", lease
+assert dispatch["reservationGeneration"] == int(generation), dispatch
+assert dispatch["attemptLifecycle"]["state"] == "terminal", dispatch
+assert dispatch["attemptLifecycle"]["continuationAuthorizationId"] == authority["authorizationId"], dispatch
+PY
+  assert_eq "$(calls worker)" "1" "$name exactly one continuation worker"
+  assert_eq "$(calls auditor)" "1" "$name exactly one continuation auditor"
+  assert_eq "$(find "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" \
+    -maxdepth 1 -name '*.json' -not -name '*.audit.json' -type f 2>/dev/null | wc -l | tr -d '[:space:]')" \
+    "1" "$name exactly one accepted publication"
+}
+
+test_public_continuation_budget() {
+  local name="$1" predecessor_retry="$2"
+  prepare_public_continuation "$name" "$predecessor_retry" no
+  FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-dispatch"
+  FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-import"
+  FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-no-duplicate"
+  assert_public_continuation_identity "$name" "$predecessor_retry" 2
+  echo "ok: $name public frozen continuation preserves ordinary retry accounting"
+}
+
+test_public_continuation_bootstrap_reissue() {
+  local name=continuation-bootstrap
+  prepare_public_continuation "$name" 1 yes
+  CONTINUATION_BOOTSTRAP_MARKER="$CONTINUATION_BOOTSTRAP_MARKER" \
+    FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-preparation-failure"
+  assert_eq "$(calls worker)" "0" "$name preparation failure worker calls"
+  [[ "$(shasum -a 256 "$CONTINUATION_WORKTREE/internal/widget/parser.go" | awk '{print $1}')" \
+      == "$CONTINUATION_TRACKED_SHA" ]] || fail "$name changed tracked partial bytes"
+  [[ "$(shasum -a 256 "$CONTINUATION_WORKTREE/internal/widget/note.txt" | awk '{print $1}')" \
+      == "$CONTINUATION_UNTRACKED_SHA" ]] || fail "$name changed untracked partial bytes"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
+assert d["status"] == "ready" and a["state"] == "issued", d
+assert a["preparationFailureCount"] == 1, d
+assert a["automaticPreparationRetriesRemaining"] == 0, d
+assert a["additionalWorkerAttemptsClaimed"] == 0, d
+assert d["retryCount"] == 1 and d["maxRetries"] == 1, d
+assert "attemptLifecycle" not in d, d
+PY
+  CONTINUATION_BOOTSTRAP_MARKER="$CONTINUATION_BOOTSTRAP_MARKER" \
+    FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-repeated-preparation-failure"
+  assert_eq "$(calls worker)" "0" "$name repeated preparation failure worker calls"
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+    "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
+task = open(sys.argv[2], encoding="utf-8").read()
+assert d["status"] == "blocked" and a["state"] == "preparation-blocked", d
+assert a["preparationFailureCount"] == 2, d
+assert a["additionalWorkerAttemptsClaimed"] == 0, d
+assert re.search(r"^Status:\s*blocked\s*$", task, re.MULTILINE | re.IGNORECASE), task
+PY
+  : >"$CONTINUATION_BOOTSTRAP_MARKER"
+  authorization_id="$("$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["continuationAuthorization"]["authorizationId"])
+PY
+)"
+  if run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/recover.sh" \
+      continuation-preparation TASK-0001 --authorization-id "$authorization_id" \
+      --evidence "$scratch/$name/missing-repair-evidence" >/dev/null 2>&1; then
+    fail "$name accepted missing host repair evidence"
+  fi
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/recover.sh" \
+    continuation-preparation TASK-0001 --authorization-id "$authorization_id" \
+    --evidence "$CONTINUATION_BOOTSTRAP_MARKER" \
+    >"$scratch/$name-preparation-rearmed.log"
+  # The two preparation-only reconcile cycles may publish ordinary control
+  # state. Bind the assertion to the actual target used by the final scheduler
+  # reservation; the authority's earlier integration target must remain its
+  # ancestor, not be relabeled as this newer head.
+  CONTINUATION_CURRENT_TARGET="$(git -C "$FIXTURE_ROOT" rev-parse target)"
+  git -C "$FIXTURE_ROOT" merge-base --is-ancestor "$CONTINUATION_RESERVATION_BASE" \
+    "$CONTINUATION_CURRENT_TARGET" || fail "$name repaired target lost authorized ancestry"
+  CONTINUATION_BOOTSTRAP_MARKER="$CONTINUATION_BOOTSTRAP_MARKER" \
+    FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-dispatch"
+  CONTINUATION_BOOTSTRAP_MARKER="$CONTINUATION_BOOTSTRAP_MARKER" \
+    FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-import"
+  CONTINUATION_BOOTSTRAP_MARKER="$CONTINUATION_BOOTSTRAP_MARKER" \
+    FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-no-duplicate"
+  assert_public_continuation_identity "$name" 1 4
+  echo "ok: required bootstrap reissues once, blocks repetition, and completes after evidenced repair"
 }
 
 test_success() {
@@ -462,7 +683,24 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
   success) test_success ;;
   infra) test_infra_exhaustion ;;
   drift) test_policy_drift ;;
-  all) test_success; test_infra_exhaustion; test_policy_drift ;;
+  continuation-budget)
+    test_public_continuation_budget continuation-budget-available 0
+    test_public_continuation_budget continuation-budget-exhausted 1
+    ;;
+  continuation-bootstrap) test_public_continuation_bootstrap_reissue ;;
+  continuation)
+    test_public_continuation_budget continuation-budget-available 0
+    test_public_continuation_budget continuation-budget-exhausted 1
+    test_public_continuation_bootstrap_reissue
+    ;;
+  all)
+    test_success
+    test_infra_exhaustion
+    test_policy_drift
+    test_public_continuation_budget continuation-budget-available 0
+    test_public_continuation_budget continuation-budget-exhausted 1
+    test_public_continuation_bootstrap_reissue
+    ;;
   *) fail "unknown FROZEN_TERMINAL_CASE=${FROZEN_TERMINAL_CASE}" ;;
 esac
 

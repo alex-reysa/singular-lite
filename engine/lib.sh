@@ -5474,7 +5474,8 @@ for key in (
     "recoveryAuthorizations", "failureBudgets", "failureLimits",
     "reservationOwner", "reservationGeneration", "reservationRunId",
     "reservationDeadlineAt", "lastReservationOwner", "lastReservationGeneration",
-    "continuationAuthorization", "attemptLifecycle", "terminalDisposition",
+    "continuationAuthorization", "attemptLifecycle", "attemptHistory",
+    "terminalDisposition", "terminalDispositionHistory",
     "reservationBaseSha",
 ):
     if key in previous:
