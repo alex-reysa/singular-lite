@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-12T14:02:31Z — TASK-1111 — supersede
+
+- Run: `ORIGIN-20260912T140231Z-33862`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: Preserve failed TASK1111 and transfer its one remaining product pass to the complete host-verified diagnostic candidate under a new frozen zero-retry campaign; all work remains supervised.
+
 ### 2026-09-12T12:40:28Z — TASK-1111 — escalate-parked
 
 - Run: `RUN-20260912T123002Z-20014`
