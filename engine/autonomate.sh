@@ -31,7 +31,9 @@ export SINGULAR_GENERATE="${SINGULAR_GENERATE:-1}"
 # canonical paths resolved by lib.sh. Relying on whether the caller happened
 # to export these variables made custom reconcilers observe an empty state
 # directory (or a differently-spelled /var versus /private/var path).
-export SINGULAR_ROOT SINGULAR_STATE_DIR SINGULAR_JSON_CONFIG_FILE
+export SINGULAR_ROOT SINGULAR_STATE_DIR SINGULAR_JSON_CONFIG_FILE \
+  SINGULAR_JSON_CONFIG_SOURCE SINGULAR_JSON_CONFIG_DEFAULT_ROOT \
+  SINGULAR_JSON_CONFIG_DEFAULT_FILE
 sleep_secs="${SINGULAR_SLEEP:-20}"
 quota_sleep_cap="${SINGULAR_QUOTA_SLEEP_CAP:-300}"       # max seconds per quota-window poll nap
 quota_wait_budget="${SINGULAR_QUOTA_WAIT_BUDGET:-10800}" # total quota-wait before escalating to STOP (3h)

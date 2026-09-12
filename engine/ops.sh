@@ -863,6 +863,7 @@ PY
 # --- health ----------------------------------------------------------------------
 ops_health() {
   local json="no"
+  local SINGULAR_DIAGNOSTIC_READONLY=1
   [[ "${1:-}" == "--json" ]] && json="yes"
   local gates_json frontier_json ready_count active_count l1_active l1_stale
   gates_json="$(ops_gates --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(json.dumps({"passed":d["passed"],"total":d["total"]}))' 2>/dev/null || echo '{"passed":null,"total":null}')"
@@ -898,109 +899,20 @@ except Exception:
     *) auto_state="unknown" ;;
   esac
   local disk_free wt_count console_url lifecycle_json resource_json health_details_json
+  local effective_configuration_json
   disk_free="$(singular_free_disk_gb 2>/dev/null || echo null)"
   wt_count="$(find "$SINGULAR_WORKTREES_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | grep -c . || true)"
   console_url="$(head -1 "$SINGULAR_STATE_DIR/console.url" 2>/dev/null || true)"
-  lifecycle_json="$(python3 - "$SINGULAR_RUNS_DIR" "$SINGULAR_LEASES_DIR" "$SINGULAR_TASKS_DIR" <<'PY'
-import collections
-import json
-import pathlib
-import re
-import sys
-
-runs = pathlib.Path(sys.argv[1])
-leases = pathlib.Path(sys.argv[2])
-tasks = pathlib.Path(sys.argv[3])
-records = []
-if runs.is_dir():
-    for path in runs.glob("*/run-status.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if data.get("schema") != "singular.orchestration.run-status.v0":
-            continue
-        records.append(data)
-records.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
-active = [item for item in records if item.get("state") in ("active", "waiting")]
-counts = collections.Counter(str(item.get("phase") or "unknown") for item in active)
-candidates = []
-if leases.is_dir():
-    for path in sorted(leases.glob("*.json")):
-        try:
-            lease = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        candidate = lease.get("acceptedCandidate")
-        history = lease.get("candidateHistory") or []
-        recovery = lease.get("recoveryAuthorization")
-        retained = candidate if isinstance(candidate, dict) else (history[-1] if history else None)
-        if not isinstance(retained, dict):
-            continue
-        failures = [item for item in retained.get("failures", []) if isinstance(item, dict)]
-        latest = failures[-1] if failures else {}
-        task_id = str(lease.get("taskId") or path.stem)
-        dependencies = []
-        task_path = tasks / (task_id + ".md")
-        try:
-            match = re.search(r"^Depends on:\s*\[(.*?)\]", task_path.read_text(encoding="utf-8"), re.M)
-            if match:
-                declared = re.findall(r"TASK-[0-9]+", match.group(1))
-                for dependency in declared:
-                    dependency_status = ""
-                    dependency_task = tasks / (dependency + ".md")
-                    try:
-                        status_match = re.search(
-                            r"^Status:\s*([A-Za-z0-9_-]+)",
-                            dependency_task.read_text(encoding="utf-8"), re.M,
-                        )
-                        dependency_status = status_match.group(1).lower() if status_match else ""
-                    except OSError:
-                        pass
-                    dependency_lease = leases / (dependency + ".json")
-                    try:
-                        lease_status = json.loads(
-                            dependency_lease.read_text(encoding="utf-8")
-                        ).get("status")
-                        if lease_status:
-                            dependency_status = str(lease_status).lower()
-                    except (OSError, json.JSONDecodeError):
-                        pass
-                    if dependency_status != "integrated":
-                        dependencies.append(dependency)
-        except OSError:
-            pass
-        candidates.append({
-            "taskId": task_id,
-            "candidateRunId": retained.get("runId"),
-            "candidateHeadSha": retained.get("headSha"),
-            "candidateTreeSha": retained.get("treeSha"),
-            "state": retained.get("state"),
-            "blockedDependencies": dependencies,
-            "blockedReason": latest.get("failureClass") or (retained.get("recoveryBlock") or {}).get("reason"),
-            "failureDomain": latest.get("domain"),
-            "failureId": latest.get("failureId"),
-            "owner": (recovery or {}).get("authorizedBy") or lease.get("owner") or "origin",
-            "permittedNextAction": lease.get("nextAction") or retained.get("nextAction"),
-            "recoveryAction": (recovery or {}).get("action"),
-            "recoveryState": (recovery or {}).get("state"),
-            "failureBudgets": lease.get("failureBudgets", {"product": 0, "infrastructure": 0, "regate": 0}),
-        })
-print(json.dumps({
-    "active": active[:50],
-    "activeCount": len(active),
-    "phaseCounts": dict(sorted(counts.items())),
-    "implementersActive": counts.get("implementing", 0),
-    "candidates": candidates,
-}, separators=(",", ":")))
-PY
-)"
   resource_json="$("$SCRIPT_DIR/resource-plan.sh" --json 2>/dev/null || echo null)"
   health_details_json="$(python3 "$SCRIPT_DIR/health_details.py" \
     --repo "$SINGULAR_ROOT" \
     --dag "${SINGULAR_DAG_FILE:-$SINGULAR_ORCH_DIR/dag.v0.json}" \
-    --events "$SINGULAR_EVENTS_FILE" 2>/dev/null \
-    || echo '{"diagnostics":{"total":0,"groups":0,"counts":{},"items":[]},"humanGates":{"total":0,"approved":0,"blocking":0,"states":{},"blockedNodes":[],"items":[],"errors":["health detail collection failed"]}}')"
+    --events "$SINGULAR_EVENTS_FILE" \
+    --tasks "$SINGULAR_TASKS_DIR" \
+    --state "$SINGULAR_STATE_DIR" 2>/dev/null \
+    || echo '{"diagnostics":{"total":0,"groups":0,"counts":{},"items":[]},"humanGates":{"total":0,"approved":0,"blocking":0,"states":{},"blockedNodes":[],"items":[],"errors":["health detail collection failed"]},"lifecycle":{"active":[],"activeCount":0,"phaseCounts":{},"implementersActive":0,"candidates":[],"preservedAttempts":[],"unknownRecords":[{"kind":"projector","record":"health_details.py","status":"unknown"}]}}')"
+  lifecycle_json="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]).get("lifecycle",{}),separators=(",",":")))' "$health_details_json" 2>/dev/null || echo '{}')"
+  effective_configuration_json="$(singular_effective_configuration_json 2>/dev/null || echo '{}')"
   local head_sha
   head_sha="$(git -C "$SINGULAR_ROOT" rev-parse --short HEAD 2>/dev/null || echo null)"
 
@@ -1008,7 +920,7 @@ PY
     "$backoff_json" "$breaker_n" "${SINGULAR_MAX_CONSEC_FAILS:-5}" "$stop_present" "$lock_present" \
     "$auto_pid" "$auto_state" "$disk_free" "${SINGULAR_MIN_DISK_GB:-2}" "$wt_count" "$console_url" \
     "${SINGULAR_TARGET_BRANCH:-}" "$head_sha" "$lifecycle_json" "$resource_json" \
-    "$health_details_json" "$json" <<'PY'
+    "$health_details_json" "$effective_configuration_json" "$json" <<'PY'
 import hashlib
 import json
 import sys
@@ -1016,7 +928,8 @@ from datetime import datetime, timezone
 
 (gates_raw, frontier, ready, active, l1a, l1s, backoff_raw, breaker, breaker_max,
  stop, lock, auto_pid, auto_state, disk, min_disk, wt, console_url,
- target, head, lifecycle_raw, resource_raw, health_details_raw, as_json) = sys.argv[1:24]
+ target, head, lifecycle_raw, resource_raw, health_details_raw,
+ effective_configuration_raw, as_json) = sys.argv[1:25]
 
 
 def num(x):
@@ -1049,6 +962,10 @@ except Exception:
             "blockedNodes": [], "items": [], "errors": ["health detail JSON invalid"],
         },
     }
+try:
+    effective_configuration = json.loads(effective_configuration_raw)
+except Exception:
+    effective_configuration = {}
 
 attention = []
 if frontier == "unavailable":
@@ -1097,6 +1014,7 @@ doc = {
                "implementersActive": lifecycle.get("implementersActive", 0)},
     "lifecycle": lifecycle,
     "candidates": lifecycle.get("candidates", []),
+    "effectiveConfiguration": effective_configuration,
     "resources": resources,
     "diagnostics": health_details.get("diagnostics", {}),
     "humanGates": health_details.get("humanGates", {}),

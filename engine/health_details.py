@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import collections
 import datetime as dt
 import json
 from pathlib import Path
@@ -35,6 +36,198 @@ SEVERITIES = {"info", "warning", "error"}
 MAX_EVENT_BYTES = 512 * 1024
 MAX_EVENT_RECORDS = 500
 MAX_DIAGNOSTIC_GROUPS = 50
+
+
+def _json_record(path: Path) -> tuple[dict[str, Any] | None, str]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, json.JSONDecodeError):
+        return None, "corrupt"
+    return (value, "ok") if isinstance(value, dict) else (None, "corrupt")
+
+
+def _blocked_dependencies(task_id: str, tasks: Path, leases: Path) -> list[str]:
+    task_path = tasks / f"{task_id}.md"
+    try:
+        match = re.search(
+            r"^Depends on:\s*\[(.*?)\]",
+            task_path.read_text(encoding="utf-8"),
+            re.M,
+        )
+    except OSError:
+        return []
+    declared = re.findall(r"TASK-[0-9]+", match.group(1)) if match else []
+    blocked: list[str] = []
+    for dependency in declared:
+        status = ""
+        try:
+            status_match = re.search(
+                r"^Status:\s*([A-Za-z0-9_-]+)",
+                (tasks / f"{dependency}.md").read_text(encoding="utf-8"),
+                re.M,
+            )
+            status = status_match.group(1).lower() if status_match else ""
+        except OSError:
+            pass
+        lease, lease_status = _json_record(leases / f"{dependency}.json")
+        if lease_status == "ok" and lease and lease.get("status"):
+            status = str(lease["status"]).lower()
+        if status != "integrated":
+            blocked.append(dependency)
+    return blocked
+
+
+def collect_lifecycle(tasks: Path, state: Path) -> dict[str, Any]:
+    """Project lifecycle/candidate authority from durable records without writes."""
+    tasks = tasks.resolve()
+    state = state.resolve()
+    runs_dir = state / "runs"
+    leases_dir = state / "leases"
+    unknown: list[dict[str, str]] = []
+    records: list[dict[str, Any]] = []
+    if runs_dir.is_dir():
+        for path in sorted(runs_dir.glob("*/run-status.json")):
+            data, status = _json_record(path)
+            if status != "ok" or not data or data.get("schema") != "singular.orchestration.run-status.v0":
+                unknown.append({"kind": "run-status", "record": str(path.relative_to(runs_dir)), "status": "corrupt"})
+                continue
+            records.append(data)
+    records.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
+    active = [item for item in records if item.get("state") in ("active", "waiting")]
+    counts = collections.Counter(str(item.get("phase") or "unknown") for item in active)
+
+    candidates: list[dict[str, Any]] = []
+    accepted_runs: set[str] = set()
+    preserved_history: list[dict[str, Any]] = []
+    history_runs: set[str] = set()
+    if leases_dir.is_dir():
+        for path in sorted(leases_dir.glob("*.json")):
+            lease, status = _json_record(path)
+            if status != "ok" or lease is None:
+                unknown.append({"kind": "lease", "record": path.name, "status": status})
+                continue
+            candidate = lease.get("acceptedCandidate")
+            history = lease.get("candidateHistory")
+            if history is not None and not isinstance(history, list):
+                unknown.append({"kind": "candidate-history", "record": path.name, "status": "corrupt"})
+                history = []
+            recovery = lease.get("recoveryAuthorization")
+            recovery = recovery if isinstance(recovery, dict) else {}
+            task_id = str(lease.get("taskId") or path.stem)
+            for historical in history or []:
+                if not isinstance(historical, dict):
+                    continue
+                history_run = str(historical.get("runId") or "")
+                if not history_run or (isinstance(candidate, dict) and history_run == candidate.get("runId")):
+                    continue
+                history_runs.add(history_run)
+                failures = [item for item in historical.get("failures", []) if isinstance(item, dict)]
+                latest = failures[-1] if failures else {}
+                audit, audit_status = _json_record(runs_dir / history_run / "audit.json")
+                preserved_history.append({
+                    "taskId": task_id, "runId": history_run,
+                    "acceptedCandidate": False, "previouslyAccepted": True,
+                    "state": historical.get("state"), "phase": None,
+                    "headSha": historical.get("headSha"), "treeSha": historical.get("treeSha"),
+                    "owner": recovery.get("authorizedBy") or lease.get("owner") or "origin",
+                    "failureId": latest.get("failureId"), "failureDomain": latest.get("domain"),
+                    "auditVerdict": audit.get("verdict") if audit_status == "ok" and audit else None,
+                    "auditStatus": audit_status,
+                    "permittedNextAction": lease.get("nextAction") or historical.get("nextAction"),
+                    "failureBudgets": lease.get("failureBudgets") if isinstance(lease.get("failureBudgets"), dict) else None,
+                })
+            if not isinstance(candidate, dict):
+                continue
+            failures = [item for item in candidate.get("failures", []) if isinstance(item, dict)]
+            latest = failures[-1] if failures else {}
+            recovery_block = candidate.get("recoveryBlock")
+            recovery_block = recovery_block if isinstance(recovery_block, dict) else {}
+            run_id = candidate.get("runId")
+            if isinstance(run_id, str) and run_id:
+                accepted_runs.add(run_id)
+            candidates.append({
+                "taskId": task_id,
+                "acceptedCandidate": True,
+                "candidateRunId": run_id,
+                "candidateHeadSha": candidate.get("headSha"),
+                "candidateTreeSha": candidate.get("treeSha"),
+                "state": candidate.get("state"),
+                "blockedDependencies": _blocked_dependencies(task_id, tasks, leases_dir),
+                "blockedReason": latest.get("failureClass") or recovery_block.get("reason"),
+                "failureDomain": latest.get("domain"),
+                "failureId": latest.get("failureId"),
+                "owner": recovery.get("authorizedBy") or lease.get("owner") or "origin",
+                "permittedNextAction": lease.get("nextAction") or candidate.get("nextAction"),
+                "recoveryAction": recovery.get("action"),
+                "recoveryState": recovery.get("state"),
+                "failureBudgets": lease.get("failureBudgets") if isinstance(lease.get("failureBudgets"), dict) else None,
+                "failureLimits": lease.get("failureLimits") if isinstance(lease.get("failureLimits"), dict) else None,
+            })
+
+    preserved: list[dict[str, Any]] = list(preserved_history)
+    terminal_states = {"completed", "failed", "stale", "cancelled"}
+    for record in records:
+        run_id = str(record.get("runId") or "")
+        if not run_id or run_id in accepted_runs or run_id in history_runs or str(record.get("state") or "") not in terminal_states:
+            continue
+        audit, audit_status = _json_record(runs_dir / run_id / "audit.json")
+        preserved.append({
+            "taskId": record.get("taskId"),
+            "runId": run_id,
+            "acceptedCandidate": False,
+            "state": record.get("state"),
+            "phase": record.get("phase"),
+            "headSha": record.get("headSha"),
+            "treeSha": record.get("treeSha"),
+            "owner": record.get("owner"),
+            "auditVerdict": audit.get("verdict") if audit_status == "ok" and audit else None,
+            "auditStatus": audit_status,
+            "permittedNextAction": record.get("nextAction"),
+        })
+    return {
+        "schema": "singular.orchestration.lifecycle-diagnostics.v1",
+        "paths": {"tasks": str(tasks), "state": str(state)},
+        "active": active[:50],
+        "activeCount": len(active),
+        "phaseCounts": dict(sorted(counts.items())),
+        "implementersActive": counts.get("implementing", 0),
+        "candidates": candidates,
+        "preservedAttempts": preserved,
+        "unknownRecords": unknown,
+        "sources": {
+            "runs": "ok" if runs_dir.is_dir() else "missing",
+            "leases": "ok" if leases_dir.is_dir() else "missing",
+            "tasks": "ok" if tasks.is_dir() else "missing",
+        },
+    }
+
+
+def unavailable_lifecycle(
+    configuration: dict[str, Any], generation: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Fail-closed lifecycle envelope when durable roots were not resolved."""
+    reason = str(configuration.get("reason") or "configuration-unavailable")
+    return {
+        "schema": "singular.orchestration.lifecycle-diagnostics.v1",
+        "configuration": configuration,
+        "generation": generation or {},
+        "paths": {},
+        "active": [],
+        "activeCount": 0,
+        "phaseCounts": {},
+        "implementersActive": 0,
+        "candidates": [],
+        "preservedAttempts": [],
+        "unknownRecords": [{
+            "kind": "configuration",
+            "record": "startup-resolution",
+            "status": reason,
+            "restartRequired": bool(configuration.get("restartRequired")),
+        }],
+        "sources": {"runs": "unknown", "leases": "unknown", "tasks": "unknown"},
+    }
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -130,7 +323,7 @@ def _diagnostic_for_event(event: dict[str, Any]) -> dict[str, Any]:
         or f"{category}:{event_type}:{message[:160]}",
         256,
     )
-    return {
+    result = {
         "category": category,
         "severity": severity,
         "expected": expected,
@@ -141,6 +334,14 @@ def _diagnostic_for_event(event: dict[str, Any]) -> dict[str, Any]:
         "message": message,
         "lastAt": event.get("ts"),
     }
+    # Diagnostic 2.1 is additive. Preserve explicit evidence qualification so
+    # consumers can distinguish a cache/catalog inference from a provider fact.
+    for key in ("evidenceStatus", "inventoryProvenance"):
+        if isinstance(explicit.get(key), str) and explicit[key]:
+            result[key] = _bounded_text(explicit[key], 128)
+    if isinstance(explicit.get("providerRejected"), bool):
+        result["providerRejected"] = explicit["providerRejected"]
+    return result
 
 
 def collect_diagnostics(events_path: Path) -> dict[str, Any]:
@@ -164,6 +365,7 @@ def collect_diagnostics(events_path: Path) -> dict[str, Any]:
         reverse=True,
     )[:MAX_DIAGNOSTIC_GROUPS]
     return {
+        "schema": "singular.diagnostics.v2.1",
         "total": total,
         "groups": len(groups),
         "counts": {category: counts[category] for category in CATEGORIES},
@@ -270,6 +472,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--dag", type=Path, required=True)
     parser.add_argument("--events", type=Path, required=True)
+    parser.add_argument("--tasks", type=Path)
+    parser.add_argument("--state", type=Path)
     parser.add_argument("--now")
     return parser.parse_args()
 
@@ -288,6 +492,10 @@ def main() -> None:
                 "diagnostics": collect_diagnostics(args.events),
                 "humanGates": collect_human_gates(
                     args.repo.resolve(), args.dag, now=now
+                ),
+                "lifecycle": collect_lifecycle(
+                    args.tasks or args.repo / "docs/orchestration/tasks",
+                    args.state or args.repo / ".singular-state",
                 ),
             },
             separators=(",", ":"),

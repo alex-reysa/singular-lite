@@ -87,27 +87,30 @@ SH
 chmod +x "$tmp/driver.sh" "$tmp/promoter.sh"
 
 run_reconcile() {
-  env SINGULAR_ROOT="$root" \
-    SINGULAR_ORCH_DIR="$root/docs/orchestration" \
-    SINGULAR_TASKS_DIR="$root/docs/orchestration/tasks" \
-    SINGULAR_STATE_DIR="$root/.singular-state" \
-    SINGULAR_LEASES_DIR="$root/.singular-state/leases" \
-    SINGULAR_INBOX_DIR="$root/.singular-state/inbox" \
-    SINGULAR_RUNS_DIR="$root/.singular-state/runs" \
-    SINGULAR_WORKTREES_DIR="$root/.worktrees" \
-    SINGULAR_EVENTS_FILE="$root/.singular-state/events.ndjson" \
-    SINGULAR_ORIGIN_STATE_FILE="$root/.singular-state/origin-state.json" \
-    SINGULAR_SCHEMA_DIR="$root/schemas/orchestration" \
-    SINGULAR_JSON_CONFIG_FILE="$root/singular.config.json" \
-    SINGULAR_CONFIG_FILE="$root/singular.config.sh" \
-    SINGULAR_LOCAL_CONFIG_FILE="$root/.singular-state/config.local.sh" \
-    SINGULAR_TARGET_BRANCH=target \
-    SINGULAR_L1_DRIVER="$tmp/driver.sh" \
-    SINGULAR_PROMOTER="$tmp/promoter.sh" \
-    SINGULAR_GENERATE=0 \
-    SINGULAR_AUTO_INTEGRATE=0 \
-    SINGULAR_DETACHED_DISPATCH=1 \
-    "$@"
+  (
+    unset SINGULAR_JSON_CONFIG_FILE SINGULAR_JSON_CONFIG_SOURCE \
+      SINGULAR_JSON_CONFIG_DEFAULT_ROOT SINGULAR_JSON_CONFIG_DEFAULT_FILE
+    env SINGULAR_ROOT="$root" \
+      SINGULAR_ORCH_DIR="$root/docs/orchestration" \
+      SINGULAR_TASKS_DIR="$root/docs/orchestration/tasks" \
+      SINGULAR_STATE_DIR="$root/.singular-state" \
+      SINGULAR_LEASES_DIR="$root/.singular-state/leases" \
+      SINGULAR_INBOX_DIR="$root/.singular-state/inbox" \
+      SINGULAR_RUNS_DIR="$root/.singular-state/runs" \
+      SINGULAR_WORKTREES_DIR="$root/.worktrees" \
+      SINGULAR_EVENTS_FILE="$root/.singular-state/events.ndjson" \
+      SINGULAR_ORIGIN_STATE_FILE="$root/.singular-state/origin-state.json" \
+      SINGULAR_SCHEMA_DIR="$root/schemas/orchestration" \
+      SINGULAR_CONFIG_FILE="$root/singular.config.sh" \
+      SINGULAR_LOCAL_CONFIG_FILE="$root/.singular-state/config.local.sh" \
+      SINGULAR_TARGET_BRANCH=target \
+      SINGULAR_L1_DRIVER="$tmp/driver.sh" \
+      SINGULAR_PROMOTER="$tmp/promoter.sh" \
+      SINGULAR_GENERATE=0 \
+      SINGULAR_AUTO_INTEGRATE=0 \
+      SINGULAR_DETACHED_DISPATCH=1 \
+      "$@"
+  )
 }
 
 dispatch_evidence() {

@@ -131,8 +131,71 @@ singular_normalize_consumer_path_var() {
   [[ -z "$value" || "$value" == /* ]] || printf -v "$key" '%s/%s' "$SINGULAR_ROOT" "$value"
 }
 
-SINGULAR_JSON_CONFIG_FILE="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
-singular_normalize_consumer_path_var SINGULAR_JSON_CONFIG_FILE
+# Resolve a path whose parent exists without requiring platform-specific
+# realpath flags. JSON selectors may themselves be absent, but their parent is
+# enough to normalize the default path and ordinary relative selectors.
+singular_normalize_config_path_var() {
+  local key="$1" value parent leaf normalized_parent
+  value="${!key:-}"
+  [[ -n "$value" ]] || return 0
+  [[ "$value" == /* ]] || value="$SINGULAR_ROOT/$value"
+  parent="${value%/*}"
+  leaf="${value##*/}"
+  [[ "$parent" != "$value" ]] || parent="/"
+  if [[ -d "$parent" ]]; then
+    normalized_parent="$(cd "$parent" 2>/dev/null && pwd -P)" || normalized_parent=""
+    if [[ -n "$normalized_parent" ]]; then
+      [[ "$normalized_parent" == "/" ]] \
+        && value="/$leaf" \
+        || value="$normalized_parent/$leaf"
+    fi
+  fi
+  printf -v "$key" '%s' "$value"
+}
+
+_singular_json_default_root="$(cd "$SINGULAR_ROOT" 2>/dev/null && pwd -P)" \
+  || _singular_json_default_root="$SINGULAR_ROOT"
+[[ "$_singular_json_default_root" == "/" ]] \
+  && _singular_json_default_file="/singular.config.json" \
+  || _singular_json_default_file="$_singular_json_default_root/singular.config.json"
+_singular_incoming_json_config_file="${SINGULAR_JSON_CONFIG_FILE:-}"
+_singular_incoming_json_config_source="${SINGULAR_JSON_CONFIG_SOURCE:-}"
+_singular_incoming_json_default_root="${SINGULAR_JSON_CONFIG_DEFAULT_ROOT:-}"
+_singular_incoming_json_default_file="${SINGULAR_JSON_CONFIG_DEFAULT_FILE:-}"
+
+if [[ -n "$_singular_incoming_json_config_file" ]]; then
+  SINGULAR_JSON_CONFIG_FILE="$_singular_incoming_json_config_file"
+  singular_normalize_config_path_var SINGULAR_JSON_CONFIG_FILE
+  singular_normalize_config_path_var _singular_incoming_json_default_file
+  if [[ -n "$_singular_incoming_json_default_root" \
+      && "$_singular_incoming_json_default_root" != /* ]]; then
+    _singular_incoming_json_default_root="$SINGULAR_ROOT/$_singular_incoming_json_default_root"
+  fi
+  if [[ -n "$_singular_incoming_json_default_root" \
+      && -d "$_singular_incoming_json_default_root" ]]; then
+    _singular_incoming_json_default_root="$(cd "$_singular_incoming_json_default_root" 2>/dev/null && pwd -P)" \
+      || _singular_incoming_json_default_root=""
+  fi
+  if [[ "$_singular_incoming_json_config_source" == "default" \
+      && "$_singular_incoming_json_default_root" == "$_singular_json_default_root" \
+      && "$_singular_incoming_json_default_file" == "$_singular_json_default_file" \
+      && "$SINGULAR_JSON_CONFIG_FILE" == "$_singular_json_default_file" ]]; then
+    SINGULAR_JSON_CONFIG_SOURCE="default"
+  else
+    SINGULAR_JSON_CONFIG_SOURCE="selector"
+  fi
+else
+  SINGULAR_JSON_CONFIG_FILE="$_singular_json_default_file"
+  SINGULAR_JSON_CONFIG_SOURCE="default"
+fi
+SINGULAR_JSON_CONFIG_DEFAULT_ROOT="$_singular_json_default_root"
+SINGULAR_JSON_CONFIG_DEFAULT_FILE="$_singular_json_default_file"
+_singular_selected_json_config_file="$SINGULAR_JSON_CONFIG_FILE"
+_singular_selected_json_config_source="$SINGULAR_JSON_CONFIG_SOURCE"
+if [[ "$SINGULAR_JSON_CONFIG_SOURCE" == "selector" && ! -f "$SINGULAR_JSON_CONFIG_FILE" ]]; then
+  echo "singular: selected JSON configuration is missing: $SINGULAR_JSON_CONFIG_FILE" >&2
+  exit 2
+fi
 if [[ -f "$SINGULAR_JSON_CONFIG_FILE" ]]; then
   _singular_cfg_env="$(singular_json_config_to_env "$SINGULAR_JSON_CONFIG_FILE")" \
     || { echo "singular: failed to parse $SINGULAR_JSON_CONFIG_FILE" >&2; exit 2; }
@@ -152,6 +215,13 @@ if [[ -f "$SINGULAR_LOCAL_CONFIG_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$SINGULAR_LOCAL_CONFIG_FILE"
 fi
+# These four values describe the input selected before any configuration layer
+# ran. A JSON env{} block or shell layer cannot rewrite its own provenance for a
+# descendant process.
+SINGULAR_JSON_CONFIG_FILE="$_singular_selected_json_config_file"
+SINGULAR_JSON_CONFIG_SOURCE="$_singular_selected_json_config_source"
+SINGULAR_JSON_CONFIG_DEFAULT_ROOT="$_singular_json_default_root"
+SINGULAR_JSON_CONFIG_DEFAULT_FILE="$_singular_json_default_file"
 for _singular_path_var in SINGULAR_STATE_DIR SINGULAR_TASKS_DIR SINGULAR_ORCH_DIR; do
   singular_normalize_consumer_path_var "$_singular_path_var"
 done
@@ -248,6 +318,50 @@ SINGULAR_GIT_L1_EMAIL="${SINGULAR_GIT_L1_EMAIL:-l1@singular.local}"
 if [[ -n "${SINGULAR_RUNNER:-}" && "$SINGULAR_RUNNER" != */* ]]; then
   SINGULAR_RUNNER="$SINGULAR_ENGINE_DIR/$SINGULAR_RUNNER"
 fi
+
+# One read-only diagnostic boundary for the already-resolved runtime view.
+# Shell/local configuration has run exactly once above. Export only values the
+# formatter is allowed to inspect; provider_resolver never serializes arbitrary
+# environment keys, so secrets cannot enter the projection.
+singular_effective_configuration_json() {
+  local key python_bin
+  for key in \
+    SINGULAR_ENGINE_HOME SINGULAR_JSON_CONFIG_FILE SINGULAR_JSON_CONFIG_SOURCE \
+    SINGULAR_JSON_CONFIG_DEFAULT_ROOT SINGULAR_JSON_CONFIG_DEFAULT_FILE \
+    SINGULAR_CONFIG_FILE SINGULAR_LOCAL_CONFIG_FILE \
+    SINGULAR_RUNNER SINGULAR_TARGET_BRANCH \
+    SINGULAR_TASKS_DIR SINGULAR_STATE_DIR SINGULAR_AREA_PATHS \
+    SINGULAR_AREA_PREFIX SINGULAR_MAX_L1_CONCURRENT \
+    SINGULAR_CODEX_MODEL SINGULAR_CODEX_SERVICE_TIER \
+    SINGULAR_CODEX_READONLY_REASONING_EFFORT \
+    SINGULAR_MAX_CONCURRENT SINGULAR_MAX_DISPATCH SINGULAR_MAX_L1_CONCURRENT \
+    SINGULAR_ENABLE_L1_PARALLEL SINGULAR_L1_TASKS_PER_NODE \
+    SINGULAR_L2_SLICE_BUDGET SINGULAR_L2_SLICE_BUDGET_MAX \
+    SINGULAR_MAX_RETRIES SINGULAR_MAX_CONSEC_FAILS SINGULAR_MAX_HOURS \
+    SINGULAR_MIN_DISK_GB SINGULAR_L1_STALE_MINUTES \
+    SINGULAR_PLANNER_BACKOFF_SECONDS SINGULAR_PLANNER_QUOTA_BACKOFF_SECONDS \
+    SINGULAR_PLANNER_OVERLOAD_BACKOFF_SECONDS SINGULAR_OVERLOAD_WAIT_BUDGET \
+    SINGULAR_AUTO_INTEGRATE SINGULAR_PUSH SINGULAR_GENERATE SINGULAR_SLEEP \
+    SINGULAR_SUPERVISOR_INTERVAL_MIN SINGULAR_PAIRED_AUDIT_PCT SINGULAR_CTX_PACKET \
+    SINGULAR_CTX_ROUTING SINGULAR_CTX_ARTIFACT_SCAN SINGULAR_PLAN_CRITIQUE \
+    SINGULAR_PLANNER_SESSION; do
+    [[ -v "$key" ]] && export "$key"
+  done
+  while IFS= read -r key; do
+    case "$key" in
+      SINGULAR_*_MODEL|SINGULAR_*_EFFORT|SINGULAR_*_REASONING_EFFORT|SINGULAR_*_BIN)
+        export "$key"
+        ;;
+    esac
+  done < <(compgen -A variable SINGULAR_)
+  python_bin="${1:-python3}"
+  SINGULAR_JSON_CONFIG_FILE="$_singular_selected_json_config_file" \
+  SINGULAR_JSON_CONFIG_SOURCE="$_singular_selected_json_config_source" \
+  SINGULAR_JSON_CONFIG_DEFAULT_ROOT="$SINGULAR_JSON_CONFIG_DEFAULT_ROOT" \
+  SINGULAR_JSON_CONFIG_DEFAULT_FILE="$SINGULAR_JSON_CONFIG_DEFAULT_FILE" \
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" "$SINGULAR_LIB_DIR/provider_resolver.py" \
+    effective-config --repo "$SINGULAR_ROOT" --environment-effective
+}
 # A gate promoter given as a bare name resolves to a singular-ext module
 # (<engine>/singular-ext/<name>.sh); an absolute/relative path is used as-is.
 if [[ -n "${SINGULAR_PROMOTER:-}" && "$SINGULAR_PROMOTER" != */* ]]; then
@@ -257,6 +371,10 @@ fi
 # Autonomy controls.
 SINGULAR_MAX_RETRIES="${SINGULAR_MAX_RETRIES:-3}"            # per-task worker retries before the decider escalates
 SINGULAR_AUTO_INTEGRATE="${SINGULAR_AUTO_INTEGRATE:-1}"      # direct reconcile/auto/launchd all integrate accepted work by default
+# Discovery only: integrate.sh remains the sole canonical eligibility authority.
+SINGULAR_RECONCILE_INDEX="${SINGULAR_RECONCILE_INDEX:-1}"
+SINGULAR_RECONCILE_FULL_SCAN_EVERY="${SINGULAR_RECONCILE_FULL_SCAN_EVERY:-20}"
+SINGULAR_RECONCILE_INDEX_FILE="${SINGULAR_RECONCILE_INDEX_FILE:-$SINGULAR_STATE_DIR/reconcile-index.json}"
 # Decider fast-path (T-F1): when 1 (default), singular_decider_fast_action resolves
 # clear-cut failure classes by policy without paying a model decider round-trip;
 # set 0 to force every failure through decide.sh (the historical behavior).
@@ -6664,6 +6782,7 @@ singular_dag_next_areas_json() {
 # reports. Mirrors singular_capability_optional_warn_once's O_EXCL marker.
 singular_dag_evaluation_failed_event() {
   local err="$1" exit_code="${2:-2}"
+  [[ "${SINGULAR_DIAGNOSTIC_READONLY:-0}" != "1" ]] || return 0
   local warning_dir="$SINGULAR_STATE_DIR/warnings/dag"
   local key marker
   key="$(singular_sha256_text "$err")"
