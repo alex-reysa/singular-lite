@@ -1024,8 +1024,11 @@ print(json.dumps({
 }, separators=(",", ":")))
 PY
 )"
+  if [[ -z "$event_json" ]]; then
+    event_json='{}'
+  fi
   singular_append_event "campaign.drift_detected" \
-    "$entrypoint refused campaign runtime drift" "${event_json:-{}}" \
+    "$entrypoint refused campaign runtime drift" "$event_json" \
     >/dev/null 2>&1 || true
   return 2
 }
@@ -1150,9 +1153,12 @@ print(json.dumps({
 }, separators=(",", ":")))
 PY
 )"
+  if [[ -z "$event_json" ]]; then
+    event_json='{}'
+  fi
   singular_append_event "campaign.identity_mismatch" \
     "$entrypoint refused work from a different campaign identity" \
-    "${event_json:-{}}" >/dev/null 2>&1 || true
+    "$event_json" >/dev/null 2>&1 || true
   return 2
 }
 
