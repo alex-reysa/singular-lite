@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scopes": [
+    {
+      "name": "knowledge",
+      "base": ".",
+      "output": "generated/KNOWLEDGE.md",
+      "jsonOutput": "generated/KNOWLEDGE.json",
+      "title": "Context service generated fixture",
+      "rootLabel": "fixture",
+      "staleHint": "regenerate fixture",
+      "header": ["<!-- GENERATED — DO NOT EDIT. -->"],
+      "tokenWarnThreshold": 8000,
+      "exhaustive": false,
+      "freshness": {"enabled": true, "sidecar": "generated/.knowledge-freshness.json"},
+      "folders": [
+        {
+          "dir": "notes",
+          "title": "Notes",
+          "character": "durable",
+          "purpose": "Durable fixture knowledge",
+          "scan": "flat"
+        }
+      ],
+      "exclude": [],
+      "tables": []
+    }
+  ]
+}
