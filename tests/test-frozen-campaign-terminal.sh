@@ -941,13 +941,23 @@ PY
   assert_eq "$(calls worker)" "1" "drift worker calls"
   assert_eq "$(calls auditor)" "1" "drift semantic audit completed before refusal"
   "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/events.ndjson" \
-    "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" <<'PY'
+    "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
+    "$FIXTURE_ROOT/.singular-state/campaign/manifest.json" <<'PY'
 import json, sys
 events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-phases = [event.get("data", {}).get("phase") for event in events
-          if event.get("type") == "campaign.drift_detected"]
-assert phases.count("post-accepted-audit-checkpoint") == 1, phases
-assert phases.count("pre-control-state-commit") == 1, phases
+drift_events = [event for event in events if event.get("type") == "campaign.drift_detected"]
+assert len(drift_events) == 2, drift_events
+assert [(event["data"]["entrypoint"], event["data"]["phase"])
+        for event in drift_events] == [
+    ("l1-drive", "post-accepted-audit-checkpoint"),
+    ("reconcile", "pre-control-state-commit"),
+], drift_events
+for event in drift_events:
+    data = event["data"]
+    assert data["manifest"] == sys.argv[3], data
+    assert type(data["verifyExitCode"]) is int, data
+    assert data["verifyExitCode"] == 3, data
+    assert "raw" not in data, data
 assert sum(event.get("type") == "l1.campaign_mismatch" for event in events) == 1, events
 assert not any(event.get("type") == "l1.task_accepted" for event in events), events
 assert not any(event.get("type") == "origin.control_state_committed" for event in events), events
@@ -985,6 +995,13 @@ PY
   assert_terminal_contract campaign-mismatch campaign-mismatch re-audit-current-campaign
   assert_contains "$(cat "$scratch/drift-reconcile-2.log" "$scratch/drift-reconcile-3.log")" \
     'reservation refused for TASK-0001' "drift restart durable reservation refusal"
+  [[ ! -d "$FIXTURE_ROOT/.singular-state/inbox" ]] \
+    || [[ -z "$(find "$FIXTURE_ROOT/.singular-state/inbox" -name '*.json' -type f -print -quit)" ]] \
+    || fail "drift restart published an inbox packet"
+  [[ ! -d "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" ]] \
+    || [[ -z "$(find "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" \
+      -name '*.json' -type f -print -quit)" ]] \
+    || fail "drift restart published an imported packet"
   echo "ok: mid-run policy drift preserves artifacts and refuses duplicate publication"
 }
 
