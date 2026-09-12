@@ -29,6 +29,41 @@ source "$SCRIPT_DIR/lifecycle.sh"
 # inherited bearer token into provider-visible ambient authority.
 unset SINGULAR_ORIGIN_LOCK_CAPABILITY
 
+# Internal provider-boundary adapter used by host evidence delivery. The host
+# first validates and appends its required artifacts, then invokes this adapter
+# with the substituted prompt path. Context selection therefore hashes, budgets,
+# records, and launches the exact bytes the auditor receives.
+if [[ "${1:-}" == "--context-provider-run" ]]; then
+  [[ "$#" -ge 8 ]] || { echo "context provider adapter: missing arguments" >&2; exit 2; }
+  shift
+  context_adapter_role="$1"
+  context_adapter_phase="$2"
+  context_adapter_task="$3"
+  context_adapter_bundle="$4"
+  context_adapter_config="$5"
+  context_adapter_prior="$6"
+  shift 6
+  [[ "${1:-}" == "--" ]] || { echo "context provider adapter: missing command separator" >&2; exit 2; }
+  shift
+  context_adapter_args=("$@")
+  context_adapter_prompt=""
+  for ((context_adapter_i=0; context_adapter_i<${#context_adapter_args[@]}; context_adapter_i++)); do
+    if [[ "${context_adapter_args[$context_adapter_i]}" == "--prompt-file" \
+        && $((context_adapter_i + 1)) -lt ${#context_adapter_args[@]} ]]; then
+      context_adapter_prompt="${context_adapter_args[$((context_adapter_i + 1))]}"
+      break
+    fi
+  done
+  [[ -n "$context_adapter_prompt" ]] \
+    || { echo "context provider adapter: child has no prompt file" >&2; exit 2; }
+  [[ "$context_adapter_prior" != "-" ]] || context_adapter_prior=""
+  SINGULAR_CONTEXT_CONFIG_FILE="$context_adapter_config" \
+    singular_context_invocation_prepare \
+      "$context_adapter_role" "$context_adapter_phase" "$context_adapter_task" \
+      "$context_adapter_prompt" "$context_adapter_bundle" "$context_adapter_prior"
+  exec "${context_adapter_args[@]}"
+fi
+
 # Worker/auditor runner. Defaults to the codex runner; set SINGULAR_RUNNER to a
 # drop-in (e.g. claude-run.sh) to dispatch a different CLI. Same flag surface
 # and same --output-last-message contract is required of any runner.
@@ -1728,22 +1763,28 @@ run_worker_phase() {
   fi
   local context_config="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
   local context_task="$task_file"
-  if [[ "$context_config" == "$SINGULAR_ROOT/"* ]]; then
-    local candidate_config="$worktree/${context_config#$SINGULAR_ROOT/}"
-    [[ -f "$candidate_config" ]] && context_config="$candidate_config"
-  fi
-  if [[ "$task_file" == "$SINGULAR_ROOT/"* ]]; then
-    local candidate_task="$worktree/${task_file#$SINGULAR_ROOT/}"
-    [[ -f "$candidate_task" ]] && context_task="$candidate_task"
-  fi
-  if ! SINGULAR_CONTEXT_CONFIG_FILE="$context_config" \
-      singular_context_invocation_prepare implementer "$context_phase" \
-        "$context_task" "$active_prompt" "$context_bundle" "$context_prior"; then
-    echo "configured context service failed before worker invocation" >&2
-    attempt_failure="configured-context"
-    attempt_ctx="$context_config"
-    return 1
-  fi
+  context_config="$(singular_context_worktree_path "$context_config" "$worktree")"
+  context_task="$(singular_context_worktree_path "$task_file" "$worktree")"
+  # Keep the routed/fix prompt separate from provider-visible context. Every
+  # provider boundary restores this base and asks the service for a new source
+  # snapshot. This prevents cumulative injection while ensuring infrastructure
+  # retries and resume fallbacks observe changed, missing, or revoked sources.
+  local context_base_prompt="$run_dir/l2-context-base-attempt-${n}.md"
+  cp "$active_prompt" "$context_base_prompt" || return 1
+  prepare_worker_context_boundary() {
+    cp "$context_base_prompt" "$active_prompt" || return 1
+    if ! SINGULAR_CONTEXT_CONFIG_FILE="$context_config" \
+        singular_context_invocation_prepare implementer "$context_phase" \
+          "$context_task" "$active_prompt" "$context_bundle" "$context_prior"; then
+      echo "configured context service failed before worker invocation" >&2
+      attempt_failure="configured-context"
+      attempt_ctx="$context_config"
+      return 1
+    fi
+    [[ ! -f "$context_bundle" ]] || context_prior="$context_bundle"
+    context_phase="implement-retry"
+    return 0
+  }
 
   local worker_resume_failed="no"
   for ((worker_try=0; worker_try<=worker_infra_max; worker_try++)); do
@@ -1754,6 +1795,7 @@ run_worker_phase() {
         "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"try\":$worker_try,\"reason\":\"$worker_fc\",\"budgetDomain\":\"worker-infrastructure\",\"maxExtraRetries\":$worker_infra_max,\"consumesProductRepairBudget\":false}"
       echo "  worker infra retry $worker_try/$worker_infra_max ($worker_fc)..."
     fi
+    prepare_worker_context_boundary || return 1
     rm -f "$run_dir/last-message.json"
     # Resume only on the FIRST try; infra retries are always fresh.
     local worker_run_args=(--level l2 -C "$worktree" --run-id "$run_id" \
@@ -1812,6 +1854,7 @@ run_worker_phase() {
       worker_result_file="$run_dir/implementer-attempt-${n}-try-${worker_try}-resume-fallback-runner-result.json"
       worker_rc=0
       rm -f "$run_dir/last-message.json"
+      prepare_worker_context_boundary || return 1
       singular_runner_contract_prepare \
         "$l2_runner" implementer "$worker_capability_profile" "$worker_result_file"
       SINGULAR_RUNNER_ROLE=implementer \
@@ -2568,26 +2611,8 @@ PY
   local audit_context_bundle="$run_dir/context-review-target-attempt-${n}.bundle.json"
   local audit_context_config="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
   local audit_context_task="$task_file"
-  if [[ "$audit_context_config" == "$SINGULAR_ROOT/"* ]]; then
-    local candidate_audit_config="$worktree/${audit_context_config#$SINGULAR_ROOT/}"
-    [[ -f "$candidate_audit_config" ]] && audit_context_config="$candidate_audit_config"
-  fi
-  if [[ "$task_file" == "$SINGULAR_ROOT/"* ]]; then
-    local candidate_audit_task="$worktree/${task_file#$SINGULAR_ROOT/}"
-    [[ -f "$candidate_audit_task" ]] && audit_context_task="$candidate_audit_task"
-  fi
-  if ! SINGULAR_CONTEXT_CONFIG_FILE="$audit_context_config" \
-      singular_context_invocation_prepare review-target final-audit \
-        "$audit_context_task" "$active_audit_prompt" "$audit_context_bundle"; then
-    write_host_audit_verdict "inconclusive-infrastructure" "blocked" \
-      "The configured context service could not assemble a fresh review-target bundle."
-    verdict="blocked"
-    append_audit_evidence
-    attempt_failure="configured-context"
-    attempt_ctx="$audit_context_config"
-    return 1
-  fi
-
+  audit_context_config="$(singular_context_worktree_path "$audit_context_config" "$worktree")"
+  audit_context_task="$(singular_context_worktree_path "$task_file" "$worktree")"
   # ---- Auditor runner with bounded infra-retry (T-E6) -----------------------
   # An auditor "infra failure" is the runner itself timing out (rc 124) / refusing
   # (later-wave rc 86), the record file never appearing, or output that carries no
@@ -2679,28 +2704,22 @@ PY
     audit_capability_profile="${SINGULAR_AUDITOR_CAPABILITY_PROFILE:-audit-core}"
     singular_runner_contract_prepare \
       "$SINGULAR_RUNNER_BIN" auditor "$audit_capability_profile" "$audit_result_file"
-    if [[ "${SINGULAR_TEST_CONTEXT_INVOCATION_DIRECT_AUDIT:-0}" == "1" \
-        || "$(basename "$SINGULAR_RUNNER_BIN")" == "mock-runner.sh" ]]; then
-      # Hermetic no-paid-call fixtures only: their sandbox cannot create the
-      # Unix evidence broker. Production runners and ordinary regressions retain
-      # the host-owned evidence transport below. The established paired-audit
-      # fixture's runner is intentionally named mock-runner.sh.
-      SINGULAR_RUNNER_ROLE=auditor \
-      SINGULAR_RUNNER_CAPABILITY_PROFILE="$audit_capability_profile" \
-      SINGULAR_RUNNER_RESULT_FILE="$audit_result_file" \
-        "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
-          "${audit_run_args[@]}" >>"$auditor_log" 2>&1 &
-    else
-      SINGULAR_RUNNER_ROLE=auditor \
-      SINGULAR_RUNNER_CAPABILITY_PROFILE="$audit_capability_profile" \
-      SINGULAR_RUNNER_RESULT_FILE="$audit_result_file" \
-        python3 "$SCRIPT_DIR/evidence_delivery.py" run \
-          --manifest "$run_dir/evidence-manifest.json" \
-          --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
-          --required packet.json --required audit-verification.json -- \
-          "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
-          "${audit_run_args[@]}" >>"$auditor_log" 2>&1 &
+    local audit_bundle_for_try="$audit_context_bundle"
+    if [[ "$audit_try" -gt 0 ]]; then
+      audit_bundle_for_try="$run_dir/context-review-target-attempt-${n}-try-${audit_try}.bundle.json"
     fi
+    SINGULAR_RUNNER_ROLE=auditor \
+    SINGULAR_RUNNER_CAPABILITY_PROFILE="$audit_capability_profile" \
+    SINGULAR_RUNNER_RESULT_FILE="$audit_result_file" \
+      python3 "$SCRIPT_DIR/evidence_delivery.py" run \
+        --manifest "$run_dir/evidence-manifest.json" \
+        --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
+        --required packet.json --required audit-verification.json -- \
+        "$SCRIPT_DIR/l1-drive.sh" --context-provider-run \
+          review-target final-audit "$audit_context_task" "$audit_bundle_for_try" \
+          "$audit_context_config" - -- \
+        "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
+        "${audit_run_args[@]}" >>"$auditor_log" 2>&1 &
     audit_pid="$!"
     audit_child_pgid="$(ps -o pgid= -p "$audit_pid" 2>/dev/null | tr -d '[:space:]' || true)"
     [[ "$audit_child_pgid" =~ ^[1-9][0-9]*$ ]] || audit_child_pgid="$l1_pgid"

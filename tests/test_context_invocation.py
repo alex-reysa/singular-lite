@@ -118,6 +118,48 @@ class ContextInvocationTest(unittest.TestCase):
                 delivery="delta", prior_bundle=changed,
             )
 
+    def test_delta_obligation_provenance_preserves_offsets_and_budget_classes(self) -> None:
+        config = self.config()
+        task = self.repo / "task.md"
+        base = self.repo / "base.md"
+        task_text = "# Task\n\nA mandatory contract added after the driver prompt.\n"
+        run_text = (
+            "model preface that is not an obligation\n"
+            "[open] preserve the first mandatory invariant\n"
+            "unrelated model conclusion between obligations\n"
+            "[violated] preserve the second mandatory invariant\n"
+        )
+        write(task, task_text)
+        write(base, "AUTHORITATIVE DRIVER PROMPT\n")
+        write(self.repo / "context/worker.json", run_text)
+        first = ContextService.from_config(config, role="implementer", phase="implement").build(
+            task=task, phase="implement", budget_bytes=8192, base_prompt=base,
+            delivery="initial",
+        )
+        delta = ContextService.from_config(config, role="implementer", phase="retry").build(
+            task=task, phase="retry", budget_bytes=8192, base_prompt=base,
+            delivery="delta", prior_bundle=first,
+        )
+        source = (self.repo / "context/worker.json").read_bytes()
+        obligation_items = [
+            item for item in delta["provenance"]
+            if "mandatory_open_or_violated_obligation" in item["reasons"]
+        ]
+        self.assertEqual(len(obligation_items), 2)
+        self.assertGreater(obligation_items[0]["range"]["startByte"], 0)
+        self.assertGreater(obligation_items[1]["range"]["startByte"],
+                           obligation_items[0]["range"]["endByte"])
+        for item in obligation_items:
+            start, end = item["range"]["startByte"], item["range"]["endByte"]
+            excerpt = source[start:end]
+            self.assertEqual(item["excerptSha256"],
+                             "sha256:" + hashlib.sha256(excerpt).hexdigest())
+        budget = delta["budget"]
+        self.assertEqual(budget["mandatoryBytes"] + budget["optionalBytes"],
+                         budget["usedBytes"])
+        self.assertGreater(budget["mandatoryBytes"], len(base.read_bytes()))
+        self.assertIn(task_text, delta["prompt"])
+
     def test_doctor_exposes_effective_context_policy_and_provenance(self) -> None:
         config = self.config()
         sys.path.insert(0, str(ROOT / "engine"))
@@ -296,7 +338,37 @@ count=$((count + 1)); printf '%s\n' "$count" >"{capture}/$kind.count"
 cp "$prompt" "{capture}/$kind-$count.md"
 cp "$prompt" "{capture}/$kind.md"
 printf '%s\n' "$@" >"{capture}/$kind.args"
+if [[ "$role" == implementer && "$count" -gt 1 ]]; then
+  case "${{DRIVER_STUB_INFRA_TRANSITION:-}}" in
+    changed) printf 'ORBIT-CONTEXT planner implement widget invariant\n' >"$worktree/context/shared.md" ;;
+    revoked)
+      python3 - "$worktree/singular.config.json" <<'PY'
+import json,sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["contextService"]["codePaths"] = ["context/shared.md"]
+json.dump(value, open(path, "w", encoding="utf-8"), sort_keys=True)
+PY
+      ;;
+  esac
+fi
 if [[ "$role" == implementer ]]; then
+  if [[ "${{DRIVER_STUB_INFRA_TRANSITION:-}}" != "" && "$count" == "1" ]]; then
+    case "${{DRIVER_STUB_INFRA_TRANSITION}}" in
+      changed) printf 'ORBIT-CONTEXT CHANGED BETWEEN PROVIDERS\n' >"$worktree/context/shared.md" ;;
+      missing) rm -f "$worktree/context/shared.md" ;;
+      revoked)
+        python3 - "$worktree/singular.config.json" <<'PY'
+import json,sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["contextService"]["codePaths"] = []
+json.dump(value, open(path, "w", encoding="utf-8"), sort_keys=True)
+PY
+        ;;
+    esac
+    exit 124
+  fi
   printf 'ORBIT-CONTEXT implemented attempt %s\n' "$count" >"$worktree/widget.txt"
   python3 - "$out" "$worktree" <<'PY'
 import json,sys
@@ -312,6 +384,10 @@ PY
 elif [[ "$kind" == paired ]]; then
   printf '%s\n' '{{"verdict":"accepted","findings":[]}}' >"$out"
 elif [[ "$role" == auditor ]]; then
+  if [[ "${{DRIVER_STUB_AUDIT_REPAIR:-0}}" == "1" && "$count" == "1" ]]; then
+    printf '%s\n' '{{"schema":"wrong.audit.schema","verdict":"accepted"}}' >"$out"
+    exit 0
+  fi
   python3 - "$out" "$run_id" "$count" "${{DRIVER_STUB_RETRY:-0}}" <<'PY'
 import json,sys
 retry = sys.argv[4] == "1" and sys.argv[3] == "1"
@@ -335,8 +411,30 @@ fi
             self.assertEqual(completed.returncode, 0, completed.stdout)
         return config, stub, capture
 
-    def test_real_worker_final_and_paired_audits_use_isolated_atomic_bundles(self) -> None:
-        config, stub, capture = self.worker_fixture()
+    def worker_env(self, config: Path, stub: Path, **extra: str) -> dict[str, str]:
+        # Managed sandboxes can forbid AF_UNIX bind. Evidence delivery still
+        # runs its production validation, composition, charging, and child
+        # launch path; only the unused optional paging broker is replaced.
+        site_dir = Path(self.temp.name) / "no-unix-broker"
+        write(site_dir / "sitecustomize.py", """\
+import socketserver
+import threading
+
+class _NoUnixBroker:
+    daemon_threads = True
+    def __init__(self, *args, **kwargs):
+        self._closed = threading.Event()
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.shutdown()
+    def serve_forever(self):
+        self._closed.wait(30)
+    def shutdown(self):
+        self._closed.set()
+
+socketserver.ThreadingUnixStreamServer = _NoUnixBroker
+""")
         env = {
             "SINGULAR_ROOT": str(self.repo), "SINGULAR_ENGINE_HOME": str(ROOT),
             "SINGULAR_ORCH_DIR": str(self.repo / "docs/orchestration"),
@@ -345,11 +443,17 @@ fi
             "SINGULAR_TARGET_BRANCH": "target", "SINGULAR_RUNNER": str(stub),
             "SINGULAR_JSON_CONFIG_FILE": str(config), "SINGULAR_MAX_RETRIES": "0",
             "SINGULAR_WORKER_INFRA_MAX": "0", "SINGULAR_AUDIT_INFRA_MAX": "0",
-            "SINGULAR_AUDIT_VERIFY": "0", "SINGULAR_PAIRED_AUDIT_PCT": "100",
+            "SINGULAR_AUDIT_VERIFY": "0", "SINGULAR_PAIRED_AUDIT_PCT": "0",
             "SINGULAR_CTX_ROUTING": "0", "SINGULAR_DISK_RESERVE_BYTES": "0",
             "SINGULAR_MIN_DISK_GB": "0", "TMPDIR": "/tmp",
-            "SINGULAR_TEST_CONTEXT_INVOCATION_DIRECT_AUDIT": "1",
+            "PYTHONPATH": str(site_dir),
         }
+        env.update(extra)
+        return env
+
+    def test_real_worker_final_and_paired_audits_use_isolated_atomic_bundles(self) -> None:
+        config, stub, capture = self.worker_fixture()
+        env = self.worker_env(config, stub, SINGULAR_PAIRED_AUDIT_PCT="100")
         result = run([str(BASH), str(ROOT / "engine/l1-drive.sh"), "TASK-0001"],
                      cwd=self.repo, env=env)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -362,6 +466,9 @@ fi
             self.assertIn("ORBIT-CONTEXT planner implement widget invariant", audit_prompt)
             self.assertIn("REQUIRED-ORBIT-OBLIGATION", audit_prompt)
             self.assertNotIn("WORKER-CONCLUSION-UNTRUSTED", audit_prompt)
+            self.assertIn("## Complete host-delivered review evidence", audit_prompt)
+            self.assertIn("Artifact: packet.json SHA256:", audit_prompt)
+            self.assertIn("Artifact: audit-verification.json SHA256:", audit_prompt)
         self.assertNotIn("--resume-session", (capture / "auditor.args").read_text())
         self.assertNotIn("--resume-session", (capture / "paired.args").read_text())
 
@@ -382,23 +489,13 @@ fi
         audit_bundle = json.loads((run_dir / "context-review-target-attempt-1.bundle.json").read_text())
         self.assertEqual(audit_bundle["identity"]["role"], "review-target")
         self.assertNotIn("run", {item["kind"] for item in audit_bundle["provenance"]})
+        self.assertTrue((self.repo / ".singular-state/evidence-deliveries.sqlite3").is_file())
 
     def test_real_worker_product_retry_receives_context_delta_references(self) -> None:
         config, stub, capture = self.worker_fixture()
-        env = {
-            "SINGULAR_ROOT": str(self.repo), "SINGULAR_ENGINE_HOME": str(ROOT),
-            "SINGULAR_ORCH_DIR": str(self.repo / "docs/orchestration"),
-            "SINGULAR_TASKS_DIR": str(self.repo / "docs/orchestration/tasks"),
-            "SINGULAR_STATE_DIR": str(self.repo / ".singular-state"),
-            "SINGULAR_TARGET_BRANCH": "target", "SINGULAR_RUNNER": str(stub),
-            "SINGULAR_JSON_CONFIG_FILE": str(config), "SINGULAR_MAX_RETRIES": "1",
-            "SINGULAR_WORKER_INFRA_MAX": "0", "SINGULAR_AUDIT_INFRA_MAX": "0",
-            "SINGULAR_AUDIT_VERIFY": "0", "SINGULAR_PAIRED_AUDIT_PCT": "0",
-            "SINGULAR_CTX_ROUTING": "0", "SINGULAR_DISK_RESERVE_BYTES": "0",
-            "SINGULAR_MIN_DISK_GB": "0", "TMPDIR": "/tmp",
-            "SINGULAR_TEST_CONTEXT_INVOCATION_DIRECT_AUDIT": "1",
-            "DRIVER_STUB_RETRY": "1",
-        }
+        env = self.worker_env(
+            config, stub, SINGULAR_MAX_RETRIES="1", DRIVER_STUB_RETRY="1"
+        )
         result = run([str(BASH), str(ROOT / "engine/l1-drive.sh"), "TASK-0001"],
                      cwd=self.repo, env=env)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -413,6 +510,74 @@ fi
         self.assertIn("unchanged_immutable_reference", reasons)
         self.assertTrue(any(reason.startswith("prior_bundle:sha256:") for reason in reasons))
         self.assertLessEqual(retry_bundle["budget"]["usedBytes"], retry_bundle["budget"]["limitBytes"])
+
+    def test_worker_infrastructure_retry_revalidates_changed_source(self) -> None:
+        config, stub, capture = self.worker_fixture()
+        env = self.worker_env(
+            config, stub, SINGULAR_WORKER_INFRA_MAX="1",
+            DRIVER_STUB_INFRA_TRANSITION="changed",
+        )
+        result = run([str(BASH), str(ROOT / "engine/l1-drive.sh"), "TASK-0001"],
+                     cwd=self.repo, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        second = (capture / "implementer-2.md").read_text(encoding="utf-8")
+        self.assertIn("ORBIT-CONTEXT CHANGED BETWEEN PROVIDERS", second)
+        self.assertNotIn("planner implement widget invariant", second)
+        run_dir = next((self.repo / ".singular-state/runs").glob("RUN-*"))
+        bundle = json.loads((run_dir / "context-implementer-attempt-1.bundle.json").read_text())
+        self.assertEqual(bundle["prompt"], second)
+        self.assertIn("changed_source", [reason for item in bundle["provenance"]
+                                         for reason in item["reasons"]])
+
+    def test_worker_infrastructure_retry_revalidates_missing_and_revoked_sources(self) -> None:
+        for transition in ("missing", "revoked"):
+            with self.subTest(transition=transition):
+                if transition != "missing":
+                    self.temp.cleanup()
+                    self.temp = tempfile.TemporaryDirectory(
+                        prefix="singular-context-transition.", dir="/tmp")
+                    self.repo = Path(self.temp.name) / "repo"
+                    self.repo.mkdir()
+                config, stub, capture = self.worker_fixture()
+                env = self.worker_env(
+                    config, stub, SINGULAR_WORKER_INFRA_MAX="1",
+                    DRIVER_STUB_INFRA_TRANSITION=transition,
+                )
+                result = run([str(BASH), str(ROOT / "engine/l1-drive.sh"), "TASK-0001"],
+                             cwd=self.repo, env=env)
+                if transition == "missing":
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("missing source", result.stdout)
+                    self.assertEqual((capture / "implementer.count").read_text().strip(), "1")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    second = (capture / "implementer-2.md").read_text(encoding="utf-8")
+                    self.assertIn("Revoked since the prior bundle: code:context/shared.md", second)
+                    run_dir = next((self.repo / ".singular-state/runs").glob("RUN-*"))
+                    bundle = json.loads((run_dir / "context-implementer-attempt-1.bundle.json").read_text())
+                    self.assertIn({"ref": "code:context/shared.md",
+                                   "reason": "revoked_since_prior_bundle"}, bundle["omissions"])
+
+    def test_audit_validation_repair_bundle_matches_host_delivered_prompt(self) -> None:
+        config, stub, capture = self.worker_fixture()
+        env = self.worker_env(
+            config, stub, SINGULAR_AUDIT_INFRA_MAX="1", DRIVER_STUB_AUDIT_REPAIR="1"
+        )
+        result = run([str(BASH), str(ROOT / "engine/l1-drive.sh"), "TASK-0001"],
+                     cwd=self.repo, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        repaired = (capture / "auditor-2.md").read_text(encoding="utf-8")
+        self.assertIn("audit-repair-input", repaired)
+        self.assertIn("wrong.audit.schema", repaired)
+        self.assertIn("## Complete host-delivered review evidence", repaired)
+        run_dir = next((self.repo / ".singular-state/runs").glob("RUN-*"))
+        bundle = json.loads(
+            (run_dir / "context-review-target-attempt-1-try-1.bundle.json").read_text()
+        )
+        self.assertEqual(bundle["prompt"], repaired)
+        self.assertEqual(bundle["promptSha256"],
+                         "sha256:" + hashlib.sha256(repaired.encode()).hexdigest())
+        self.assertLessEqual(bundle["budget"]["usedBytes"], bundle["budget"]["limitBytes"])
 
 
 if __name__ == "__main__":

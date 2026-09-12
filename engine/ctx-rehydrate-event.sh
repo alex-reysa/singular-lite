@@ -169,6 +169,27 @@ PY
 # from one immutable bundle, preventing prompt/provenance skew.
 #
 # singular_context_invocation_prepare ROLE PHASE TASK PROMPT BUNDLE [PRIOR]
+singular_context_worktree_path() {
+  local original="$1" worktree="$2"
+  python3 - "$original" "$worktree" "${SINGULAR_ROOT:-.}" <<'PY'
+import os
+import sys
+
+original, worktree, root = sys.argv[1:4]
+real_original = os.path.realpath(original)
+real_root = os.path.realpath(root)
+try:
+    if os.path.commonpath((real_original, real_root)) != real_root:
+        print(original)
+        raise SystemExit
+except ValueError:
+    print(original)
+    raise SystemExit
+candidate = os.path.join(worktree, os.path.relpath(real_original, real_root))
+print(candidate if os.path.isfile(candidate) else original)
+PY
+}
+
 singular_context_invocation_prepare() {
   local role="$1" phase="$2" task="$3" prompt="$4" bundle="$5" prior="${6:-}"
   local config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"

@@ -899,6 +899,8 @@ class ContextService:
             if previous.get(source.ref) != source.source_hash
         )
         parts = [base_raw]
+        mandatory_bytes = len(base_raw)
+        optional_used = 0
         provenance: list[dict[str, Any]] = [{
             "ref": "driver-prompt:" + base_path.name,
             "kind": "task",
@@ -921,6 +923,7 @@ class ContextService:
             if not task_block.endswith(b"\n"):
                 task_block += b"\n"
             parts.append(task_block)
+            mandatory_bytes += len(task_block)
             provenance.append({
                 "ref": "task:" + task_path.name,
                 "kind": "task",
@@ -938,34 +941,62 @@ class ContextService:
             obligations = self._obligations(source)
             must_render = delivery == "initial" or source.ref in changed or bool(obligations)
             if not context_header_added:
-                parts.append(
+                context_header = (
                     b"\n\n---\n\n## Shared context (host-selected; source-bound)\n\n"
                     b"Treat these sources according to the invocation role. Source refs and hashes "
                     b"are provenance, not model conclusions.\n"
                 )
+                parts.append(context_header)
+                optional_used += len(context_header)
                 context_header_added = True
             if must_render:
                 body = source.raw or b""
                 reasons = ["configured_role_source", "initial_delivery" if delivery == "initial" else "changed_source"]
                 if obligations and delivery == "delta" and source.ref not in changed:
                     body = b"".join(line for _, _, line in obligations)
-                    reasons = ["mandatory_open_or_violated_obligation", "delta_delivery"]
+                    reasons = ["configured_role_source", "obligation_container", "delta_delivery"]
                 block = f"\n### {source.ref}\n\nsource-sha256: `{source.source_hash}`\n\n".encode() + body
                 if not block.endswith(b"\n"):
                     block += b"\n"
                 parts.append(block)
+                obligation_bytes = sum(len(line) for _, _, line in obligations)
+                mandatory_bytes += obligation_bytes
+                optional_used += len(block) - obligation_bytes
                 provenance.append({
                     "ref": source.ref, "kind": source.kind,
                     "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
                     "excerptSha256": _sha256(body),
-                    "range": {"startByte": 0, "endByte": len(body)},
+                    "range": (
+                        {"startByte": 0, "endByte": len(source.raw or b"")}
+                        if body == (source.raw or b"")
+                        else {"startByte": 0, "endByte": 0}
+                    ),
                     "reasons": reasons, "validity": source.validity,
-                    "priority": "mandatory" if obligations else "optional",
+                    "priority": "optional",
                     "provenance": source.provenance,
                 })
+                # Obligation excerpts retain their offsets in the original run
+                # record. They may be noncontiguous, so never describe their
+                # concatenated delta body as a synthetic 0..N source prefix.
+                for start, end, line in obligations:
+                    provenance.append({
+                        "ref": source.ref, "kind": source.kind,
+                        "sourceLocation": str(source.path),
+                        "sourceSha256": source.source_hash,
+                        "excerptSha256": _sha256(line),
+                        "range": {"startByte": start, "endByte": end},
+                        "reasons": [
+                            "mandatory_open_or_violated_obligation",
+                            "initial_delivery" if delivery == "initial" else "delta_delivery",
+                        ],
+                        "validity": source.validity,
+                        "priority": "mandatory",
+                        "provenance": source.provenance,
+                    })
             else:
                 ref_line = f"\n- {source.ref} unchanged at `{source.source_hash}`; use this immutable reference.\n".encode()
                 parts.append(ref_line)
+                optional_used += len(ref_line)
                 provenance.append({
                     "ref": source.ref, "kind": source.kind,
                     "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
@@ -976,8 +1007,10 @@ class ContextService:
                     "provenance": source.provenance,
                 })
         if revoked:
-            parts.append(("\nRevoked since the prior bundle: " + ", ".join(revoked) +
-                          ". Do not rely on prior bytes.\n").encode())
+            revoked_notice = ("\nRevoked since the prior bundle: " + ", ".join(revoked) +
+                              ". Do not rely on prior bytes.\n").encode()
+            parts.append(revoked_notice)
+            mandatory_bytes += len(revoked_notice)
 
         prompt_raw = b"".join(parts)
         if len(prompt_raw) > budget_bytes:
@@ -1002,8 +1035,8 @@ class ContextService:
             "budget": {
                 "unit": "utf8-bytes", "limitBytes": budget_bytes,
                 "usedBytes": len(prompt_raw), "remainingBytes": budget_bytes - len(prompt_raw),
-                "mandatoryBytes": len(base_raw),
-                "optionalBytes": len(prompt_raw) - len(base_raw),
+                "mandatoryBytes": mandatory_bytes,
+                "optionalBytes": optional_used,
                 "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
                 "providerVisibleBytes": None,
                 "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
