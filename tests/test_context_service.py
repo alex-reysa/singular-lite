@@ -136,6 +136,18 @@ class ContextServiceTest(unittest.TestCase):
                 max_bytes=200,
             )
 
+    def test_bundle_revalidates_brain_eligibility_metadata_before_publication(self) -> None:
+        service = self.service()
+        manifest_path = self.repo / "brain/generated/KNOWLEDGE.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["entries"][0]["status"] = "superseded"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(ContextError, "eligibility metadata changed"):
+            service.build(
+                task=self.repo / "task.md", phase="implement",
+                budget_bytes=10000, query="cobalt rollback",
+            )
+
     def test_get_cursor_is_lossless_inside_long_multibyte_line(self) -> None:
         code = self.repo / "src" / "selected.py"
         prefix = code.read_bytes()

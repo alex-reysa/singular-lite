@@ -427,13 +427,21 @@ SINGULAR_RUNNER_RUN_ID="$run_id" \
   singular_context_invocation_run planner plan \
     "$SINGULAR_ORCH_DIR/dag.v0.json" "$planner_context_bundle" \
     "$planner_context_prior" "$run_id:planner:$active_node:primary" \
-    "$planner_context_receipt" "$planner_campaign_binding" -- \
+    "$planner_context_receipt" "$planner_campaign_binding" "$SINGULAR_ROOT" -- \
     "$codex_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
       "${planner_runner_args[@]}" >"$codex_log" 2>&1 || codex_exit=$?
-if [[ -f "$planner_context_receipt" ]]; then
+planner_context_status="$(singular_context_receipt_status "$planner_context_receipt" 2>/dev/null || true)"
+if [[ "$planner_context_status" == "denied" ]]; then
+  planner_context_denial="$(singular_context_receipt_denial_reason "$planner_context_receipt" 2>/dev/null || true)"
+  cat "$codex_log" >&2
+  echo "planner-failed (context admission denied: $planner_context_denial)"
+  [[ "$planner_context_denial" != "campaign-mismatch" ]] || exit 2
+  exit 1
+elif [[ "$planner_context_status" == "admitted" ]]; then
   planner_context_actual="$(singular_context_receipt_bundle_path "$planner_context_receipt" 2>/dev/null || true)"
 elif [[ "$planner_context_enabled" == "1" ]]; then
   cat "$codex_log" >&2
+  [[ "$codex_exit" -ne 2 ]] || exit 2
   echo "planner-failed (context service invocation assembly failed)"
   exit 1
 fi
@@ -459,13 +467,21 @@ if [[ "$codex_exit" -eq 86 && -n "$planner_resume_id" ]]; then
     singular_context_invocation_run planner plan \
       "$SINGULAR_ORCH_DIR/dag.v0.json" "$planner_context_bundle" \
       "$planner_context_actual" "$run_id:planner:$active_node:fallback" \
-      "$planner_context_receipt" "$planner_campaign_binding" -- \
+      "$planner_context_receipt" "$planner_campaign_binding" "$SINGULAR_ROOT" -- \
       "$codex_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
         "${planner_runner_args[@]}" >"$codex_log" 2>&1 || codex_exit=$?
-  if [[ -f "$planner_context_receipt" ]]; then
+  planner_context_status="$(singular_context_receipt_status "$planner_context_receipt" 2>/dev/null || true)"
+  if [[ "$planner_context_status" == "denied" ]]; then
+    planner_context_denial="$(singular_context_receipt_denial_reason "$planner_context_receipt" 2>/dev/null || true)"
+    cat "$codex_log" >&2
+    echo "planner-failed (context fallback admission denied: $planner_context_denial)"
+    [[ "$planner_context_denial" != "campaign-mismatch" ]] || exit 2
+    exit 1
+  elif [[ "$planner_context_status" == "admitted" ]]; then
     planner_context_actual="$(singular_context_receipt_bundle_path "$planner_context_receipt" 2>/dev/null || true)"
   elif [[ "$planner_context_enabled" == "1" ]]; then
     cat "$codex_log" >&2
+    [[ "$codex_exit" -ne 2 ]] || exit 2
     echo "planner-failed (context service invocation assembly failed)"
     exit 1
   fi

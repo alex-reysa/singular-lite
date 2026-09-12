@@ -35,6 +35,7 @@ def _commands() -> argparse.ArgumentParser:
 
     def common(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--config")
+        sub.add_argument("--workspace")
         sub.add_argument("--role")
         sub.add_argument("--phase")
 
@@ -121,7 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         role = args.role or os.environ.get("SINGULAR_RUNNER_ROLE") or "assistant"
         service = ContextService.from_config(
-            _config(args, repo_root, cwd), role=role, phase=args.phase
+            _config(args, repo_root, cwd), role=role, phase=args.phase,
+            workspace=args.workspace,
         )
         if args.command == "search":
             result = service.search(args.query, limit=args.limit, max_bytes=args.max_bytes)

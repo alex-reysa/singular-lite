@@ -13,9 +13,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
+from engine.campaign_manifest import (
+    SETTING_PROJECTION_VERSION,
+    classify_resolved_setting,
+    resolved_settings_projection,
+    runner_child_environment,
+)
 from engine.context_service import ContextError, ContextService
 
 
@@ -101,6 +108,17 @@ class ContextInvocationTest(unittest.TestCase):
             self.assertEqual(bundle["prompt"].encode(), delivered)
             self.assertEqual(bundle["promptSha256"], "sha256:" + digest)
             self.assertEqual(event_data["bundleId"], bundle["bundleId"])
+            self.assertEqual(
+                event_data["policy"]["resolvedSettingsProjectionVersion"],
+                SETTING_PROJECTION_VERSION,
+            )
+            self.assertEqual(
+                event_data["policy"]["configSha256"], bundle["policy"]["configSha256"]
+            )
+            self.assertEqual(
+                event_data["invocation"]["invocationId"],
+                bundle["invocation"]["invocationId"],
+            )
 
         required = [detail for detail in self.ledger_details()
                     if detail.get("kind") == "required-prompt"
@@ -134,6 +152,163 @@ class ContextInvocationTest(unittest.TestCase):
         path = self.repo / "singular.config.json"
         write(path, json.dumps(config, sort_keys=True))
         return path
+
+    def test_campaign_policy_projection_separates_invocation_identity_without_hiding_policy(self) -> None:
+        stable = {
+            "SINGULAR_TASKS_DIR": "/canonical/tasks",
+            "SINGULAR_CONTEXT_BUDGET_BYTES": "16384",
+            "SINGULAR_CONTEXT_CONFIG_FILE": "/root/singular.config.json",
+            "SINGULAR_CAPABILITY_PROFILES_JSON": '{"implementer":["shell"]}',
+            "SINGULAR_UNKNOWN_POLICY_SENTINEL": "frozen",
+        }
+        first = {
+            **stable,
+            "SINGULAR_RUNNER_ROLE": "implementer",
+            "SINGULAR_RUNNER_CAPABILITY_PROFILE": "implementer-core",
+            "SINGULAR_RUNNER_RUN_ID": "RUN-one",
+            "SINGULAR_TEST_TASK_CONTRACT": "/worktree/tasks/TASK-0001.md",
+            "SINGULAR_TEST_TASK_ID": "TASK-0001",
+            "SINGULAR_TEST_TASKS_DIR": "/worktree/tasks",
+            "SINGULAR_EXPECTED_CAMPAIGN_BINDING": "campaign:one",
+        }
+        second = {
+            **stable,
+            "SINGULAR_RUNNER_ROLE": "auditor",
+            "SINGULAR_RUNNER_CAPABILITY_PROFILE": "audit-core",
+            "SINGULAR_RUNNER_RUN_ID": "RUN-two",
+            "SINGULAR_TEST_TASK_CONTRACT": "/worktree/tasks/TASK-0002.md",
+            "SINGULAR_TEST_TASK_ID": "TASK-0002",
+            "SINGULAR_TEST_TASKS_DIR": "/worktree/tasks",
+            "SINGULAR_EXPECTED_CAMPAIGN_BINDING": "campaign:two",
+        }
+        one = resolved_settings_projection(first)
+        two = resolved_settings_projection(second)
+        self.assertEqual(one["version"], SETTING_PROJECTION_VERSION)
+        self.assertEqual(resolved_settings_projection({})["policy"], {})
+        self.assertEqual(one["policy"], two["policy"])
+        self.assertEqual(classify_resolved_setting("SINGULAR_RUNNER_ROLE"), "invocation")
+        self.assertEqual(classify_resolved_setting("SINGULAR_RUNNER_RESULT_FILE"), "transport")
+        self.assertEqual(classify_resolved_setting("SINGULAR_CONTEXT_CONFIG_FILE"), "policy")
+        self.assertEqual(classify_resolved_setting("SINGULAR_TASKS_DIR"), "policy")
+        self.assertEqual(classify_resolved_setting("SINGULAR_CONTEXT_BUDGET_BYTES"), "policy")
+        self.assertEqual(classify_resolved_setting("SINGULAR_UNKNOWN_POLICY_SENTINEL"), "policy")
+        changed = resolved_settings_projection({
+            **second, "SINGULAR_UNKNOWN_POLICY_SENTINEL": "changed",
+        })
+        self.assertNotEqual(one["policy"], changed["policy"])
+        changed_selector = resolved_settings_projection({
+            **second,
+            "SINGULAR_CONTEXT_CONFIG_FILE": "/alternate/singular.config.json",
+        })
+        self.assertNotEqual(one["policy"], changed_selector["policy"])
+        child = runner_child_environment({
+            **first,
+            "SINGULAR_RESERVATION_OWNER": "secret-host-authority",
+            "SINGULAR_GIT_LOCK_CAPABILITY": "secret-lock",
+            "SINGULAR_CODEX_MODEL": "gpt-fixture",
+            "PATH": "/usr/bin:/bin",
+        })
+        self.assertNotIn("SINGULAR_RESERVATION_OWNER", child)
+        self.assertNotIn("SINGULAR_GIT_LOCK_CAPABILITY", child)
+        self.assertNotIn("SINGULAR_CONTEXT_CONFIG_FILE", child)
+        self.assertEqual(child["SINGULAR_RUNNER_ROLE"], "implementer")
+        self.assertEqual(child["SINGULAR_TEST_TASK_ID"], "TASK-0001")
+        self.assertEqual(child["SINGULAR_CODEX_MODEL"], "gpt-fixture")
+
+    def test_frozen_policy_config_is_distinct_from_invocation_workspace(self) -> None:
+        policy_root = Path(self.temp.name) / "policy-root"
+        workspace = Path(self.temp.name) / "worker-workspace"
+        config = policy_root / "singular.config.json"
+        source = workspace / "context/shared.md"
+        task = workspace / "docs/orchestration/tasks/TASK-0001.md"
+        base = Path(self.temp.name) / "base.md"
+        write(source, "WORKSPACE-SOURCE-V1\n")
+        write(task, "# TASK-0001\n\n[open] preserve the workspace contract\n")
+        write(base, "AUTHORITATIVE HOST PROMPT\n")
+        write(config, json.dumps({
+            "contextService": {
+                "enabled": True,
+                "projectId": "frozen-policy-fixture",
+                "budgetBytes": 8192,
+                "codePaths": ["context/shared.md"],
+                "rolePolicy": {"implementer": ["code"]},
+            }
+        }))
+
+        service = ContextService.from_config(
+            config, role="implementer", phase="implement", workspace=workspace,
+        )
+        bundle = service.build(
+            task=task, phase="implement", budget_bytes=8192, base_prompt=base,
+            delivery="initial", invocation_id="RUN-one:implementer",
+            campaign_binding="campaign:frozen",
+        )
+        self.assertEqual(service.config_path, config.resolve())
+        self.assertEqual(service.root, workspace.resolve())
+        self.assertEqual(bundle["policy"]["configPath"], str(config.resolve()))
+        self.assertEqual(bundle["policy"]["configSha256"], "sha256:" + file_sha256(config))
+        self.assertEqual(bundle["invocation"]["workspace"], str(workspace.resolve()))
+        self.assertEqual(bundle["invocation"]["invocationId"], "RUN-one:implementer")
+        self.assertEqual(bundle["invocation"]["campaignBinding"], "campaign:frozen")
+        self.assertIn("WORKSPACE-SOURCE-V1", bundle["prompt"])
+
+        write(workspace / "singular.config.json", json.dumps({
+            "contextService": {"enabled": False, "budgetBytes": 1}
+        }))
+        second = ContextService.from_config(
+            config, role="implementer", phase="retry", workspace=workspace,
+        ).build(
+            task=task, phase="retry", budget_bytes=8192, base_prompt=base,
+            delivery="delta", prior_bundle=bundle,
+            invocation_id="RUN-one:implementer:retry",
+            campaign_binding="campaign:frozen",
+        )
+        self.assertIn("code:context/shared.md unchanged", second["prompt"])
+        self.assertEqual(second["policy"], bundle["policy"])
+
+    def test_shell_boundary_reports_structured_invalid_policy_without_launch(self) -> None:
+        config = self.config()
+        invalid = self.repo / "invalid-context.json"
+        invalid.write_text("{", encoding="utf-8")
+        task = self.repo / "task.md"
+        task.write_text("# TASK-0001\n", encoding="utf-8")
+        receipt = self.repo / "context-denied.json"
+        marker = self.repo / "provider-called"
+        provider = self.repo / "provider.sh"
+        provider.write_text(
+            f"#!/usr/bin/env bash\nprintf called >'{marker}'\n", encoding="utf-8"
+        )
+        provider.chmod(0o755)
+        script = (
+            '. "$1/engine/lib.sh"; . "$1/engine/ctx-rehydrate-event.sh"; '
+            'SINGULAR_CONTEXT_CONFIG_FILE="$2" singular_context_invocation_run '
+            'implementer implement "$3" "$4" "" RUN:implementer "$5" legacy '
+            '"$6" -- "$7"'
+        )
+        result = run(
+            [
+                str(BASH), "-c", script, "context-shell", str(ROOT), str(invalid),
+                str(task), str(self.repo / "bundle.json"), str(receipt),
+                str(self.repo), str(provider),
+            ],
+            cwd=self.repo,
+            env={
+                "SINGULAR_ROOT": str(self.repo),
+                "SINGULAR_ENGINE_HOME": str(ROOT),
+                "SINGULAR_JSON_CONFIG_FILE": str(config),
+            },
+        )
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertFalse(marker.exists())
+        denial = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(denial["status"], "denied")
+        self.assertEqual(denial["denial"]["reason"], "context-invalid")
+        self.assertEqual(denial["retrievalDebitBytes"], 0)
+        self.assertEqual(
+            denial["policy"]["resolvedSettingsProjectionVersion"],
+            SETTING_PROJECTION_VERSION,
+        )
+        self.assertEqual(denial["invocation"]["invocationId"], "RUN:implementer")
 
     def test_invocation_bundle_is_atomic_delta_bounded_and_revalidates(self) -> None:
         config = self.config()
@@ -295,13 +470,18 @@ class ContextInvocationTest(unittest.TestCase):
                 "schema": "singular.effective-configuration.v1",
                 "paths": {"state": str(self.repo / ".singular-state")},
             }
-            doctor.context_service_check()
+            with mock.patch.dict(os.environ, {"SINGULAR_CONTEXT_BUDGET_BYTES": "12288"}):
+                doctor.context_service_check()
         finally:
             sys.path.pop(0)
         check = next(item for item in doctor.checks if item["id"] == "runtime.context-service")
         self.assertEqual(check["status"], "pass")
         self.assertTrue(check["details"]["enabled"])
-        self.assertEqual(check["details"]["roles"]["implementer"]["budgetBytes"], 16384)
+        self.assertEqual(check["details"]["roles"]["implementer"]["budgetBytes"], 12288)
+        self.assertEqual(
+            check["details"]["roles"]["implementer"]["budgetSource"],
+            "SINGULAR_CONTEXT_BUDGET_BYTES",
+        )
         review = check["details"]["roles"]["review-target"]
         self.assertEqual(review["allowedKinds"], ["code"])
         self.assertTrue(review["sources"][0]["provenance"])
@@ -355,6 +535,20 @@ PY
       ;;
   esac
   exit 86
+fi
+if [[ "$has_resume" == 0 && "$count" -gt 1 ]]; then
+  case "${{PLANNER_STUB_RESUME_TRANSITION:-}}" in
+    changed) printf 'ORBIT-CONTEXT planner implement widget invariant\n' >"$PWD/context/shared.md" ;;
+    revoked)
+      python3 - "$PWD/singular.config.json" <<'PY'
+import json,sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["contextService"]["codePaths"] = ["context/shared.md"]
+json.dump(value, open(path, "w", encoding="utf-8"), sort_keys=True)
+PY
+      ;;
+  esac
 fi
 python3 - "$out" <<'PY'
 import json,sys
@@ -427,10 +621,12 @@ fi
                         if event.get("type") == "context.bundle_selected")
         self.assertEqual(selected["bundleId"], bundle["bundleId"])
         self.assertEqual(selected["promptSha256"], bundle["promptSha256"])
-        self.assertEqual(selected["identity"]["campaignBinding"], "legacy")
-        host_binding = next(item["provenance"] for item in bundle["provenance"]
-                            if "host_invocation_identity" in item["reasons"])
-        self.assertEqual(host_binding["campaignBinding"], "legacy")
+        self.assertEqual(selected["invocation"]["campaignBinding"], "legacy")
+        self.assertEqual(bundle["invocation"]["campaignBinding"], "legacy")
+        self.assertEqual(
+            {key: selected["policy"][key] for key in bundle["policy"]},
+            bundle["policy"],
+        )
 
         off_temp = tempfile.TemporaryDirectory(prefix="singular-context-off.", dir="/tmp")
         self.addCleanup(off_temp.cleanup)
@@ -476,6 +672,8 @@ fi
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn("missing source", result.stdout)
                     self.assertEqual(calls, 1, "fresh fallback must not launch with stale source bytes")
+                    write(self.repo / "context/shared.md",
+                          "ORBIT-CONTEXT planner implement widget invariant\n")
                 else:
                     self.assertEqual(result.returncode, 0, result.stdout)
                     self.assertEqual(calls, 2)
@@ -560,7 +758,7 @@ if [[ "$role" == implementer && "$count" -gt 1 ]]; then
   case "${{DRIVER_STUB_INFRA_TRANSITION:-}}" in
     changed) printf 'ORBIT-CONTEXT planner implement widget invariant\n' >"$worktree/context/shared.md" ;;
     revoked)
-      python3 - "$worktree/singular.config.json" <<'PY'
+      python3 - "${{DRIVER_STUB_POLICY_CONFIG:?}}" <<'PY'
 import json,sys
 path = sys.argv[1]
 value = json.load(open(path, encoding="utf-8"))
@@ -574,7 +772,7 @@ if [[ "$role" == implementer && "$has_resume" == 0 && "$count" -gt 2 ]]; then
   case "${{DRIVER_STUB_RESUME_TRANSITION:-}}" in
     changed) printf 'ORBIT-CONTEXT planner implement widget invariant\n' >"$worktree/context/shared.md" ;;
     revoked)
-      python3 - "$worktree/singular.config.json" <<'PY'
+      python3 - "${{DRIVER_STUB_POLICY_CONFIG:?}}" <<'PY'
 import json,sys
 path = sys.argv[1]
 value = json.load(open(path, encoding="utf-8"))
@@ -590,7 +788,7 @@ if [[ "$role" == implementer ]]; then
       changed) printf 'ORBIT-CONTEXT CHANGED DURING WORKER RESUME\n' >"$worktree/context/shared.md" ;;
       missing) rm -f "$worktree/context/shared.md" ;;
       revoked)
-        python3 - "$worktree/singular.config.json" <<'PY'
+        python3 - "${{DRIVER_STUB_POLICY_CONFIG:?}}" <<'PY'
 import json,sys
 path = sys.argv[1]
 value = json.load(open(path, encoding="utf-8"))
@@ -606,7 +804,7 @@ PY
       changed) printf 'ORBIT-CONTEXT CHANGED BETWEEN PROVIDERS\n' >"$worktree/context/shared.md" ;;
       missing) rm -f "$worktree/context/shared.md" ;;
       revoked)
-        python3 - "$worktree/singular.config.json" <<'PY'
+        python3 - "${{DRIVER_STUB_POLICY_CONFIG:?}}" <<'PY'
 import json,sys
 path = sys.argv[1]
 value = json.load(open(path, encoding="utf-8"))
@@ -738,6 +936,7 @@ fi
             # An AF_UNIX-ineligible sandbox is unavailable, never a passing
             # substitute for the production transport.
             "PYTHONPATH": "",
+            "DRIVER_STUB_POLICY_CONFIG": str(config),
         }
         env.update(extra)
         return env
@@ -845,6 +1044,8 @@ fi
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn("missing source", result.stdout)
                     self.assertEqual((capture / "implementer.count").read_text().strip(), "1")
+                    write(self.repo / ".worktrees/TASK-0001/context/shared.md",
+                          "ORBIT-CONTEXT planner implement widget invariant\n")
                 else:
                     self.assertEqual(result.returncode, 0, result.stdout)
                     second = (capture / "implementer-2.md").read_text(encoding="utf-8")
@@ -877,6 +1078,8 @@ fi
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn("missing source", result.stdout)
                     self.assertEqual(calls, 2, "missing source must stop the fresh provider fallback")
+                    write(self.repo / ".worktrees/TASK-0001/context/shared.md",
+                          "ORBIT-CONTEXT planner implement widget invariant\n")
                     run_dir = self.run_dir()
                     refused = (capture / "implementer-2.md").read_text(encoding="utf-8")
                     retained = [json.loads(path.read_text()) for path in
@@ -949,11 +1152,15 @@ fi
         self.assertNotEqual(invalid.returncode, 0, invalid.stdout)
         self.assertRegex(invalid.stdout, r"context configuration|failed to parse")
         self.assertFalse(marker.exists())
-        self.assertFalse(receipt.exists())
+        invalid_receipt = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(invalid_receipt["status"], "denied")
+        self.assertEqual(invalid_receipt["denial"]["reason"], "context-invalid")
+        self.assertEqual(invalid_receipt["retrievalDebitBytes"], 0)
         self.assertFalse(bundle.exists())
         self.assertEqual(self.ledger_details(), [])
 
         write(config, original)
+        receipt.unlink()
         drift = run(
             common + ["--campaign-binding", "campaign:wrong", "--", str(provider),
                       "--prompt-file", str(base)],
@@ -962,7 +1169,10 @@ fi
         self.assertNotEqual(drift.returncode, 0, drift.stdout)
         self.assertIn("campaign identity changed", drift.stdout)
         self.assertFalse(marker.exists())
-        self.assertFalse(receipt.exists())
+        drift_receipt = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(drift_receipt["status"], "denied")
+        self.assertEqual(drift_receipt["denial"]["reason"], "campaign-mismatch")
+        self.assertEqual(drift_receipt["retrievalDebitBytes"], 0)
         self.assertFalse(bundle.exists())
         self.assertEqual(self.ledger_details(), [])
 
@@ -1068,7 +1278,7 @@ fi
         packet = json.loads((run_dir / "packet.json").read_text())
         workspace = Path(packet["workspace"])
         uncapped = ContextService.from_config(
-            workspace / "singular.config.json", role="review-target", phase="final-audit"
+            config, role="review-target", phase="final-audit", workspace=workspace,
         ).build(
             task=workspace / "docs/orchestration/tasks/TASK-0001.md",
             phase="final-audit", budget_bytes=16384,

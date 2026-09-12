@@ -211,16 +211,73 @@ except Exception as exc:
 PY
 }
 
+singular_context_denial_receipt() {
+  local receipt="$1" reason="$2" message="$3" role="$4" phase="$5"
+  local invocation_id="$6" campaign_binding="$7" workspace="$8" config="$9"
+  local engine_home="${SINGULAR_ENGINE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  [[ -n "$receipt" ]] || return 0
+  python3 - "$receipt" "$reason" "$message" "$role" "$phase" \
+    "$invocation_id" "$campaign_binding" "$workspace" "$config" "$engine_home" <<'PY'
+import json, os, sys, tempfile
+
+path, reason, message, role, phase, invocation, campaign, workspace, config, engine_home = sys.argv[1:]
+sys.path.insert(0, engine_home)
+from engine.campaign_manifest import resolved_settings_projection
+
+projection = resolved_settings_projection()
+def identity(value):
+    import hashlib
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+destination = os.path.abspath(path)
+os.makedirs(os.path.dirname(destination), exist_ok=True)
+record = {
+    "schema": "singular.host-invocation.v1",
+    "status": "denied",
+    "denial": {"reason": reason, "message": message},
+    "retrievalDebitBytes": 0,
+    "policy": {
+        "configPath": os.path.realpath(config) if config else None,
+        "resolvedSettingsProjectionVersion": projection["version"],
+        "resolvedPolicySha256": identity(projection["policy"]),
+    },
+    "invocation": {
+        "invocationId": invocation or None,
+        "campaignBinding": campaign or None,
+        "workspace": os.path.realpath(workspace) if workspace else None,
+        "role": role or None,
+        "phase": phase or None,
+        "resolvedInvocationSha256": identity(projection["invocation"]),
+        "runnerTransportSha256": identity(projection["transport"]),
+    },
+}
+fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=os.path.dirname(destination))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
 # Run one actual provider argv through the host-owned context preparation
 # boundary. Feature-off invokes the exact argv directly. Feature-on delegates
 # composition/publication/event binding and launch to evidence_delivery.py.
 #
 # singular_context_invocation_run ROLE PHASE TASK BUNDLE PRIOR INVOCATION_ID
-#   RECEIPT CAMPAIGN_BINDING -- ACTUAL_RUNNER [ARGS...]
+#   RECEIPT CAMPAIGN_BINDING WORKSPACE -- ACTUAL_RUNNER [ARGS...]
 singular_context_invocation_run() {
   local role="$1" phase="$2" task="$3" bundle="$4" prior="$5"
-  local invocation_id="$6" receipt="$7" campaign_binding="$8"
-  shift 8
+  local invocation_id="$6" receipt="$7" campaign_binding="$8" workspace="$9"
+  shift 9
   [[ "${1:-}" == "--" ]] || {
     echo "context invocation: missing actual runner separator" >&2
     return 2
@@ -230,20 +287,28 @@ singular_context_invocation_run() {
   local config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
   local settings
   settings="$(singular_context_invocation_settings "$config")" || {
+    singular_context_denial_receipt "$receipt" context-invalid \
+      "context service configuration is invalid" "$role" "$phase" \
+      "$invocation_id" "$campaign_binding" "$workspace" "$config" || true
     echo "context service: invalid configuration: $config" >&2
     return 2
   }
   local enabled="${settings%%$'\t'*}"
   if [[ "$enabled" != "1" ]]; then
+    if [[ -n "$campaign_binding" ]] \
+        && ! singular_campaign_binding_matches "$campaign_binding" context-invocation "$phase"; then
+      singular_context_denial_receipt "$receipt" campaign-mismatch \
+        "campaign policy changed before provider admission" "$role" "$phase" \
+        "$invocation_id" "$campaign_binding" "$workspace" "$config" || true
+      return 2
+    fi
     "${command[@]}"
     return $?
   fi
-  [[ -z "$campaign_binding" ]] \
-    || singular_campaign_binding_matches "$campaign_binding" context-invocation "$phase" \
-    || return $?
   local engine_dir="${SINGULAR_ENGINE_DIR:-${SINGULAR_ENGINE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/engine}"
   local -a args=(
     run --context-config "$config" --context-role "$role" --context-phase "$phase"
+    --context-workspace "$workspace"
     --context-task "$task" --context-bundle "$bundle"
     --context-invocation-id "$invocation_id" --receipt "$receipt"
     --events-file "$SINGULAR_EVENTS_FILE"
@@ -263,5 +328,31 @@ path = value.get("bundlePath")
 if not isinstance(path, str) or not path:
     raise SystemExit(1)
 print(path)
+PY
+}
+
+singular_context_receipt_status() {
+  local receipt="$1"
+  [[ -f "$receipt" ]] || return 1
+  python3 - "$receipt" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+status = value.get("status")
+if status not in {"admitted", "denied"}:
+    raise SystemExit(1)
+print(status)
+PY
+}
+
+singular_context_receipt_denial_reason() {
+  local receipt="$1"
+  [[ -f "$receipt" ]] || return 1
+  python3 - "$receipt" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+reason = (value.get("denial") or {}).get("reason")
+if not isinstance(reason, str) or not reason:
+    raise SystemExit(1)
+print(reason)
 PY
 }

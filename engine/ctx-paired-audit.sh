@@ -105,9 +105,8 @@ singular_ctx_paired_audit_record() {
   # prompt from the task contract and role-filtered source snapshot; never reuse
   # the worker or primary reviewer bundle/session.
   cp "$base_prompt" "$prompt" || return $?
-  local context_config="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
+  local context_config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
   local context_task="$SINGULAR_TASKS_DIR/$task_id.md"
-  context_config="$(singular_context_worktree_path "$context_config" "$worktree")"
   context_task="$(singular_context_worktree_path "$context_task" "$worktree")"
   # Exactly ONE fresh, read-only auditor pass over the accepted result. FRESH =
   # no --resume-session / session reuse; read-only = --level readonly. Runner failure is non-fatal (record still
@@ -120,6 +119,7 @@ singular_ctx_paired_audit_record() {
   if [[ -f "$context_config" ]]; then
     context_delivery_args+=(
       --context-config "$context_config" --context-role review-target
+      --context-workspace "$worktree"
       --context-phase paired-audit --context-task "$context_task"
       --context-bundle "$run_dir/context-review-target-paired.bundle.json"
       --context-invocation-id "$run_id:$task_id:review-target:paired"

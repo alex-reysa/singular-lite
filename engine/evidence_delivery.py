@@ -26,13 +26,36 @@ import threading
 from datetime import datetime, timezone
 
 try:
-    from engine.context_service import ContextError, ContextService
+    from engine.context_service import ContextError, ContextOverflow, ContextService
+    from engine.campaign_manifest import resolved_settings_projection, runner_child_environment
 except ImportError:  # installed execution from engine/
-    from context_service import ContextError, ContextService
+    from context_service import ContextError, ContextOverflow, ContextService
+    from campaign_manifest import resolved_settings_projection, runner_child_environment
+
+
+class AdmissionDenied(ValueError):
+    """A deterministic host admission refusal with a stable machine reason."""
+
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
 
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def invocation_setting_evidence():
+    projection = resolved_settings_projection()
+    encoded = lambda value: 'sha256:' + sha(json.dumps(
+        value, sort_keys=True, separators=(',', ':')
+    ).encode())
+    return {
+        'version': projection['version'],
+        'policySha256': encoded(projection['policy']),
+        'invocationSha256': encoded(projection['invocation']),
+        'transportSha256': encoded(projection['transport']),
+    }
 
 
 class Evidence:
@@ -263,20 +286,27 @@ def verify_campaign(expected_binding=None):
             'source "$1"; singular_campaign_verify_or_refuse evidence-delivery '
             'provider-boundary || exit $?; actual="$(singular_campaign_binding)" '
             '|| exit $?; [[ -z "$2" || "$actual" == "$2" ]] || { '
-            'echo "campaign identity changed at provider boundary" >&2; exit 2; }',
+            'echo "campaign identity changed at provider boundary" >&2; exit 2; }; '
+            'printf "%s\\n" "$actual"',
             'evidence-delivery', str(library), expected_binding or '',
         ],
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, env=os.environ.copy(), text=True, check=False,
     )
     if result.returncode:
         detail = result.stderr.strip() or 'frozen campaign verification failed'
-        raise ValueError(detail)
+        reason = (
+            'context-invalid'
+            if 'failed to parse' in detail or 'selected JSON configuration is missing' in detail
+            else 'campaign-mismatch'
+        )
+        raise AdmissionDenied(reason, detail)
+    return result.stdout.strip()
 
 
 def context_event(
     bundle, bundle_path, prompt_path, delivery, required_evidence,
-    invocation_id, campaign_binding, final_cap,
+    invocation_id, campaign_binding, final_cap, setting_evidence,
 ):
     provenance = bundle['provenance']
     reasons = [reason for item in provenance for reason in item.get('reasons', [])]
@@ -292,10 +322,16 @@ def context_event(
         'promptBytes': len(bundle['prompt'].encode()),
         'promptRef': prompt_path.name,
         'bundleRef': bundle_path.name,
-        'identity': {
-            **bundle['identity'],
-            'invocationId': invocation_id,
-            'campaignBinding': campaign_binding,
+        'identity': bundle['identity'],
+        'policy': {
+            **bundle['policy'],
+            'resolvedSettingsProjectionVersion': setting_evidence['version'],
+            'resolvedPolicySha256': setting_evidence['policySha256'],
+        },
+        'invocation': {
+            **bundle['invocation'],
+            'resolvedInvocationSha256': setting_evidence['invocationSha256'],
+            'runnerTransportSha256': setting_evidence['transportSha256'],
         },
         'delivery': {
             'mode': delivery if prior else 'initial',
@@ -320,6 +356,7 @@ def run(args):
         command = command[1:]
     if not command:
         raise ValueError('missing child command')
+    setting_evidence = invocation_setting_evidence()
 
     evidence = Evidence(args.manifest) if args.manifest else None
     if bool(evidence) != bool(args.ledger):
@@ -341,7 +378,7 @@ def run(args):
     if not executable or not Path(executable).is_file() or not os.access(executable, os.X_OK):
         raise ValueError('actual runner is missing or not executable: ' + command[0])
 
-    verify_campaign(args.campaign_binding)
+    admitted_campaign = verify_campaign(args.campaign_binding)
 
     sources = [(ref, evidence.read(ref)) for ref in args.required] if evidence else []
     for ref, data in sources:
@@ -376,7 +413,8 @@ def run(args):
     context = None
     if args.context_config:
         context = ContextService.from_config(
-            args.context_config, role=args.context_role, phase=args.context_phase
+            args.context_config, role=args.context_role, phase=args.context_phase,
+            workspace=args.context_workspace,
         )
     context_enabled = bool(context and context.enabled)
     final_cap = evidence.composed_limit if evidence else None
@@ -392,11 +430,6 @@ def run(args):
         if not args.context_task or not args.context_bundle or not args.context_invocation_id:
             raise ValueError('enabled context invocation is missing task/bundle/invocation identity')
         budget = context.budget_bytes
-        override = os.environ.get('SINGULAR_CONTEXT_BUDGET_BYTES')
-        if override:
-            if not override.isdigit() or int(override) < 1:
-                raise ValueError('context service invocation budget must be a positive integer')
-            budget = int(override)
         bundle = context.build(
             task=args.context_task,
             phase=args.context_phase,
@@ -435,7 +468,10 @@ def run(args):
                 raise ValueError('evidence source identity changed during delivery')
     # Revalidate the frozen policy after snapshot/composition work and before
     # any immutable publication or retrieval debit.
-    verify_campaign(args.campaign_binding)
+    if verify_campaign(args.campaign_binding) != admitted_campaign:
+        raise AdmissionDenied(
+            'campaign-mismatch', 'campaign identity changed during invocation preparation'
+        )
 
     publication_dir = evidence.path.parent if evidence else Path(args.context_bundle).resolve().parent
     prompt_path = publish_bytes(
@@ -477,9 +513,28 @@ def run(args):
         'bundleId': bundle.get('bundleId') if bundle else None,
         'requiredEvidence': required_records,
         'retrievalDebitBytes': required_bytes,
+        'policy': {
+            **(bundle.get('policy') if bundle else (
+                context.policy_identity if context else {}
+            )),
+            'resolvedSettingsProjectionVersion': setting_evidence['version'],
+            'resolvedPolicySha256': setting_evidence['policySha256'],
+        },
+        'invocation': {
+            **(bundle.get('invocation') if bundle else {
+                'invocationId': args.context_invocation_id,
+                'campaignBinding': args.campaign_binding or admitted_campaign,
+                'workspace': args.context_workspace,
+                'role': args.context_role or args.role,
+                'phase': args.context_phase,
+            }),
+            'resolvedInvocationSha256': setting_evidence['invocationSha256'],
+            'runnerTransportSha256': setting_evidence['transportSha256'],
+        },
         'contextEvent': context_event(
             bundle, bundle_path, prompt_path, delivery, required_records,
             args.context_invocation_id, args.campaign_binding, final_cap,
+            setting_evidence,
         ) if bundle else None,
     }
     write_json(args.receipt, receipt)
@@ -488,10 +543,10 @@ def run(args):
         command[prompt_index] = str(prompt_path)
 
     if evidence is None:
-        return subprocess.call(command, env=os.environ.copy())
+        return subprocess.call(command, env=runner_child_environment())
 
     with tempfile.TemporaryDirectory(prefix='singular-delivery-') as temporary:
-        env = os.environ.copy()
+        env = runner_child_environment()
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         env['SINGULAR_EVIDENCE_SOCKET'] = str(Path(temporary) / 'broker.sock')
         env['SINGULAR_EVIDENCE_CAPABILITY'] = secrets.token_hex(32)
@@ -523,6 +578,7 @@ def main():
     host.add_argument('--role', choices=['auditor', 'critic'], default='auditor')
     host.add_argument('--required', action='append', default=[])
     host.add_argument('--context-config')
+    host.add_argument('--context-workspace')
     host.add_argument('--context-role')
     host.add_argument('--context-phase')
     host.add_argument('--context-task')
@@ -539,6 +595,48 @@ def main():
     try:
         return run(args) if args.verb == 'run' else client(args) or 0
     except (ValueError, ContextError, OSError, KeyError, sqlite3.Error) as error:
+        receipt_already_admitted = False
+        if args.verb == 'run' and args.receipt and Path(args.receipt).is_file():
+            try:
+                receipt_already_admitted = (
+                    json.loads(Path(args.receipt).read_text(encoding='utf-8')).get('status')
+                    == 'admitted'
+                )
+            except (OSError, ValueError):
+                receipt_already_admitted = False
+        if args.verb == 'run' and not receipt_already_admitted:
+            denied_setting_evidence = invocation_setting_evidence()
+            if isinstance(error, AdmissionDenied):
+                reason = error.reason
+            elif isinstance(error, ContextOverflow):
+                reason = 'prompt-overflow'
+            elif isinstance(error, ContextError):
+                reason = 'context-invalid'
+            elif isinstance(error, OSError):
+                reason = 'source-invalid'
+            else:
+                reason = 'admission-invalid'
+            write_json(args.receipt, {
+                'schema': 'singular.host-invocation.v1',
+                'status': 'denied',
+                'denial': {'reason': reason, 'message': str(error)},
+                'retrievalDebitBytes': 0,
+                'policy': {
+                    'configPath': str(Path(args.context_config).resolve())
+                    if args.context_config else None,
+                    'resolvedSettingsProjectionVersion': denied_setting_evidence['version'],
+                    'resolvedPolicySha256': denied_setting_evidence['policySha256'],
+                },
+                'invocation': {
+                    'invocationId': args.context_invocation_id,
+                    'campaignBinding': args.campaign_binding,
+                    'workspace': args.context_workspace,
+                    'role': args.context_role or args.role,
+                    'phase': args.context_phase,
+                    'resolvedInvocationSha256': denied_setting_evidence['invocationSha256'],
+                    'runnerTransportSha256': denied_setting_evidence['transportSha256'],
+                },
+            })
         print('evidence-delivery: ' + str(error), file=sys.stderr)
         return 3
 

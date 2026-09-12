@@ -30,6 +30,7 @@ SEARCH_SCHEMA = "singular.context.search.v1"
 GET_SCHEMA = "singular.context.get.v1"
 EXPLAIN_SCHEMA = "singular.context.explain.v1"
 POLICY_VERSION = "singular.context.policy.v1"
+POLICY_BINDING_VERSION = "singular.context.policy-binding.v1"
 RETRIEVAL_VERSION = "exact-lexical.v1"
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
@@ -162,6 +163,8 @@ class ContextService:
         sources: tuple[Source, ...],
         config_hash: str,
         budget_bytes: int,
+        budget_source: str = "contextService.budgetBytes",
+        eligibility_inputs: tuple[tuple[Path, str], ...] = (),
     ) -> None:
         self.enabled = enabled
         self.root = root
@@ -174,6 +177,13 @@ class ContextService:
         self.sources = sources
         self.config_hash = config_hash
         self.budget_bytes = budget_bytes
+        self.budget_source = budget_source
+        self.eligibility_inputs = eligibility_inputs
+        self.policy_identity = {
+            "version": POLICY_BINDING_VERSION,
+            "configPath": str(config_path),
+            "configSha256": config_hash,
+        }
         source_versions = [
             {"ref": item.ref, "sha256": item.source_hash, "validity": item.validity}
             for item in sources
@@ -206,10 +216,17 @@ class ContextService:
         *,
         role: str,
         phase: str | None = None,
+        workspace: str | os.PathLike[str] | None = None,
     ) -> "ContextService":
-        config_path = Path(os.path.abspath(config))
+        config_path = Path(os.path.abspath(config)).resolve(strict=False)
         value, config_raw = _read_json(config_path, "context configuration")
-        root = config_path.parent.resolve()
+        policy_root = config_path.parent.resolve()
+        root = (
+            Path(os.path.abspath(workspace)).resolve()
+            if workspace is not None else policy_root
+        )
+        if not root.is_dir():
+            raise ContextError(f"invocation workspace is missing or not a directory: {root}")
         settings = value.get("contextService")
         if settings is None:
             settings = {}
@@ -218,7 +235,7 @@ class ContextService:
         enabled = settings.get("enabled", False)
         if not isinstance(enabled, bool):
             raise ContextError("contextService.enabled must be boolean")
-        project_id = settings.get("projectId", root.name)
+        project_id = settings.get("projectId", policy_root.name)
         if not isinstance(project_id, str) or not project_id:
             raise ContextError("contextService.projectId must be a non-empty string")
         config_hash = _sha256(config_raw)
@@ -253,20 +270,33 @@ class ContextService:
         budget_bytes = settings.get("budgetBytes", 65536)
         if not isinstance(budget_bytes, int) or isinstance(budget_bytes, bool) or budget_bytes < 1:
             raise ContextError("contextService.budgetBytes must be a positive integer")
+        budget_source = "contextService.budgetBytes"
+        budget_override = os.environ.get("SINGULAR_CONTEXT_BUDGET_BYTES")
+        if budget_override:
+            if not budget_override.isdigit() or int(budget_override) < 1:
+                raise ContextError(
+                    "SINGULAR_CONTEXT_BUDGET_BYTES must be a positive integer"
+                )
+            budget_bytes = int(budget_override)
+            budget_source = "SINGULAR_CONTEXT_BUDGET_BYTES"
         if not enabled:
             return cls(
                 enabled=False, root=root, config_path=config_path,
                 project_id=project_id, revision=revision, role=role, phase=phase,
                 allowed_kinds=allowed, sources=(), config_hash=config_hash,
-                budget_bytes=budget_bytes,
+                budget_bytes=budget_bytes, budget_source=budget_source,
             )
 
         sources: list[Source] = []
+        eligibility_inputs: dict[Path, str] = {}
         if "brain" in allowed and "contextManifest" in value:
             try:
                 normalized, bodies = brain_documents.normalize(config_path)
             except brain_documents.ConsumerError as exc:
                 raise ContextError(f"brain source is invalid: {exc}") from exc
+            eligibility_inputs[Path(normalized["manifestPath"]).resolve()] = normalized[
+                "manifestSha256"
+            ]
             for record in normalized["documents"]:
                 if not record["selected"]:
                     continue
@@ -333,7 +363,10 @@ class ContextService:
             enabled=True, root=root, config_path=config_path,
             project_id=project_id, revision=revision, role=role, phase=phase,
             allowed_kinds=allowed, sources=tuple(sources), config_hash=config_hash,
-            budget_bytes=budget_bytes,
+            budget_bytes=budget_bytes, budget_source=budget_source,
+            eligibility_inputs=tuple(sorted(
+                eligibility_inputs.items(), key=lambda item: str(item[0])
+            )),
         )
 
     def describe(self) -> dict[str, Any]:
@@ -344,8 +377,10 @@ class ContextService:
             "role": self.role,
             "phase": self.phase,
             "budgetBytes": self.budget_bytes,
+            "budgetSource": self.budget_source,
             "allowedKinds": sorted(self.allowed_kinds),
             "identity": self.identity,
+            "policy": self.policy_identity,
             "sources": [
                 {
                     "ref": source.ref,
@@ -371,6 +406,17 @@ class ContextService:
             raise ContextError(
                 f"context configuration changed during invocation: {self.config_path}"
             )
+        for path, expected_hash in self.eligibility_inputs:
+            try:
+                current = path.read_bytes()
+            except OSError as exc:
+                raise ContextError(
+                    f"context eligibility metadata changed during invocation: {path}: {exc}"
+                ) from exc
+            if _sha256(current) != expected_hash:
+                raise ContextError(
+                    f"context eligibility metadata changed during invocation: {path}"
+                )
         for source in self.sources:
             try:
                 current = source.path.read_bytes()
@@ -666,6 +712,11 @@ class ContextService:
         invocation_id: str | None = None,
         campaign_binding: str | None = None,
     ) -> dict[str, Any]:
+        invocation = {
+            "invocationId": invocation_id,
+            "campaignBinding": campaign_binding,
+            "workspace": str(self.root),
+        }
         if not self.enabled:
             prompt = b""
             disabled_identity = dict(self.identity)
@@ -676,6 +727,8 @@ class ContextService:
                 "status": "disabled",
                 "reason": "contextService.enabled is false or absent",
                 "identity": disabled_identity,
+                "policy": self.policy_identity,
+                "invocation": invocation,
                 "prompt": "",
                 "promptSha256": _sha256(prompt),
                 "provenance": [],
@@ -822,6 +875,12 @@ class ContextService:
             })
         prompt_bytes = b"".join(prompt_parts)
         prompt = prompt_bytes.decode("utf-8")
+        try:
+            if task_path.read_bytes() != task_raw:
+                raise ContextError(f"mandatory task source changed during invocation: {task_path}")
+        except OSError as exc:
+            raise ContextError(f"mandatory task source changed during invocation: {exc}") from exc
+        self.validate_snapshot()
         bundle_identity = dict(self.identity)
         if phase != self.phase:
             bundle_identity["phase"] = phase
@@ -833,6 +892,8 @@ class ContextService:
             "contractVersion": 1,
             "status": "ok",
             "identity": bundle_identity,
+            "policy": self.policy_identity,
+            "invocation": invocation,
             "prompt": prompt,
             "promptSha256": _sha256(prompt_bytes),
             "provenance": provenance,
@@ -948,13 +1009,7 @@ class ContextService:
                 key for key, expected in compatibility.items()
                 if prior_identity.get(key) != expected
             ]
-            prior_host_binding = next((
-                metadata
-                for item in prior.get("provenance", [])
-                if isinstance(item, dict)
-                and "host_invocation_identity" in item.get("reasons", [])
-                and isinstance((metadata := item.get("provenance")), dict)
-            ), {})
+            prior_host_binding = prior.get("invocation", {})
             if (
                 campaign_binding is not None
                 and prior_host_binding.get("campaignBinding") != campaign_binding
@@ -997,24 +1052,6 @@ class ContextService:
             "validity": "snapshot-read",
             "priority": "mandatory",
         }]
-        if invocation_id is not None:
-            host_binding = {
-                "invocationId": invocation_id,
-                "campaignBinding": campaign_binding,
-            }
-            host_binding_raw = _canonical(host_binding)
-            provenance.append({
-                "ref": "host-invocation:" + invocation_id,
-                "kind": "task",
-                "sourceLocation": "host-invocation:" + invocation_id,
-                "sourceSha256": _sha256(host_binding_raw),
-                "excerptSha256": _sha256(host_binding_raw),
-                "range": {"startByte": 0, "endByte": len(host_binding_raw)},
-                "reasons": ["host_invocation_identity"],
-                "validity": "host-bound",
-                "priority": "mandatory",
-                "provenance": host_binding,
-            })
         # Some fresh audit/planner templates do not already carry the complete
         # task/DAG contract. Add it exactly once when absent.
         if task_text not in base_text:
@@ -1181,6 +1218,12 @@ class ContextService:
             "contractVersion": 1,
             "status": "ok",
             "identity": identity,
+            "policy": self.policy_identity,
+            "invocation": {
+                "invocationId": invocation_id,
+                "campaignBinding": campaign_binding,
+                "workspace": str(self.root),
+            },
             "prompt": prompt_raw.decode("utf-8"),
             "promptSha256": _sha256(prompt_raw),
             "provenance": provenance,

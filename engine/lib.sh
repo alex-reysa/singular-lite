@@ -225,6 +225,9 @@ SINGULAR_JSON_CONFIG_DEFAULT_FILE="$_singular_json_default_file"
 for _singular_path_var in SINGULAR_STATE_DIR SINGULAR_TASKS_DIR SINGULAR_ORCH_DIR; do
   singular_normalize_consumer_path_var "$_singular_path_var"
 done
+if [[ -n "${SINGULAR_CONTEXT_CONFIG_FILE:-}" ]]; then
+  singular_normalize_config_path_var SINGULAR_CONTEXT_CONFIG_FILE
+fi
 unset _singular_path_var
 if [[ -n "$_singular_bootstrap_bash_bin" ]]; then
   SINGULAR_BASH_BIN="$_singular_bootstrap_bash_bin"
@@ -890,17 +893,18 @@ singular_terminal_blocker_rationale() { printf ''; }
 # retry_count/max_retries are evaluated as the CALLER's budget accounting (the
 # loop's 0-based attempt vs max_retries) so "retries remaining" (left) matches
 # exactly when the existing loop decides to retry-vs-park. Logic, in order:
-#   1. integrity-violation              -> escalate-parked (human judgment is
-#      mandatory; never retry or consult the model).
+#   1. integrity/configured-context     -> escalate-parked (admission policy is
+#      deterministic; never retry or consult the model).
 #   2. SINGULAR_DECIDER_FAST != 1        -> empty (force the model path).
 #   3. failure_class == prev (repeat)    -> empty (a same-class repeat may be
 #      systemic; escalate to the model for judgment).
 #   4. table on left = max_retries - retry_count (>0 => budget remains).
 singular_decider_fast_action() {
   local failure_class="$1" retry_count="${2:-0}" max_retries="${3:-0}" prev="${4:-}"
-  # Deterministic containment event: a human must judge the work. This precedes
-  # both the disable and repeat guards so the class can never reach the model.
-  if [[ "$failure_class" == "integrity-violation" ]]; then
+  # Deterministic admission/containment events precede both the disable and
+  # repeat guards so a model can never override host policy.
+  if [[ "$failure_class" == "integrity-violation" \
+      || "$failure_class" == "configured-context" ]]; then
     printf 'escalate-parked'
     return 0
   fi

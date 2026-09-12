@@ -1632,6 +1632,7 @@ run_worker_phase() {
   # as worker-infra, so a quota classification falls through to the normal path
   # (the breaker/quota-backoff machinery owns it).
   local worker_try worker_fc worker_result_file worker_try_log worker_classification_log
+  local worker_context_status worker_context_denial
 
   # ---- Session affinity (T-E5): resume decision (first try only) ------------
   # Reuse the implementer's prior runtime session iff every gate passes; else go
@@ -1729,9 +1730,8 @@ run_worker_phase() {
     context_prior="$context_bundle"
     context_phase="implement-resume"
   fi
-  local context_config="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
+  local context_config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
   local context_task="$task_file"
-  context_config="$(singular_context_worktree_path "$context_config" "$worktree")"
   context_task="$(singular_context_worktree_path "$task_file" "$worktree")"
   local context_settings context_enabled
   context_settings="$(singular_context_invocation_settings "$context_config")" || {
@@ -1802,17 +1802,28 @@ run_worker_phase() {
     SINGULAR_TEST_TASK_CONTRACT="$task_file" \
     SINGULAR_TEST_TASK_ID="$task_id" \
     SINGULAR_TEST_TASKS_DIR="$SINGULAR_TASKS_DIR" \
-    SINGULAR_CONTEXT_CONFIG_FILE="$context_config" \
       singular_context_invocation_run implementer "$context_phase" \
         "$context_task" "$context_bundle" "$context_prior" \
         "$run_id:$task_id:implementer:attempt-$n:try-$worker_try" \
-        "$worker_context_receipt" "$l1_campaign_binding" -- \
+        "$worker_context_receipt" "$l1_campaign_binding" "$worktree" -- \
         "$l2_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
           "${worker_run_args[@]}" >"$worker_try_log" 2>&1 || worker_rc=$?
-    if [[ -f "$worker_context_receipt" ]]; then
+    worker_context_status="$(singular_context_receipt_status "$worker_context_receipt" 2>/dev/null || true)"
+    if [[ "$worker_context_status" == "denied" ]]; then
+      worker_context_denial="$(singular_context_receipt_denial_reason "$worker_context_receipt" 2>/dev/null || true)"
+      [[ "$worker_context_denial" != "campaign-mismatch" ]] \
+        || l1_campaign_mismatch_exit "campaign policy changed before worker admission"
+      cat "$worker_try_log" >&2
+      echo "configured context service denied worker invocation ($worker_context_denial)" >&2
+      attempt_failure="configured-context"
+      attempt_ctx="$context_config"
+      return 1
+    elif [[ "$worker_context_status" == "admitted" ]]; then
       context_prior="$(singular_context_receipt_bundle_path "$worker_context_receipt" 2>/dev/null || true)"
       [[ -z "$context_prior" ]] || latest_worker_context_bundle="$context_prior"
     elif [[ "$context_enabled" == "1" ]]; then
+      [[ "$worker_rc" -ne 2 ]] \
+        || l1_campaign_mismatch_exit "campaign policy changed at worker admission checkpoint"
       cat "$worker_try_log" >&2
       echo "configured context service failed before worker invocation" >&2
       attempt_failure="configured-context"
@@ -1849,19 +1860,30 @@ run_worker_phase() {
       SINGULAR_TEST_TASK_CONTRACT="$task_file" \
       SINGULAR_TEST_TASK_ID="$task_id" \
       SINGULAR_TEST_TASKS_DIR="$SINGULAR_TASKS_DIR" \
-      SINGULAR_CONTEXT_CONFIG_FILE="$context_config" \
         singular_context_invocation_run implementer "$context_phase" \
           "$context_task" "$context_bundle" "$context_prior" \
           "$run_id:$task_id:implementer:attempt-$n:try-$worker_try:fallback" \
-          "$worker_context_receipt" "$l1_campaign_binding" -- \
+          "$worker_context_receipt" "$l1_campaign_binding" "$worktree" -- \
           "$l2_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
             --level l2 -C "$worktree" --run-id "$run_id" \
             --prompt-file "$active_prompt" --output-last-message "$run_dir/last-message.json" \
             --session-meta "$session_meta_implementer" >"$worker_classification_log" 2>&1 || worker_rc=$?
-      if [[ -f "$worker_context_receipt" ]]; then
+      worker_context_status="$(singular_context_receipt_status "$worker_context_receipt" 2>/dev/null || true)"
+      if [[ "$worker_context_status" == "denied" ]]; then
+        worker_context_denial="$(singular_context_receipt_denial_reason "$worker_context_receipt" 2>/dev/null || true)"
+        [[ "$worker_context_denial" != "campaign-mismatch" ]] \
+          || l1_campaign_mismatch_exit "campaign policy changed before worker fallback admission"
+        cat "$worker_classification_log" >&2
+        echo "configured context service denied worker fallback ($worker_context_denial)" >&2
+        attempt_failure="configured-context"
+        attempt_ctx="$context_config"
+        return 1
+      elif [[ "$worker_context_status" == "admitted" ]]; then
         context_prior="$(singular_context_receipt_bundle_path "$worker_context_receipt" 2>/dev/null || true)"
         [[ -z "$context_prior" ]] || latest_worker_context_bundle="$context_prior"
       elif [[ "$context_enabled" == "1" ]]; then
+        [[ "$worker_rc" -ne 2 ]] \
+          || l1_campaign_mismatch_exit "campaign policy changed at worker fallback checkpoint"
         cat "$worker_classification_log" >&2
         echo "configured context service failed before worker invocation" >&2
         attempt_failure="configured-context"
@@ -2610,9 +2632,8 @@ PY
   # enforces the review trust boundary by excluding run/model-authored sources,
   # even if a wildcard role policy is accidentally permissive.
   local audit_context_bundle="$run_dir/context-review-target-attempt-${n}.bundle.json"
-  local audit_context_config="${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}"
+  local audit_context_config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
   local audit_context_task="$task_file"
-  audit_context_config="$(singular_context_worktree_path "$audit_context_config" "$worktree")"
   audit_context_task="$(singular_context_worktree_path "$task_file" "$worktree")"
   # ---- Auditor runner with bounded infra-retry (T-E6) -----------------------
   # An auditor "infra failure" is the runner itself timing out (rc 124) / refusing
@@ -2653,6 +2674,7 @@ PY
   local reviewer_resume_failed="no"
 
   local audit_parsed="no" audit_try infra_reason audit_result_file audit_fc
+  local audit_context_status audit_context_denial
   local audit_capability_profile
   local audit_pid="" audit_child_pgid=""
   local audit_schema audit_validation_rc
@@ -2714,6 +2736,7 @@ PY
     if [[ -f "$audit_context_config" ]]; then
       audit_context_delivery_args+=(
         --context-config "$audit_context_config"
+        --context-workspace "$worktree"
         --context-role review-target --context-phase final-audit
         --context-task "$audit_context_task" --context-bundle "$audit_bundle_for_try"
         --context-invocation-id "$run_id:$task_id:review-target:attempt-$n:try-$audit_try"
@@ -2741,6 +2764,15 @@ PY
     else
       audit_rc=$?
     fi
+    audit_context_status="$(singular_context_receipt_status "$audit_context_receipt" 2>/dev/null || true)"
+    if [[ "$audit_context_status" == "denied" ]]; then
+      audit_context_denial="$(singular_context_receipt_denial_reason "$audit_context_receipt" 2>/dev/null || true)"
+      [[ "$audit_context_denial" != "campaign-mismatch" ]] \
+        || l1_campaign_mismatch_exit "campaign policy changed before auditor admission"
+      attempt_failure="configured-context"
+      attempt_ctx="$audit_context_receipt"
+      return 1
+    fi
     l1_status auditing active "Classifying the auditor response for attempt $n" true \
       "Validate the audit verdict" "" "audit-controller"
 
@@ -2764,6 +2796,7 @@ PY
       if [[ -f "$audit_context_config" ]]; then
         audit_context_delivery_args+=(
           --context-config "$audit_context_config"
+          --context-workspace "$worktree"
           --context-role review-target --context-phase final-audit
           --context-task "$audit_context_task" --context-bundle "$audit_bundle_for_try"
           --context-invocation-id "$run_id:$task_id:review-target:attempt-$n:try-$audit_try:fallback"
@@ -2791,6 +2824,15 @@ PY
         audit_rc=0
       else
         audit_rc=$?
+      fi
+      audit_context_status="$(singular_context_receipt_status "$audit_context_receipt" 2>/dev/null || true)"
+      if [[ "$audit_context_status" == "denied" ]]; then
+        audit_context_denial="$(singular_context_receipt_denial_reason "$audit_context_receipt" 2>/dev/null || true)"
+        [[ "$audit_context_denial" != "campaign-mismatch" ]] \
+          || l1_campaign_mismatch_exit "campaign policy changed before auditor fallback admission"
+        attempt_failure="configured-context"
+        attempt_ctx="$audit_context_receipt"
+        return 1
       fi
       l1_status auditing active "Classifying the auditor response for attempt $n" true \
         "Validate the audit verdict" "" "audit-controller"
@@ -3527,10 +3569,13 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
   else
     # Failure -> consult the autonomous decider.
     echo "  failure: $attempt_failure -> consulting decider..."
+    decider_rc=0
     dec_out="$(SINGULAR_EXPECTED_CAMPAIGN_BINDING="$l1_campaign_binding" \
       "$SCRIPT_DIR/decide.sh" --task "$task_id" --failure-class "$attempt_failure" \
       --branch "$worker_branch" --run "$run_id" --context-file "${attempt_ctx:-/dev/null}" \
-      --worktree "$worktree" 2>/dev/null || true)"
+      --worktree "$worktree" 2>/dev/null)" || decider_rc=$?
+    [[ "$decider_rc" -ne 2 ]] \
+      || l1_campaign_mismatch_exit "campaign policy changed before decider admission"
     action="$(printf '%s\n' "$dec_out" | sed -n 's/^action=//p' | tail -1)"
     [[ -n "$action" ]] || action="escalate-parked"
     echo "  decider: $action"

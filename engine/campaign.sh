@@ -62,10 +62,11 @@ campaign_export_settings() {
 }
 
 campaign_args() {
-  local bash_bin planner_template critic_template
+  local bash_bin planner_template critic_template context_config
   bash_bin="$(singular_bash_bin)"
   planner_template="${SINGULAR_PLANNER_TEMPLATE:-$SINGULAR_ORCH_DIR/prompts/l1-planner.md}"
   critic_template="${SINGULAR_PLAN_CRITIC_TEMPLATE:-$SINGULAR_ORCH_DIR/prompts/plan-critic.md}"
+  context_config="${SINGULAR_CONTEXT_CONFIG_FILE:-$SINGULAR_JSON_CONFIG_FILE}"
   printf '%s\0' --engine-home "$SINGULAR_ENGINE_HOME" --config-json "$SINGULAR_JSON_CONFIG_FILE" \
     --config-shell "$SINGULAR_CONFIG_FILE" --config-local "$SINGULAR_LOCAL_CONFIG_FILE" \
     --bash-bin "$bash_bin" --runner "${SINGULAR_RUNNER:-}" --gate-command "${SINGULAR_DEFAULT_GATE_CMD:-}" \
@@ -82,7 +83,8 @@ campaign_args() {
     --active-policy "critic-template=$critic_template" \
     --active-policy "promoter=${SINGULAR_PROMOTER:-}" \
     --active-policy "reconcile-driver=${SINGULAR_RECONCILE_SCRIPT:-$SCRIPT_DIR/reconcile.sh}" \
-    --active-policy "gate-baseline=${SINGULAR_GATE_BASELINE_FILE:-}"
+    --active-policy "gate-baseline=${SINGULAR_GATE_BASELINE_FILE:-}" \
+    --active-policy "context-service-config=$context_config"
 }
 read_campaign_args() {
   campaign_export_settings

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+unset SINGULAR_CONTEXT_CONFIG_FILE SINGULAR_CONTEXT_BUDGET_BYTES 2>/dev/null || true
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -247,6 +249,30 @@ grep -q 'frozen (STOP sentinel present' "$native_out" \
 
 # The exclusion is exact-name only; a different setting under the same prefix
 # remains frozen like every unknown resolved SINGULAR_* policy input.
+SINGULAR_RUNNER_ROLE=implementer \
+SINGULAR_RUNNER_CAPABILITY_PROFILE=implementer-core \
+SINGULAR_RUNNER_RUN_ID=RUN-INVOKE \
+SINGULAR_TEST_TASK_CONTRACT="$repo/docs/orchestration/tasks/TASK-9999.md" \
+SINGULAR_TEST_TASK_ID=TASK-9999 \
+SINGULAR_TEST_TASKS_DIR="$repo/docs/orchestration/tasks" \
+SINGULAR_EXPECTED_CAMPAIGN_BINDING="$replacement_binding" \
+  run verify --quiet || {
+    echo "invocation identity was mistaken for frozen policy drift" >&2
+    exit 1
+  }
+
+if SINGULAR_CONTEXT_CONFIG_FILE="$repo/singular.config.json" \
+    run verify --quiet >/dev/null 2>&1; then
+  echo "invocation introduced an alternate context policy selector" >&2
+  exit 1
+fi
+
+if SINGULAR_CONTEXT_BUDGET_BYTES=99999 run verify --quiet >/dev/null 2>&1; then
+  echo "effective context budget escaped the frozen policy projection" >&2
+  exit 1
+fi
+run verify --quiet
+
 if SINGULAR_RESERVATION_POLICY_SENTINEL=changed run verify --quiet >/dev/null 2>&1; then
   echo "reservation exclusion widened to unrelated resolved settings" >&2
   exit 1
