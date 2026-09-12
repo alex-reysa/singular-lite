@@ -3073,41 +3073,37 @@ l1_candidate_signature() {
   } | shasum -a 256 | awk '{print $1}'
 }
 
-# Canonical product finding identity.  Ordering, whitespace, timestamps and
-# evidence-location churn do not manufacture a new repair opportunity.
+# Canonical audit-feedback identity shared by first-feedback eligibility and
+# repeated-feedback detection.  The worker ledger consumes strings from both
+# arrays with this item equivalence, so array placement, ordering, duplicates,
+# whitespace, case and backticks cannot manufacture a new repair opportunity.
 l1_normalized_findings_signature() {
   local record="$1"
   [[ -f "$record" ]] || return 0
   python3 - "$record" <<'PY' 2>/dev/null || true
 import hashlib
 import json
-import re
 import sys
 
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     raise SystemExit(0)
-findings = data.get("findings")
-if not isinstance(findings, list) or not findings:
+normalized = set()
+for field in ("findings", "requiredFixes"):
+    values = data.get(field)
+    if not isinstance(values, list):
+        continue
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        item = " ".join(value.replace("`", "").lower().split())
+        if item:
+            normalized.add(item)
+if not normalized:
     raise SystemExit(0)
-volatile = {
-    "createdAt", "updatedAt", "timestamp", "ts", "evidenceRefs",
-    "logRef", "artifactRef", "commandRef",
-}
-def normalize(value):
-    if isinstance(value, dict):
-        return {key: normalize(value[key]) for key in sorted(value)
-                if key not in volatile}
-    if isinstance(value, list):
-        items = [normalize(item) for item in value]
-        return sorted(items, key=lambda item: json.dumps(
-            item, sort_keys=True, separators=(",", ":")))
-    if isinstance(value, str):
-        return re.sub(r"\s+", " ", value).strip()
-    return value
-canonical = json.dumps(normalize(findings), sort_keys=True,
-                       separators=(",", ":"), ensure_ascii=False)
+canonical = json.dumps(sorted(normalized), separators=(",", ":"),
+                       ensure_ascii=False)
 print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
 PY
 }
@@ -3258,17 +3254,28 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
     break
   fi
 
-  # Product retries require a changed candidate.  No-output/no-change cycles
-  # otherwise pay for a second full worker+gate+audit pass despite having no
-  # new product state to evaluate.
+  # Product retries normally require a changed candidate. A first validated
+  # needs-fix audit with normalized findings is different: those fresh findings
+  # change the next worker's input even when the audited candidate was already
+  # committed before this invocation and this worker correctly made no edit.
+  # Only that first actionable review gets through this guard; empty feedback
+  # remains a no-output/no-change failure, and an exact candidate plus repeated
+  # normalized findings is parked below before another repair can be charged.
   attempt_end_candidate_signature="$(l1_candidate_signature "$worktree" 2>/dev/null || true)"
   candidate_unchanged="no"
   if [[ -n "$attempt_start_candidate_signature" \
       && "$attempt_start_candidate_signature" == "$attempt_end_candidate_signature" ]]; then
     candidate_unchanged="yes"
   fi
+  current_findings_signature="$(l1_normalized_findings_signature "${attempt_ctx:-/dev/null}")"
+  first_actionable_audit_feedback="no"
+  if [[ "$attempt_failure" == audit-needs-fix* \
+      && -n "$current_findings_signature" \
+      && -z "$prev_findings_signature" ]]; then
+    first_actionable_audit_feedback="yes"
+  fi
   case "$attempt_failure" in
-    gate-red|worker-no-packet|packet-invalid|no-changes|commit-failed|scope-violation|audit-needs-fix)
+    gate-red|worker-no-packet|packet-invalid|no-changes|commit-failed|scope-violation)
       if [[ "$candidate_unchanged" == "yes" ]]; then
         terminal_action="escalate-parked"
         terminal_authority="l1"
@@ -3281,17 +3288,43 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
         break
       fi
       ;;
+    audit-needs-fix|audit-needs-fix*)
+      if [[ "$candidate_unchanged" == "yes" ]]; then
+        if [[ "$first_actionable_audit_feedback" == "yes" ]]; then
+          singular_append_event "l1.actionable_audit_correction_eligible" \
+            "fresh validated audit findings made one bounded correction eligible" \
+            "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"failureClass\":\"$attempt_failure\",\"candidateSignature\":\"$attempt_end_candidate_signature\",\"findingsSignature\":\"$current_findings_signature\",\"productRepairsUsed\":$product_repairs_used,\"productRepairMax\":$max_retries}" \
+            || true
+        elif [[ -n "$current_findings_signature" \
+            && "$current_findings_signature" == "$prev_findings_signature" ]]; then
+          : # The exact-candidate + repeated-findings guard below owns this terminal.
+        else
+          terminal_action="escalate-parked"
+          terminal_authority="l1"
+          terminal_rationale="no actionable review progress: attempt $n left the exact candidate unchanged after $attempt_failure without first-time normalized findings."
+          singular_append_event "l1.unchanged_candidate_parked" \
+            "task parked before another expensive pass because candidate content was unchanged" \
+            "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"failureClass\":\"$attempt_failure\",\"candidateSignature\":\"$attempt_end_candidate_signature\",\"productRepairsUsed\":$product_repairs_used,\"productRepairMax\":$max_retries}" \
+            || true
+          archive_attempt "$n" "$attempt_failure" "$terminal_action" "$terminal_authority"
+          break
+        fi
+      fi
+      ;;
   esac
 
-  current_findings_signature="$(l1_normalized_findings_signature "${attempt_ctx:-/dev/null}")"
   if [[ -n "$current_findings_signature" \
       && "$current_findings_signature" == "$prev_findings_signature" ]]; then
     terminal_action="escalate-parked"
     terminal_authority="l1"
-    terminal_rationale="no review progress: attempt $n reproduced the same normalized product findings as attempt $((n - 1)); another implement/audit pass is suppressed."
+    if [[ "$candidate_unchanged" == "yes" ]]; then
+      terminal_rationale="no review progress: attempt $n left the exact candidate unchanged and reproduced the same normalized product findings as attempt $((n - 1)); another implement/audit pass is suppressed."
+    else
+      terminal_rationale="no review progress: attempt $n reproduced the same normalized product findings as attempt $((n - 1)); another implement/audit pass is suppressed."
+    fi
     singular_append_event "l1.identical_findings_parked" \
       "task parked before another expensive pass because normalized findings repeated" \
-      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"failureClass\":\"$attempt_failure\",\"findingsSignature\":\"$current_findings_signature\",\"productRepairsUsed\":$product_repairs_used,\"productRepairMax\":$max_retries}" \
+      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"failureClass\":\"$attempt_failure\",\"candidateSignature\":\"$attempt_end_candidate_signature\",\"candidateUnchanged\":$([[ "$candidate_unchanged" == yes ]] && printf true || printf false),\"findingsSignature\":\"$current_findings_signature\",\"productRepairsUsed\":$product_repairs_used,\"productRepairMax\":$max_retries}" \
       || true
     archive_attempt "$n" "$attempt_failure" "$terminal_action" "$terminal_authority"
     break
