@@ -982,6 +982,7 @@ missing_actual = os.path.join(controls, "missing-actual.json")
 missing_expected = os.path.join(controls, "missing-expected.json")
 dangling = os.path.join(controls, "dangling-manifest.json")
 directory = os.path.join(controls, "manifest-directory")
+relative = os.path.relpath(sys.argv[3])
 os.symlink(sys.argv[3], alias)
 with open(sys.argv[3], "rb") as source, open(wrong, "wb") as target:
     target.write(source.read())
@@ -993,7 +994,7 @@ assert_manifest_rejected(missing_actual, sys.argv[3], "missing actual path")
 assert_manifest_rejected(sys.argv[3], missing_expected, "missing expected path")
 assert_manifest_rejected(dangling, sys.argv[3], "dangling link")
 assert_manifest_rejected(directory, sys.argv[3], "directory")
-assert_manifest_rejected("relative-manifest.json", sys.argv[3], "relative path")
+assert_manifest_rejected(relative, sys.argv[3], "relative path")
 assert_manifest_rejected(None, sys.argv[3], "non-string field")
 assert sum(event.get("type") == "l1.campaign_mismatch" for event in events) == 1, events
 assert not any(event.get("type") == "l1.task_accepted" for event in events), events
