@@ -3814,6 +3814,10 @@ class ProvidersRouteTests(unittest.TestCase):
         status, providers = self._req("GET", "/api/providers")
         self.assertEqual(status, 200)
         self.assertEqual(providers["activeProvider"], "unknown")
+        self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
+        status, data = self._req("GET", "/api/dag")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["configuration"]["reason"], "configuration-changed")
 
     def test_external_context_policy_change_is_actionable_over_http(self) -> None:
         policy = self.repo / "policy" / "context.json"
@@ -3838,6 +3842,12 @@ class ProvidersRouteTests(unittest.TestCase):
         self.assertIn("context-policy", [
             item["label"] for item in changed["configuration"]["changedInputs"]
         ])
+        status, lifecycle = self._req("GET", "/api/lifecycle")
+        self.assertEqual(status, 200)
+        self.assertTrue(lifecycle["configuration"]["restartRequired"])
+        status, providers = self._req("GET", "/api/providers")
+        self.assertEqual(status, 200)
+        self.assertEqual(providers["activeProvider"], "unknown")
         self.assertFalse(any(row["isDefaultRunner"] for row in providers["providers"]))
         status, data = self._req("GET", "/api/dag")
         self.assertEqual(status, 409)
