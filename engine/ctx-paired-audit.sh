@@ -113,6 +113,20 @@ singular_ctx_paired_audit_record() {
   # no --resume-session / session reuse; read-only = --level readonly. Runner failure is non-fatal (record still
   # captures what happened) and never feeds back into any outcome.
   local result_file="$run_dir/paired-audit-runner-result.json"
+  local context_receipt="$run_dir/context-invocation-review-target-paired.json"
+  local paired_campaign_binding
+  paired_campaign_binding="$(singular_campaign_binding)" || return $?
+  local -a context_delivery_args=(--campaign-binding "$paired_campaign_binding")
+  if [[ -f "$context_config" ]]; then
+    context_delivery_args+=(
+      --context-config "$context_config" --context-role review-target
+      --context-phase paired-audit --context-task "$context_task"
+      --context-bundle "$run_dir/context-review-target-paired.bundle.json"
+      --context-invocation-id "$run_id:$task_id:review-target:paired"
+      --receipt "$context_receipt" --events-file "$SINGULAR_EVENTS_FILE"
+    )
+  fi
+  rm -f "$context_receipt" 2>/dev/null || true
   rm -f "$result_file" 2>/dev/null || true
   local rc=0
   local audit_capability_profile="${SINGULAR_AUDITOR_CAPABILITY_PROFILE:-audit-core}"
@@ -125,10 +139,8 @@ singular_ctx_paired_audit_record() {
   python3 "$SINGULAR_LIB_DIR/evidence_delivery.py" run \
     --manifest "$run_dir/evidence-manifest.json" \
     --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
-    --required packet.json --required audit-verification.json -- \
-    "$SINGULAR_LIB_DIR/l1-drive.sh" --context-provider-run \
-      review-target paired-audit "$context_task" \
-      "$run_dir/context-review-target-paired.bundle.json" "$context_config" - -- \
+    --required packet.json --required audit-verification.json \
+    "${context_delivery_args[@]}" -- \
     "$runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
       --level readonly -C "$worktree" --run-id "$run_id" \
       --prompt-file "$prompt" --output-last-message "$raw" >/dev/null 2>&1 || rc=$?

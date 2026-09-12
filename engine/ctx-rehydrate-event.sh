@@ -163,12 +163,8 @@ sys.stdout.write("\n")
 PY
 }
 
-# Build and publish the exact prompt crossing a provider boundary. This hook is
-# independent of resume/rehydrate routing: contextService.enabled is its only
-# feature gate. The prompt bytes and the context.bundle_selected event are read
-# from one immutable bundle, preventing prompt/provenance skew.
-#
-# singular_context_invocation_prepare ROLE PHASE TASK PROMPT BUNDLE [PRIOR]
+# Resolve a configured path into a worker worktree when the same relative file
+# exists there. Context snapshots must describe the provider's actual workspace.
 singular_context_worktree_path() {
   local original="$1" worktree="$2"
   python3 - "$original" "$worktree" "${SINGULAR_ROOT:-.}" <<'PY'
@@ -190,13 +186,12 @@ print(candidate if os.path.isfile(candidate) else original)
 PY
 }
 
-singular_context_invocation_prepare() {
-  local role="$1" phase="$2" task="$3" prompt="$4" bundle="$5" prior="${6:-}"
-  local config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
-  [[ -f "$config" ]] || return 0
-
-  local settings
-  settings="$(python3 - "$config" 2>/dev/null <<'PY'
+# Print `0<TAB>budget` or `1<TAB>budget` after strict context configuration
+# validation. A missing config is feature-off compatibility.
+singular_context_invocation_settings() {
+  local config="$1"
+  [[ -f "$config" ]] || { printf '0\t65536\n'; return 0; }
+  python3 - "$config" <<'PY'
 import json, sys
 try:
     value = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -204,9 +199,9 @@ try:
     if not isinstance(settings, dict):
         raise ValueError("contextService must be an object")
     enabled = settings.get("enabled", False)
+    budget = settings.get("budgetBytes", 65536)
     if not isinstance(enabled, bool):
         raise ValueError("contextService.enabled must be boolean")
-    budget = settings.get("budgetBytes", 65536)
     if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1:
         raise ValueError("contextService.budgetBytes must be a positive integer")
     print(("1" if enabled else "0") + "\t" + str(budget))
@@ -214,61 +209,59 @@ except Exception as exc:
     print(str(exc), file=sys.stderr)
     raise SystemExit(2)
 PY
-  )" || {
+}
+
+# Run one actual provider argv through the host-owned context preparation
+# boundary. Feature-off invokes the exact argv directly. Feature-on delegates
+# composition/publication/event binding and launch to evidence_delivery.py.
+#
+# singular_context_invocation_run ROLE PHASE TASK BUNDLE PRIOR INVOCATION_ID
+#   RECEIPT CAMPAIGN_BINDING -- ACTUAL_RUNNER [ARGS...]
+singular_context_invocation_run() {
+  local role="$1" phase="$2" task="$3" bundle="$4" prior="$5"
+  local invocation_id="$6" receipt="$7" campaign_binding="$8"
+  shift 8
+  [[ "${1:-}" == "--" ]] || {
+    echo "context invocation: missing actual runner separator" >&2
+    return 2
+  }
+  shift
+  local -a command=("$@")
+  local config="${SINGULAR_CONTEXT_CONFIG_FILE:-${SINGULAR_JSON_CONFIG_FILE:-$SINGULAR_ROOT/singular.config.json}}"
+  local settings
+  settings="$(singular_context_invocation_settings "$config")" || {
     echo "context service: invalid configuration: $config" >&2
     return 2
   }
-  local enabled="${settings%%$'\t'*}" budget="${settings#*$'\t'}"
-  [[ "$enabled" == "1" ]] || return 0
-  [[ -z "${SINGULAR_CONTEXT_BUDGET_BYTES:-}" ]] || budget="$SINGULAR_CONTEXT_BUDGET_BYTES"
-  [[ "$budget" =~ ^[1-9][0-9]*$ ]] || {
-    echo "context service: invocation budget must be a positive integer" >&2
-    return 2
-  }
-
-  local delivery="initial"
-  [[ -n "$prior" && -f "$prior" ]] && delivery="delta"
+  local enabled="${settings%%$'\t'*}"
+  if [[ "$enabled" != "1" ]]; then
+    "${command[@]}"
+    return $?
+  fi
+  [[ -z "$campaign_binding" ]] \
+    || singular_campaign_binding_matches "$campaign_binding" context-invocation "$phase" \
+    || return $?
   local engine_dir="${SINGULAR_ENGINE_DIR:-${SINGULAR_ENGINE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/engine}"
   local -a args=(
-    build --config "$config" --role "$role" --phase "$phase"
-    --task "$task" --base-prompt "$prompt" --prompt-output "$prompt"
-    --budget-bytes "$budget" --delivery "$delivery" --output "$bundle"
+    run --context-config "$config" --context-role "$role" --context-phase "$phase"
+    --context-task "$task" --context-bundle "$bundle"
+    --context-invocation-id "$invocation_id" --receipt "$receipt"
+    --events-file "$SINGULAR_EVENTS_FILE"
   )
-  [[ "$delivery" == "delta" ]] && args+=(--prior-bundle "$prior")
-  python3 "$engine_dir/context_cli.py" "${args[@]}" >/dev/null || return $?
-
-  local event_data
-  event_data="$(python3 - "$bundle" "$role" "$phase" <<'PY'
-import json, os, sys
-path, role, phase = sys.argv[1:4]
-data = json.load(open(path, encoding="utf-8"))
-provenance = data["provenance"]
-all_reasons = [reason for item in provenance for reason in item.get("reasons", [])]
-prior = next((reason.split(":", 1)[1] for reason in all_reasons if reason.startswith("prior_bundle:")), None)
-delivery = {
-    "mode": "delta" if prior else "initial",
-    "priorBundleId": prior,
-    "changedRefs": [item["ref"] for item in provenance if "changed_source" in item.get("reasons", [])],
-    "unchangedRefs": [item["ref"] for item in provenance if "unchanged_immutable_reference" in item.get("reasons", [])],
-    "revokedRefs": [item["ref"] for item in data["omissions"] if item.get("reason") == "revoked_since_prior_bundle"],
+  [[ -z "$prior" || ! -f "$prior" ]] || args+=(--context-prior-bundle "$prior")
+  [[ -z "$campaign_binding" ]] || args+=(--campaign-binding "$campaign_binding")
+  python3 "$engine_dir/evidence_delivery.py" "${args[@]}" -- "${command[@]}"
 }
-print(json.dumps({
-    "role": role,
-    "phase": phase,
-    "bundleId": data["bundleId"],
-    "promptSha256": data["promptSha256"],
-    "bundleRef": os.path.basename(path),
-    "identity": data["identity"],
-    "delivery": delivery,
-    "budget": data["budget"],
-    "omissions": data["omissions"],
-    "sourceProvenance": [
-        {key: item.get(key) for key in ("ref", "kind", "sourceSha256", "validity", "reasons")}
-        for item in data["provenance"]
-    ],
-}, separators=(",", ":")))
+
+singular_context_receipt_bundle_path() {
+  local receipt="$1"
+  [[ -f "$receipt" ]] || return 1
+  python3 - "$receipt" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+path = value.get("bundlePath")
+if not isinstance(path, str) or not path:
+    raise SystemExit(1)
+print(path)
 PY
-  )" || return $?
-  singular_append_event "context.bundle_selected" \
-    "context service prompt bundle selected for provider invocation" "$event_data"
 }

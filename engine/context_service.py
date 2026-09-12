@@ -359,6 +359,32 @@ class ContextService:
             ],
         }
 
+    def validate_snapshot(self) -> None:
+        """Refuse config/source drift after this invocation snapshot was read."""
+        try:
+            current_config = self.config_path.read_bytes()
+        except OSError as exc:
+            raise ContextError(
+                f"context configuration changed during invocation: {self.config_path}: {exc}"
+            ) from exc
+        if _sha256(current_config) != self.config_hash:
+            raise ContextError(
+                f"context configuration changed during invocation: {self.config_path}"
+            )
+        for source in self.sources:
+            try:
+                current = source.path.read_bytes()
+            except FileNotFoundError:
+                current = None
+            except OSError as exc:
+                raise ContextError(
+                    f"configured source changed during invocation: {source.ref}: {exc}"
+                ) from exc
+            if current != source.raw:
+                raise ContextError(
+                    f"configured source changed during invocation: {source.ref}"
+                )
+
     def _disabled(self, schema: str) -> dict[str, Any]:
         return {
             "schema": schema,
@@ -635,6 +661,10 @@ class ContextService:
         base_prompt: str | os.PathLike[str] | None = None,
         delivery: str = "full",
         prior_bundle: dict[str, Any] | str | os.PathLike[str] | None = None,
+        required_evidence: list[dict[str, Any]] | None = None,
+        final_budget_bytes: int | None = None,
+        invocation_id: str | None = None,
+        campaign_binding: str | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             prompt = b""
@@ -673,6 +703,10 @@ class ContextService:
                 base_prompt=base_prompt,
                 delivery="initial" if delivery == "full" else delivery,
                 prior_bundle=prior_bundle,
+                required_evidence=required_evidence or [],
+                final_budget_bytes=final_budget_bytes,
+                invocation_id=invocation_id,
+                campaign_binding=campaign_binding,
             )
         task_raw_value = os.fspath(task)
         if re.fullmatch(r"TASK-[0-9]{4,}", task_raw_value):
@@ -826,6 +860,10 @@ class ContextService:
         base_prompt: str | os.PathLike[str],
         delivery: str,
         prior_bundle: dict[str, Any] | str | os.PathLike[str] | None,
+        required_evidence: list[dict[str, Any]],
+        final_budget_bytes: int | None,
+        invocation_id: str | None,
+        campaign_binding: str | None,
     ) -> dict[str, Any]:
         """Build the exact provider prompt from one immutable source snapshot.
 
@@ -837,6 +875,12 @@ class ContextService:
         """
         if delivery not in {"initial", "delta"}:
             raise ContextError("delivery must be initial or delta")
+        if final_budget_bytes is not None and (
+            not isinstance(final_budget_bytes, int)
+            or isinstance(final_budget_bytes, bool)
+            or final_budget_bytes < 1
+        ):
+            raise ContextError("final composed budget must be a positive integer")
         base_path = Path(base_prompt).resolve(strict=False)
         try:
             base_raw = base_path.read_bytes()
@@ -851,6 +895,12 @@ class ContextService:
         if not task_path.is_absolute():
             task_path = self.root / task_path
         task_path = task_path.resolve(strict=False)
+        try:
+            task_path.relative_to(self.root)
+        except ValueError as exc:
+            raise ContextError(
+                f"containment: task resolves outside worktree: {task_path}"
+            ) from exc
         try:
             task_raw = task_path.read_bytes()
             task_text = task_raw.decode("utf-8")
@@ -872,11 +922,13 @@ class ContextService:
             raise ContextError(f"ineligible configured invocation source(s): {refs}")
 
         prior: dict[str, Any] = {}
+        prior_path: Path | None = None
         if prior_bundle is not None:
             if isinstance(prior_bundle, dict):
                 prior = prior_bundle
             else:
-                prior, _ = _read_json(Path(prior_bundle), "prior context bundle")
+                prior_path = Path(prior_bundle).resolve(strict=False)
+                prior, _ = _read_json(prior_path, "prior context bundle")
             if prior.get("schema") != BUNDLE_SCHEMA:
                 raise ContextError("wrong-version: prior bundle must be singular.context.bundle.v1")
             claimed = prior.get("bundleId")
@@ -884,6 +936,37 @@ class ContextService:
             unsigned.pop("bundleId", None)
             if claimed != _sha256(_canonical(unsigned)):
                 raise ContextError("modified prior context bundle")
+            prior_identity = prior.get("identity")
+            if not isinstance(prior_identity, dict):
+                raise ContextError("prior context bundle has no compatible identity")
+            compatibility = {
+                "projectId": self.project_id,
+                "worktree": str(self.root),
+                "role": self.role,
+            }
+            mismatched = [
+                key for key, expected in compatibility.items()
+                if prior_identity.get(key) != expected
+            ]
+            prior_host_binding = next((
+                metadata
+                for item in prior.get("provenance", [])
+                if isinstance(item, dict)
+                and "host_invocation_identity" in item.get("reasons", [])
+                and isinstance((metadata := item.get("provenance")), dict)
+            ), {})
+            if (
+                campaign_binding is not None
+                and prior_host_binding.get("campaignBinding") != campaign_binding
+            ):
+                mismatched.append("campaignBinding")
+            if mismatched:
+                # An incompatible bundle is not authority and contributes no
+                # references. A fresh bounded initial delivery is safe and is
+                # required for provider fallbacks that cannot reuse memory.
+                prior = {}
+                prior_path = None
+                delivery = "initial"
         elif delivery == "delta":
             delivery = "initial"
 
@@ -914,6 +997,24 @@ class ContextService:
             "validity": "snapshot-read",
             "priority": "mandatory",
         }]
+        if invocation_id is not None:
+            host_binding = {
+                "invocationId": invocation_id,
+                "campaignBinding": campaign_binding,
+            }
+            host_binding_raw = _canonical(host_binding)
+            provenance.append({
+                "ref": "host-invocation:" + invocation_id,
+                "kind": "task",
+                "sourceLocation": "host-invocation:" + invocation_id,
+                "sourceSha256": _sha256(host_binding_raw),
+                "excerptSha256": _sha256(host_binding_raw),
+                "range": {"startByte": 0, "endByte": len(host_binding_raw)},
+                "reasons": ["host_invocation_identity"],
+                "validity": "host-bound",
+                "priority": "mandatory",
+                "provenance": host_binding,
+            })
         # Some fresh audit/planner templates do not already carry the complete
         # task/DAG contract. Add it exactly once when absent.
         if task_text not in base_text:
@@ -1012,12 +1113,67 @@ class ContextService:
             parts.append(revoked_notice)
             mandatory_bytes += len(revoked_notice)
 
+        if prior and prior_path is not None:
+            prior_notice = (
+                "\nRetained prior context bundle: `" + str(prior_path) + "` "
+                "(" + str(prior.get("bundleId")) + "). Unchanged-source references "
+                "resolve through this immutable host artifact.\n"
+            ).encode()
+            parts.append(prior_notice)
+            optional_used += len(prior_notice)
+
+        if required_evidence:
+            evidence_header = b"\n\n## Complete host-delivered review evidence\n"
+            parts.append(evidence_header)
+            mandatory_bytes += len(evidence_header)
+            for item in required_evidence:
+                ref = item.get("ref")
+                data = item.get("data")
+                source_location = item.get("sourceLocation", "")
+                if not isinstance(ref, str) or not ref or not isinstance(data, bytes):
+                    raise ContextError("required evidence snapshot is invalid")
+                digest = _sha256(data)
+                block = (
+                    ("\nArtifact: " + ref + " SHA256: " + digest.removeprefix("sha256:") + "\n").encode()
+                    + data + b"\n"
+                )
+                parts.append(block)
+                mandatory_bytes += len(block)
+                provenance.append({
+                    "ref": "evidence:" + ref,
+                    # Required review evidence is part of the invocation's
+                    # task contract. Keep the strict v1 kind vocabulary while
+                    # identifying its host origin in nested provenance.
+                    "kind": "task",
+                    "sourceLocation": str(source_location),
+                    "sourceSha256": digest,
+                    "excerptSha256": digest,
+                    "range": {"startByte": 0, "endByte": len(data)},
+                    "reasons": ["required_host_evidence", "mandatory_review_input"],
+                    "validity": "snapshot-read",
+                    "priority": "mandatory",
+                    "provenance": {"origin": "host-evidence", "evidenceRef": ref},
+                })
+
         prompt_raw = b"".join(parts)
         if len(prompt_raw) > budget_bytes:
             raise ContextOverflow(
                 f"mandatory-overflow: aggregate invocation requires {len(prompt_raw)} "
                 f"UTF-8 bytes but budget is {budget_bytes}"
             )
+        if final_budget_bytes is not None and len(prompt_raw) > final_budget_bytes:
+            raise ContextOverflow(
+                f"complete review input exceeds composed budget: {len(prompt_raw)} "
+                f"UTF-8 bytes > {final_budget_bytes}"
+            )
+        try:
+            if base_path.read_bytes() != base_raw:
+                raise ContextError(f"mandatory base prompt changed during invocation: {base_path}")
+            if task_path.read_bytes() != task_raw:
+                raise ContextError(f"mandatory task source changed during invocation: {task_path}")
+        except OSError as exc:
+            raise ContextError(f"mandatory invocation source changed during invocation: {exc}") from exc
+        self.validate_snapshot()
         identity = dict(self.identity)
         identity["phase"] = phase
         bundle: dict[str, Any] = {

@@ -75,6 +75,25 @@ singular_ctx_planner_context_path() {
   printf '%s/sessions/planner/%s.context-bundle.json' "$state_dir" "$node"
 }
 
+# Atomically move the mutable per-node pointer to one immutable invocation
+# bundle. The pointer is a relative symlink; bundle bytes are never copied over
+# or replaced when a later planner invocation succeeds.
+singular_ctx_planner_context_point() {
+  local node="$1" bundle="$2" pointer temporary
+  pointer="$(singular_ctx_planner_context_path "$node")"
+  [[ -n "$pointer" && -f "$bundle" ]] || return 2
+  mkdir -p "$(dirname "$pointer")" || return $?
+  temporary="$pointer.tmp.${BASHPID:-$$}"
+  rm -f "$temporary"
+  python3 - "$bundle" "$pointer" "$temporary" <<'PY'
+import os, sys
+bundle, pointer, temporary = map(os.path.abspath, sys.argv[1:4])
+relative = os.path.relpath(bundle, os.path.dirname(pointer))
+os.symlink(relative, temporary)
+os.replace(temporary, pointer)
+PY
+}
+
 # Guarded finalize wrapper. No-op unless the knob is ON and the planner run
 # exited successfully (rc 0). Delegates the session-meta.v0 shape to the shared
 # singular_session_meta_finalize (role "planner"), then adds the additive optional

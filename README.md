@@ -555,6 +555,15 @@ runs. Final and sampled paired audits always start fresh under the
 `review-target` policy; audit roles cannot read `run` sources, so worker
 conclusions are not imported as trusted review knowledge.
 
+The host validates the actual adapter argv and frozen campaign before an audit
+is admitted. It then snapshots the base prompt, task, selected context, and
+required review evidence; composes them once; applies both the context byte
+budget and evidence manifest's final-prompt cap; and publishes a
+content-addressed prompt plus a unique immutable invocation bundle. The event,
+admission receipt, and evidence-delivery ledger all bind that final prompt hash
+and byte count. Required-evidence and paged-read debits remain a separate
+cumulative retrieval budget and do not count unrelated prompt bytes.
+
 ```bash
 singular context search --role implementer --query "serialized migration"
 singular context get --role implementer --ref REF --version sha256:... \
