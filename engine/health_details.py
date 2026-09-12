@@ -130,7 +130,7 @@ def _diagnostic_for_event(event: dict[str, Any]) -> dict[str, Any]:
         or f"{category}:{event_type}:{message[:160]}",
         256,
     )
-    return {
+    result = {
         "category": category,
         "severity": severity,
         "expected": expected,
@@ -141,6 +141,14 @@ def _diagnostic_for_event(event: dict[str, Any]) -> dict[str, Any]:
         "message": message,
         "lastAt": event.get("ts"),
     }
+    # Diagnostic 2.1 is additive. Preserve explicit evidence qualification so
+    # consumers can distinguish a cache/catalog inference from a provider fact.
+    for key in ("evidenceStatus", "inventoryProvenance"):
+        if isinstance(explicit.get(key), str) and explicit[key]:
+            result[key] = _bounded_text(explicit[key], 128)
+    if isinstance(explicit.get("providerRejected"), bool):
+        result["providerRejected"] = explicit["providerRejected"]
+    return result
 
 
 def collect_diagnostics(events_path: Path) -> dict[str, Any]:
@@ -164,6 +172,7 @@ def collect_diagnostics(events_path: Path) -> dict[str, Any]:
         reverse=True,
     )[:MAX_DIAGNOSTIC_GROUPS]
     return {
+        "schema": "singular.diagnostics.v2.1",
         "total": total,
         "groups": len(groups),
         "counts": {category: counts[category] for category in CATEGORIES},

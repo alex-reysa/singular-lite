@@ -21,6 +21,7 @@ Stdlib only, no engine imports — mirrors engine/capability_policy.py.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 import json
 import os
@@ -192,6 +193,67 @@ def codex_role_settings(
     }
 
 
+def effective_configuration(
+    repo: Path | str,
+    env: Mapping[str, str],
+    *,
+    environment_is_effective: bool = False,
+) -> dict[str, Any]:
+    """Return the shared read-only effective configuration diagnostic."""
+    root = Path(repo).resolve()
+    resolution = resolve_json_config(root, env)
+    try:
+        config, resolution = load_json_config(root, env)
+        status, error = "ok", ""
+    except ConfigResolutionError as exc:
+        config, status, error = {}, "error", str(exc)
+    effective_env = {str(key): str(value) for key, value in env.items()}
+    config_env = config.get("env") if isinstance(config.get("env"), dict) else {}
+    if not environment_is_effective:
+        for key, value in config_env.items():
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                effective_env[str(key)] = str(value)
+
+    def consumer_path(key: str, fallback: str) -> str:
+        raw = str(effective_env.get(key, "") or "").strip()
+        path = Path(raw).expanduser() if raw else root / fallback
+        if not path.is_absolute():
+            path = root / path
+        return str(path.resolve())
+
+    runner = str(
+        config_env.get("SINGULAR_RUNNER")
+        or config.get("runner")
+        or effective_env.get("SINGULAR_RUNNER")
+        or "codex-run.sh"
+    )
+    roles = {
+        role: codex_role_settings(effective_env, role, "gpt-5.5")
+        for role in (
+            "planner", "implementer", "auditor", "critic", "decider",
+            "supervisor", "integrator",
+        )
+    }
+    result: dict[str, Any] = {
+        "schema": "singular.effective-configuration.v1",
+        "configuration": {
+            "path": str(resolution.path),
+            "source": resolution.source,
+            "status": status,
+        },
+        "runner": runner,
+        "paths": {
+            "root": str(root),
+            "tasks": consumer_path("SINGULAR_TASKS_DIR", "docs/orchestration/tasks"),
+            "state": consumer_path("SINGULAR_STATE_DIR", ".singular-state"),
+        },
+        "roles": roles,
+    }
+    if error:
+        result["configuration"]["message"] = error
+    return result
+
+
 @dataclass(frozen=True)
 class ProviderResolution:
     """One provider's resolved executable plus why it resolved that way."""
@@ -300,3 +362,17 @@ def resolve_provider_bin(provider: str, binary: str,
 def resolve_codex_bin(env: Mapping[str, str]) -> ProviderResolution:
     """Convenience wrapper — the parity target for singular_resolve_codex_bin."""
     return resolve_provider_bin("codex", "codex", env)
+
+
+def _main() -> None:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    effective = sub.add_parser("effective-config")
+    effective.add_argument("--repo", type=Path, required=True)
+    args = parser.parse_args()
+    if args.command == "effective-config":
+        print(json.dumps(effective_configuration(args.repo, os.environ), separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    _main()

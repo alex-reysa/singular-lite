@@ -7,13 +7,17 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 repo="$tmp/repo with spaces"
-mkdir -p "$repo/config dir" "$repo/tasks custom" "$repo/state custom"
+mkdir -p "$repo/config dir" "$repo/tasks custom" "$repo/state custom" \
+  "$repo/docs/orchestration"
 git -C "$repo" init -q
 git -C "$repo" -c user.name=test -c user.email=test@example.com \
   commit -q --allow-empty -m init
 
 cat >"$repo/singular.config.json" <<'JSON'
 {"schemaVersion":"v2","targetBranch":"wrong","env":{"SINGULAR_CODEX_MODEL":"wrong-model"}}
+JSON
+cat >"$repo/docs/orchestration/dag.v0.json" <<'JSON'
+{"schema":"singular.orchestration.dag.v0","nodes":[{"id":"config-parity","stage":"S0","area":"brain","layer":"test","kind":"contract","dependsOn":[],"requiredCompletion":"done"}]}
 JSON
 cat >"$repo/config dir/custom.json" <<'JSON'
 {
@@ -40,12 +44,18 @@ doctor_json="$(cd / && env SINGULAR_JSON_CONFIG_FILE="$selector" \
 console_json="$(cd / && env SINGULAR_JSON_CONFIG_FILE="$selector" \
   SINGULAR_ENGINE_HOME="$ROOT" python3 "$ROOT/plugin/scripts/singular_graph_server.py" \
     --repo "$repo" --config)"
+effective_json="$(cd / && env SINGULAR_JSON_CONFIG_FILE="$selector" \
+  python3 "$ROOT/engine/provider_resolver.py" effective-config --repo "$repo")"
+cli_json="$(cd "$repo" && env SINGULAR_JSON_CONFIG_FILE="$selector" \
+  SINGULAR_ENGINE_HOME="$ROOT" SINGULAR_CODEX_BIN=/bin/true \
+  bash "$ROOT/cli/singular" health --json)"
 
-python3 - "$doctor_json" "$console_json" "$repo/config dir/custom.json" <<'PY' \
-  || fail "doctor and console did not resolve the same custom config"
+python3 - "$doctor_json" "$console_json" "$effective_json" "$cli_json" \
+  "$repo/config dir/custom.json" <<'PY' \
+  || fail "CLI, doctor and console did not resolve the same custom config"
 import json, os, sys
-doctor, console = json.loads(sys.argv[1]), json.loads(sys.argv[2])
-path = os.path.realpath(sys.argv[3])
+doctor, console, effective, cli = map(json.loads, sys.argv[1:5])
+path = os.path.realpath(sys.argv[5])
 check = next(item for item in doctor["checks"] if item["id"] == "repo.config")
 assert check["status"] == "pass", check
 assert check["details"]["path"] == path, check
@@ -58,6 +68,13 @@ assert console["roles"]["auditor"]["effort"] == "medium", console
 assert console["roles"]["implementer"]["requestedServiceTier"] == "default", console
 assert console["paths"]["tasks"] == os.path.join(os.path.dirname(os.path.dirname(path)), "tasks custom"), console
 assert console["paths"]["state"] == os.path.join(os.path.dirname(os.path.dirname(path)), "state custom"), console
+assert doctor["effectiveConfiguration"] == effective, doctor
+assert cli["effectiveConfiguration"] == effective, cli
+assert effective["configuration"] == console["configuration"], (effective, console)
+assert effective["paths"] == console["paths"], (effective, console)
+for role in ("implementer", "auditor"):
+    assert effective["roles"][role]["model"] == console["roles"][role]["model"]
+    assert effective["roles"][role]["reasoningEffort"] == console["roles"][role]["effort"]
 PY
 
 for bad in missing.json malformed.json; do

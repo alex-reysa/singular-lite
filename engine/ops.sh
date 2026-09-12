@@ -632,6 +632,7 @@ except Exception:
     *) auto_state="unknown" ;;
   esac
   local disk_free wt_count console_url lifecycle_json resource_json health_details_json
+  local effective_configuration_json
   disk_free="$(singular_free_disk_gb 2>/dev/null || echo null)"
   wt_count="$(find "$SINGULAR_WORKTREES_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | grep -c . || true)"
   console_url="$(head -1 "$SINGULAR_STATE_DIR/console.url" 2>/dev/null || true)"
@@ -735,6 +736,8 @@ PY
     --dag "${SINGULAR_DAG_FILE:-$SINGULAR_ORCH_DIR/dag.v0.json}" \
     --events "$SINGULAR_EVENTS_FILE" 2>/dev/null \
     || echo '{"diagnostics":{"total":0,"groups":0,"counts":{},"items":[]},"humanGates":{"total":0,"approved":0,"blocking":0,"states":{},"blockedNodes":[],"items":[],"errors":["health detail collection failed"]}}')"
+  effective_configuration_json="$(python3 "$SCRIPT_DIR/provider_resolver.py" \
+    effective-config --repo "$SINGULAR_ROOT" 2>/dev/null || echo '{}')"
   local head_sha
   head_sha="$(git -C "$SINGULAR_ROOT" rev-parse --short HEAD 2>/dev/null || echo null)"
 
@@ -742,7 +745,7 @@ PY
     "$backoff_json" "$breaker_n" "${SINGULAR_MAX_CONSEC_FAILS:-5}" "$stop_present" "$lock_present" \
     "$auto_pid" "$auto_state" "$disk_free" "${SINGULAR_MIN_DISK_GB:-2}" "$wt_count" "$console_url" \
     "${SINGULAR_TARGET_BRANCH:-}" "$head_sha" "$lifecycle_json" "$resource_json" \
-    "$health_details_json" "$json" <<'PY'
+    "$health_details_json" "$effective_configuration_json" "$json" <<'PY'
 import hashlib
 import json
 import sys
@@ -750,7 +753,8 @@ from datetime import datetime, timezone
 
 (gates_raw, frontier, ready, active, l1a, l1s, backoff_raw, breaker, breaker_max,
  stop, lock, auto_pid, auto_state, disk, min_disk, wt, console_url,
- target, head, lifecycle_raw, resource_raw, health_details_raw, as_json) = sys.argv[1:24]
+ target, head, lifecycle_raw, resource_raw, health_details_raw,
+ effective_configuration_raw, as_json) = sys.argv[1:25]
 
 
 def num(x):
@@ -783,6 +787,10 @@ except Exception:
             "blockedNodes": [], "items": [], "errors": ["health detail JSON invalid"],
         },
     }
+try:
+    effective_configuration = json.loads(effective_configuration_raw)
+except Exception:
+    effective_configuration = {}
 
 attention = []
 if frontier == "unavailable":
@@ -831,6 +839,7 @@ doc = {
                "implementersActive": lifecycle.get("implementersActive", 0)},
     "lifecycle": lifecycle,
     "candidates": lifecycle.get("candidates", []),
+    "effectiveConfiguration": effective_configuration,
     "resources": resources,
     "diagnostics": health_details.get("diagnostics", {}),
     "humanGates": health_details.get("humanGates", {}),

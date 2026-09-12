@@ -35,6 +35,7 @@ from provider_resolver import (
     ConfigResolutionError,
     JsonConfigResolution,
     codex_role_settings,
+    effective_configuration,
     load_json_config,
     resolve_json_config,
     resolve_provider_bin,
@@ -1937,6 +1938,25 @@ singular_json_config_to_env "$2"
         if missing:
             details["missing"] = missing
             shown = ", ".join(f"{name}={value}" for name, value in sorted(missing.items()))
+            if provider == "codex":
+                details.update({
+                    "evidenceStatus": "cache-omission",
+                    "inventoryProvenance": "codex-local-cache",
+                    "inventoryComplete": False,
+                    "providerRejected": False,
+                })
+                self.add(
+                    "model.availability",
+                    "warn",
+                    f"configured Codex model is omitted from an incomplete local inventory: {shown}",
+                    required_for=("provider-runs", "selected-provider"),
+                    remediation=(
+                        "Refresh the Codex inventory or run a bounded native canary; "
+                        "only a provider response can establish rejection."
+                    ),
+                    details=details,
+                )
+                return
             self.add(
                 "model.availability",
                 "fail",
@@ -2027,9 +2047,25 @@ singular_json_config_to_env "$2"
 
     def codex_inventory(self) -> tuple[set[str], str, str, dict[str, Any]]:
         cache = self.codex_cache_path()
-        details: dict[str, Any] = {"provider": "codex", "cachePath": str(cache)}
+        details: dict[str, Any] = {
+            "provider": "codex",
+            "cachePath": str(cache),
+            "inventoryProvenance": "codex-local-cache",
+            "inventoryComplete": False,
+            "providerRejected": False,
+        }
         try:
             data = json.loads(cache.read_text(encoding="utf-8"))
+            fetched = data.get("fetched_at") or data.get("fetchedAt")
+            if fetched:
+                details["fetchedAt"] = str(fetched)
+                try:
+                    observed = dt.datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+                    details["inventoryStale"] = (
+                        dt.datetime.now(dt.UTC) - observed
+                    ).total_seconds() > MODEL_LISTING_TTL_SEC
+                except (TypeError, ValueError):
+                    details["inventoryStale"] = True
             slugs = {
                 str(item.get("slug"))
                 for item in data.get("models", [])
@@ -3447,6 +3483,15 @@ singular_json_config_to_env "$2"
             "ok": failed == 0,
             "repo": str(self.repo) if self.repo else None,
             "engine": str(self.engine),
+            "effectiveConfiguration": (
+                effective_configuration(
+                    self.repo,
+                    self.runtime_env,
+                    environment_is_effective=True,
+                )
+                if self.repo
+                else None
+            ),
             # Additive: the primary diagnosis every "skip" entry points back to,
             # or null. Readers that predate it see the same schema id and the
             # same checks[] they always did.

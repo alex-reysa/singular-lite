@@ -257,6 +257,10 @@ fi
 # Autonomy controls.
 SINGULAR_MAX_RETRIES="${SINGULAR_MAX_RETRIES:-3}"            # per-task worker retries before the decider escalates
 SINGULAR_AUTO_INTEGRATE="${SINGULAR_AUTO_INTEGRATE:-1}"      # direct reconcile/auto/launchd all integrate accepted work by default
+# Discovery only: integrate.sh remains the sole canonical eligibility authority.
+SINGULAR_RECONCILE_INDEX="${SINGULAR_RECONCILE_INDEX:-1}"
+SINGULAR_RECONCILE_FULL_SCAN_EVERY="${SINGULAR_RECONCILE_FULL_SCAN_EVERY:-20}"
+SINGULAR_RECONCILE_INDEX_FILE="${SINGULAR_RECONCILE_INDEX_FILE:-$SINGULAR_STATE_DIR/reconcile-index.json}"
 # Decider fast-path (T-F1): when 1 (default), singular_decider_fast_action resolves
 # clear-cut failure classes by policy without paying a model decider round-trip;
 # set 0 to force every failure through decide.sh (the historical behavior).

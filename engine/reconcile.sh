@@ -257,20 +257,54 @@ if [[ "$mode" == "actuate" ]]; then
   # build break). Packets dispatched this cycle integrate on the next cycle.
   if [[ "${SINGULAR_AUTO_INTEGRATE:-1}" == "1" ]]; then
     singular_campaign_verify_or_refuse reconcile pre-integration || exit 2
-    echo "actuation: auto-integration (pre-dispatch)"
-    integration_gates_before="$(singular_authoritative_gate_snapshot_json)"
-    integ_out="$(singular_with_origin_lock_capability \
-      "$SCRIPT_DIR/integrate.sh" --from-reconcile --run-id "$run_id" 2>&1)" || true
-    printf '%s\n' "$integ_out" | sed 's/^/  integ: /'
-    integrations_this_run="$(printf '%s\n' "$integ_out" | sed -n 's/^integrated_this_run=//p' | tail -1)"
-    integration_failures="$(printf '%s\n' "$integ_out" | sed -n 's/^failed_integrations=//p' | tail -1)"
-    integration_gates_after="$(singular_authoritative_gate_snapshot_json)"
-    promoted_during_integration="$(singular_authoritative_gate_transition_count \
-      "$integration_gates_before" "$integration_gates_after" 2>/dev/null || echo 0)"
-    [[ "$integrations_this_run" =~ ^[0-9]+$ ]] || integrations_this_run=0
-    [[ "$integration_failures" =~ ^[0-9]+$ ]] || integration_failures=0
-    [[ "$promoted_during_integration" =~ ^[0-9]+$ ]] || promoted_during_integration=0
-    gates_promoted_this_run=$((gates_promoted_this_run + promoted_during_integration))
+    integration_scan_required="yes"
+    integration_target_head="$(git -C "$SINGULAR_ROOT" rev-parse "$SINGULAR_TARGET_BRANCH")"
+    integration_campaign="$(singular_campaign_binding 2>/dev/null || printf unknown)"
+    if [[ "${SINGULAR_RECONCILE_INDEX:-1}" == "1" ]]; then
+      integration_index_plan="$(python3 "$SCRIPT_DIR/reconcile_index.py" plan \
+        --index "$SINGULAR_RECONCILE_INDEX_FILE" \
+        --tasks "$SINGULAR_TASKS_DIR" \
+        --packets "$SINGULAR_ORCH_DIR/packets/imported" \
+        --leases "$SINGULAR_LEASES_DIR" \
+        --target-head "$integration_target_head" \
+        --policy "$SINGULAR_DEFAULT_GATE_CMD" \
+        --campaign "$integration_campaign" \
+        --full-scan-every "$SINGULAR_RECONCILE_FULL_SCAN_EVERY" 2>/dev/null || true)"
+      integration_scan_required="$(printf '%s' "$integration_index_plan" | python3 -c \
+        'import json,sys; print("yes" if json.load(sys.stdin).get("runCanonical") else "no")' \
+        2>/dev/null || printf yes)"
+    fi
+    if [[ "$integration_scan_required" == "yes" ]]; then
+      echo "actuation: auto-integration (pre-dispatch)"
+      integration_gates_before="$(singular_authoritative_gate_snapshot_json)"
+      integration_scan_rc=0
+      integ_out="$(singular_with_origin_lock_capability \
+        "$SCRIPT_DIR/integrate.sh" --from-reconcile --run-id "$run_id" 2>&1)" \
+        || integration_scan_rc=$?
+      printf '%s\n' "$integ_out" | sed 's/^/  integ: /'
+      integrations_this_run="$(printf '%s\n' "$integ_out" | sed -n 's/^integrated_this_run=//p' | tail -1)"
+      integration_failures="$(printf '%s\n' "$integ_out" | sed -n 's/^failed_integrations=//p' | tail -1)"
+      integration_gates_after="$(singular_authoritative_gate_snapshot_json)"
+      promoted_during_integration="$(singular_authoritative_gate_transition_count \
+        "$integration_gates_before" "$integration_gates_after" 2>/dev/null || echo 0)"
+      [[ "$integrations_this_run" =~ ^[0-9]+$ ]] || integrations_this_run=0
+      [[ "$integration_failures" =~ ^[0-9]+$ ]] || integration_failures=0
+      [[ "$promoted_during_integration" =~ ^[0-9]+$ ]] || promoted_during_integration=0
+      gates_promoted_this_run=$((gates_promoted_this_run + promoted_during_integration))
+      if [[ "${SINGULAR_RECONCILE_INDEX:-1}" == "1" && "$integration_scan_rc" -eq 0 ]]; then
+        python3 "$SCRIPT_DIR/reconcile_index.py" commit \
+          --index "$SINGULAR_RECONCILE_INDEX_FILE" \
+          --tasks "$SINGULAR_TASKS_DIR" \
+          --packets "$SINGULAR_ORCH_DIR/packets/imported" \
+          --leases "$SINGULAR_LEASES_DIR" \
+          --target-head "$(git -C "$SINGULAR_ROOT" rev-parse "$SINGULAR_TARGET_BRANCH")" \
+          --policy "$SINGULAR_DEFAULT_GATE_CMD" \
+          --campaign "$(singular_campaign_binding 2>/dev/null || printf unknown)" \
+          --full-scan-every "$SINGULAR_RECONCILE_FULL_SCAN_EVERY" >/dev/null 2>&1 || true
+      fi
+    else
+      echo "actuation: auto-integration discovery unchanged; canonical historical validation skipped"
+    fi
   fi
 
   resource_configured_slots="${SINGULAR_MAX_CONCURRENT:-1}"
