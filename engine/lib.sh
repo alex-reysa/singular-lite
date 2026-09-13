@@ -111,6 +111,21 @@ if isinstance(legacy_compatibility, dict) and isinstance(
         "1" if legacy_compatibility["unboundWaivers"] else "0",
     )
 setv("SINGULAR_PROMOTER", cfg.get("promoter"))
+role_runners = cfg.get("roleRunners")
+if isinstance(role_runners, dict):
+    # Per-role runner selection (0.22.0): {"auditor": "claude-run.sh",
+    # "implementer": "grok-run.sh"}. A bare name resolves inside the engine
+    # dir at use time (singular_role_runner); unknown roles are ignored here
+    # and rejected by the consumer that names its role.
+    for role, runner in role_runners.items():
+        if isinstance(role, str) and re.fullmatch(r"[a-z]+", role) and isinstance(runner, str) and runner:
+            setv("SINGULAR_ROLE_RUNNER_" + role.upper(), runner)
+review_policy = cfg.get("reviewPolicy")
+if isinstance(review_policy, dict):
+    # Programmable review policy (0.22.0): projected as one canonical JSON
+    # value so the campaign manifest pins it; engine/review_policy.py reads
+    # it and applies SINGULAR_REVIEW_* env overrides on top.
+    setv("SINGULAR_REVIEW_POLICY_JSON", json.dumps(review_policy, separators=(",", ":"), sort_keys=True))
 ident = cfg.get("identity") or {}
 l0 = ident.get("l0") or {}; l1 = ident.get("l1") or {}
 setv("SINGULAR_GIT_L0_NAME", l0.get("name")); setv("SINGULAR_GIT_L0_EMAIL", l0.get("email"))
@@ -2378,6 +2393,34 @@ PY
 singular_select_l2_runner() {
   local task_file="$1" default_runner="$2" alt_runner="${3:-}"
   printf '%s\n' "$default_runner"
+}
+
+# Per-role runner resolution (0.22.0). Roles: implementer, auditor, planner,
+# critic, decider, supervisor, integrator. SINGULAR_ROLE_RUNNER_<ROLE> (from
+# config roleRunners or the environment) names an adapter: a bare name is the
+# engine's own adapter file, a relative path is consumer-relative, an absolute
+# path is used as spelled. Unset -> the default (normally SINGULAR_RUNNER).
+# A configured runner that is missing or not executable is a hard stop (78):
+# silently running another provider than the operator pinned is the defect.
+#   singular_role_runner <role> <default_runner>
+singular_role_runner() {
+  local role="$1" default_runner="$2" key value resolved
+  key="SINGULAR_ROLE_RUNNER_$(printf '%s' "$role" | tr '[:lower:]-' '[:upper:]_')"
+  value="${!key:-}"
+  if [[ -z "$value" ]]; then
+    printf '%s\n' "$default_runner"
+    return 0
+  fi
+  case "$value" in
+    /*) resolved="$value" ;;
+    */*) resolved="$SINGULAR_ROOT/$value" ;;
+    *) resolved="$SINGULAR_ENGINE_DIR/$value" ;;
+  esac
+  if [[ ! -f "$resolved" || ! -x "$resolved" ]]; then
+    echo "singular: $key names a runner that is missing or not executable: $resolved" >&2
+    return 78
+  fi
+  printf '%s\n' "$resolved"
 }
 
 # Extra worker-prompt contract text for a task. Generic: none. A module may
