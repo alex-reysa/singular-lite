@@ -97,8 +97,8 @@ gate_cmd="$(tf gateCommand)"
 [[ -n "$target_branch" ]] || target_branch="$SINGULAR_TARGET_BRANCH"
 dispatch_batch_id="${SINGULAR_DISPATCH_BATCH_ID:-}"
 dispatch_base_sha="${SINGULAR_DISPATCH_BASE_SHA:-}"
-branch_base="${dispatch_base_sha:-$target_branch}"
-packet_base_ref="${dispatch_base_sha:-$target_branch}"
+branch_base=""
+packet_base_ref=""
 
 mapfile -t owned_files < <(printf '%s' "$task_json" | python3 -c 'import json,sys; [print(x) for x in json.load(sys.stdin)["ownedFiles"]]')
 mapfile -t forbidden_files < <(printf '%s' "$task_json" | python3 -c 'import json,sys; [print(x) for x in json.load(sys.stdin)["forbiddenFiles"]]')
@@ -143,6 +143,7 @@ run_id="$(singular_worker_run_id)"
 authorized_repair_worktree=""
 authorized_repair=()
 authorized_continuation=()
+authorized_continuation_candidate_base=""
 lease_path="$(singular_lease_path "$task_id")"
 if [[ -f "$lease_path" ]]; then
   mapfile -t authorized_repair < <(python3 - "$lease_path" <<'PY' 2>/dev/null || true
@@ -154,7 +155,7 @@ except Exception:
 authority = lease.get("recoveryAuthorization")
 if not isinstance(authority, dict) or authority.get("action") != "repair":
     raise SystemExit(0)
-if authority.get("state") not in {"issued", "claimed"}:
+if authority.get("state") not in {"issued", "claimed", "audit-accepted", "gate-passed"}:
     raise SystemExit(0)
 for key in (
     "authorizationId", "successorRunId", "successorBranch", "successorWorktree",
@@ -215,13 +216,253 @@ PY
     }
     worker_branch="${authorized_continuation[5]}"
     authorized_repair_worktree="${authorized_continuation[6]}"
-    branch_base="${authorized_continuation[2]}"
-    packet_base_ref="${authorized_continuation[2]}"
+    authorized_continuation_candidate_base="$(singular_lease_field "$task_id" \
+      continuationAuthorization.candidateBaseSha 2>/dev/null || true)"
   fi
+fi
+
+# Classify a retained accepted checkpoint before selecting a fresh admission
+# base. Recognition is deliberately read-only and narrow: the packet marker is
+# enough to preserve the checkpoint, but never enough to authorize identities.
+# The packet's B/H must still agree exactly with the original host-written lease
+# and the retained Git objects before current target ancestry is considered.
+accepted_checkpoint_mode=""
+accepted_checkpoint_run=""
+accepted_checkpoint_packet=""
+accepted_checkpoint_base=""
+accepted_checkpoint_head=""
+accepted_checkpoint_workspace=""
+accepted_checkpoint_recognition=""
+l1_refuse_recognized_accepted_checkpoint() {
+  local reason="$1"
+  echo "AWAITING EVIDENCE: $task_id — accepted checkpoint preserved; resume refused ($reason)." >&2
+  exit 3
+}
+if [[ -f "$lease_path" ]]; then
+  retained_lease_status="$(singular_lease_status "$task_id" 2>/dev/null || true)"
+  retained_lease_run="$(singular_lease_field "$task_id" runId 2>/dev/null || true)"
+  if [[ -n "$retained_lease_run" \
+      && "$retained_lease_run" != */* \
+      && "$retained_lease_run" != *..* ]]; then
+    retained_packet="$SINGULAR_RUNS_DIR/$retained_lease_run/packet.json"
+    retained_audit="$(singular_audit_record_path "$retained_lease_run")"
+    if [[ -f "$retained_packet" ]]; then
+      mapfile -d '' -t _accepted_checkpoint_fields < <(
+        python3 - "$retained_packet" "$retained_audit" "$retained_lease_status" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+path, audit_path, lease_status = sys.argv[1:]
+packet = None
+try:
+    value = json.load(open(path, encoding="utf-8"))
+    if isinstance(value, dict):
+        packet = value
+except Exception:
+    pass
+audit_accepted = False
+try:
+    audit = json.load(open(audit_path, encoding="utf-8"))
+    audit_accepted = isinstance(audit, dict) and audit.get("verdict") == "accepted"
+except Exception:
+    pass
+blockers = packet.get("blockers", []) if isinstance(packet, dict) else None
+awaiting = (
+    isinstance(packet, dict)
+    and packet.get("status") == "blocked"
+    and isinstance(blockers, list)
+    and any(
+        isinstance(item, dict)
+        and item.get("class") == "blocked-external"
+        and item.get("reason") == "awaiting-evidence"
+        and item.get("productAuditVerdict") == "accepted"
+        and item.get("consumesProductRepairBudget") is False
+        for item in blockers
+    )
+)
+packet_accepted = isinstance(packet, dict) and packet.get("status") == "accepted"
+retained = lease_status == "accepted" or audit_accepted or awaiting or packet_accepted
+if awaiting:
+    mode = "awaiting-evidence"
+elif packet_accepted:
+    mode = "accepted-existing"
+elif retained:
+    mode = "invalid-retained"
+else:
+    raise SystemExit(0)
+values = (
+    mode,
+    packet.get("runId", "") if isinstance(packet, dict) else "",
+    packet.get("taskId", "") if isinstance(packet, dict) else "",
+    packet.get("branch", "") if isinstance(packet, dict) else "",
+    packet.get("workspace", "") if isinstance(packet, dict) else "",
+    packet.get("baseRef", "") if isinstance(packet, dict) else "",
+    packet.get("headSha", "") if isinstance(packet, dict) else "",
+)
+encoded = [
+    value if isinstance(value, str) else "__invalid_accepted_checkpoint_field__"
+    for value in values
+]
+sys.stdout.buffer.write(b"\0".join(value.encode() for value in encoded) + b"\0")
+PY
+      )
+      if [[ "${#_accepted_checkpoint_fields[@]}" -eq 7 ]]; then
+        accepted_checkpoint_mode="${_accepted_checkpoint_fields[0]}"
+        accepted_checkpoint_run="${_accepted_checkpoint_fields[1]}"
+        accepted_checkpoint_task="${_accepted_checkpoint_fields[2]}"
+        accepted_checkpoint_branch="${_accepted_checkpoint_fields[3]}"
+        accepted_checkpoint_workspace="${_accepted_checkpoint_fields[4]}"
+        accepted_checkpoint_base="${_accepted_checkpoint_fields[5]}"
+        accepted_checkpoint_head="${_accepted_checkpoint_fields[6]}"
+        accepted_checkpoint_packet="$retained_packet"
+        accepted_checkpoint_recognition="packet-or-audit"
+      fi
+    fi
+    retained_audit_accepted="$(python3 - "$retained_audit" <<'PY' 2>/dev/null || true
+import json
+import sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    if isinstance(value, dict) and value.get("verdict") == "accepted":
+        print("yes")
+except Exception:
+    pass
+PY
+)"
+    if [[ -z "$accepted_checkpoint_mode" \
+        && ( "$retained_lease_status" == "accepted" \
+          || "$retained_audit_accepted" == "yes" ) ]]; then
+      accepted_checkpoint_mode="invalid-retained"
+      accepted_checkpoint_run="$retained_lease_run"
+      accepted_checkpoint_recognition="accepted-lease-or-audit"
+    fi
+  fi
+fi
+if [[ -n "$accepted_checkpoint_mode" ]]; then
+  [[ "${#authorized_continuation[@]}" -ne 10 ]] \
+    || l1_refuse_recognized_accepted_checkpoint \
+      "accepted-checkpoint-continuation-authority-conflict"
+  [[ "$accepted_checkpoint_mode" != "invalid-retained" ]] \
+    || l1_refuse_recognized_accepted_checkpoint \
+      "accepted-checkpoint-invalid-retained-state"
+  retained_lease_base="$(singular_lease_field "$task_id" baseSha 2>/dev/null || true)"
+  retained_lease_branch="$(singular_lease_field "$task_id" branch 2>/dev/null || true)"
+  retained_lease_worktree="$(singular_lease_field "$task_id" worktree 2>/dev/null || true)"
+  [[ "$accepted_checkpoint_run" == "$retained_lease_run" \
+      && "$accepted_checkpoint_task" == "$task_id" \
+      && "$accepted_checkpoint_branch" == "$worker_branch" \
+      && "$retained_lease_branch" == "$worker_branch" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "checkpoint-admission-identity-mismatch"
+  [[ -n "$accepted_checkpoint_workspace" \
+      && -n "$retained_lease_worktree" \
+      && "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' \
+          "$accepted_checkpoint_workspace")" \
+        == "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' \
+          "$retained_lease_worktree")" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "checkpoint-workspace-identity-mismatch"
+  [[ -n "$accepted_checkpoint_base" \
+      && "$accepted_checkpoint_base" == "$retained_lease_base" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-admission-mismatch"
+  [[ -z "$dispatch_base_sha" || "$dispatch_base_sha" == "$accepted_checkpoint_base" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-override-conflict"
+  accepted_checkpoint_resolved_base="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_checkpoint_base^{commit}" 2>/dev/null || true)"
+  accepted_checkpoint_resolved_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_checkpoint_head^{commit}" 2>/dev/null || true)"
+  [[ -n "$accepted_checkpoint_resolved_base" \
+      && "$accepted_checkpoint_resolved_base" == "$accepted_checkpoint_base" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-invalid"
+  [[ -n "$accepted_checkpoint_resolved_head" \
+      && "$accepted_checkpoint_resolved_head" == "$accepted_checkpoint_head" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-head-invalid"
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor \
+    "$accepted_checkpoint_base" "$accepted_checkpoint_head" >/dev/null 2>&1 \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-head-lineage-invalid"
+  retained_accepted_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$worker_branch^{commit}" 2>/dev/null || true)"
+  if [[ -n "$retained_accepted_branch_head" \
+      && "$retained_accepted_branch_head" != "$accepted_checkpoint_head" ]]; then
+    l1_refuse_recognized_accepted_checkpoint "accepted-head-mismatch"
+  fi
+  if [[ -d "$accepted_checkpoint_workspace" ]]; then
+    retained_accepted_workspace_head="$(git -C "$accepted_checkpoint_workspace" \
+      rev-parse HEAD 2>/dev/null || true)"
+    [[ "$retained_accepted_workspace_head" == "$accepted_checkpoint_head" ]] \
+      || l1_refuse_recognized_accepted_checkpoint "accepted-head-mismatch"
+  fi
+fi
+
+# Resolve the product base exactly once, before run publication, cleanup, pass
+# accounting, or provider work. Scheduler reservation and integration targets
+# remain separate lifecycle identities; neither may replace the candidate base.
+requested_candidate_base="$dispatch_base_sha"
+if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
+  requested_candidate_base="${authorized_repair[4]}"
+elif [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
+  # A continuation's dispatch base is the scheduler reservation on the current
+  # target. Its product fork base is the separately authorized candidate base.
+  # Treating the former as an override would relabel preserved work whenever
+  # the target advanced—the exact distinction this authority record exists for.
+  requested_candidate_base="$authorized_continuation_candidate_base"
+  [[ -n "$requested_candidate_base" ]] || {
+    echo "l1-drive: continuation authority has no candidate base" >&2
+    exit 2
+  }
+elif [[ -n "$accepted_checkpoint_mode" ]]; then
+  requested_candidate_base="$accepted_checkpoint_base"
+fi
+[[ -n "$requested_candidate_base" ]] || requested_candidate_base="$target_branch"
+packet_base_ref="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+  "$requested_candidate_base^{commit}" 2>/dev/null)" || {
+  echo "l1-drive: admitted base does not resolve to a local commit: $requested_candidate_base" >&2
+  exit 2
+}
+branch_base="$packet_base_ref"
+
+if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
+  continuation_candidate="${authorized_continuation[2]}"
+  continuation_integration_target="${authorized_continuation[3]}"
+  continuation_reservation_base="$(singular_lease_field "$task_id" reservationBaseSha 2>/dev/null || true)"
+  [[ -z "$dispatch_base_sha" || "$dispatch_base_sha" == "$continuation_reservation_base" ]] \
+    && git -C "$SINGULAR_ROOT" rev-parse --verify "$continuation_candidate^{commit}" >/dev/null 2>&1 \
+    && git -C "$SINGULAR_ROOT" rev-parse --verify "$continuation_integration_target^{commit}" >/dev/null 2>&1 \
+    && git -C "$SINGULAR_ROOT" rev-parse --verify "$continuation_reservation_base^{commit}" >/dev/null 2>&1 \
+    && git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$packet_base_ref" "$continuation_candidate" \
+      >/dev/null 2>&1 \
+    && git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$continuation_integration_target" \
+      "$continuation_reservation_base" >/dev/null 2>&1 || {
+      echo "l1-drive: continuation candidate-base or integration-target lineage is invalid" >&2
+      exit 2
+    }
+elif [[ "${#authorized_repair[@]}" -ne 7 && -z "$accepted_checkpoint_mode" ]]; then
+  retained_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$worker_branch^{commit}" 2>/dev/null || true)"
+  if [[ -n "$retained_branch_head" ]]; then
+    admission_lineage_head="$retained_branch_head"
+  else
+    admission_lineage_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+      "$target_branch^{commit}" 2>/dev/null)" || {
+      echo "l1-drive: target branch does not resolve to a local commit: $target_branch" >&2
+      exit 2
+    }
+  fi
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$packet_base_ref" \
+    "$admission_lineage_head" >/dev/null 2>&1 || {
+      echo "l1-drive: admitted base is not an ancestor of the retained/fresh candidate lineage" >&2
+      exit 2
+    }
 fi
 run_dir="$(singular_run_dir "$run_id")"
 mkdir -p "$run_dir"
-worktree="${authorized_repair_worktree:-$SINGULAR_WORKTREES_DIR/$task_id}"
+if [[ -n "$accepted_checkpoint_mode" ]]; then
+  # Publication provenance is independent of unspent execution authority. A
+  # consumed continuation is claimed, so it is intentionally absent from the
+  # reserved-only execution selector above; recognition has nevertheless
+  # checked this retained packet workspace against the lease already.
+  worktree="$accepted_checkpoint_workspace"
+else
+  worktree="${authorized_repair_worktree:-$SINGULAR_WORKTREES_DIR/$task_id}"
+fi
 # Product repair and infrastructure recovery are intentionally separate budget
 # domains.  `Risk tier:` is optional task metadata, so existing task files are
 # ordinary-risk by default.  An operator may override it for one dispatch with
@@ -596,7 +837,7 @@ fi
 # continuation is claimed atomically with its started-attempt disposition at
 # the provider invocation boundary below. No provider process starts before
 # either recovery authority is claimed.
-if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
+if [[ "${#authorized_repair[@]}" -eq 7 && -z "$accepted_checkpoint_mode" ]]; then
   singular_lifecycle_claim_repair "$task_id" "${authorized_repair[0]}" \
     "${authorized_repair[1]}" "${authorized_repair[4]}" "${authorized_repair[5]}" \
     >/dev/null || exit 2
@@ -746,6 +987,77 @@ remove_worktree() {
   git -C "$SINGULAR_ROOT" worktree prune 2>/dev/null || true
 }
 
+l1_candidate_inspect() {
+  local inspect_dir="$1" committed_json status_file ignored_file
+  committed_json="$(python3 "$SCRIPT_DIR/git_changes.py" --worktree "$inspect_dir" \
+    --base "$packet_base_ref" --head HEAD 2>"$run_dir/admission-lineage.log")" || return 2
+  L1_CANDIDATE_COMMITTED="$([[ "$committed_json" == "[]" ]] && printf no || printf yes)"
+  status_file="$run_dir/admission-status.z"
+  if ! git -C "$inspect_dir" status --porcelain=v1 -z --untracked-files=all \
+      >"$status_file" 2>>"$run_dir/admission-lineage.log"; then
+    return 2
+  fi
+  L1_CANDIDATE_DIRTY="$([[ -s "$status_file" ]] && printf yes || printf no)"
+  ignored_file="$run_dir/admission-ignored-paths.z"
+  if ! git -C "$inspect_dir" ls-files --others --ignored --exclude-standard -z \
+      >"$ignored_file" 2>>"$run_dir/admission-lineage.log"; then
+    return 2
+  fi
+  L1_CANDIDATE_IGNORED="$([[ -s "$ignored_file" ]] && printf yes || printf no)"
+  if [[ "$L1_CANDIDATE_COMMITTED" == yes || "$L1_CANDIDATE_DIRTY" == yes \
+      || "$L1_CANDIDATE_IGNORED" == yes ]]; then
+    L1_CANDIDATE_USEFUL=yes
+  else
+    L1_CANDIDATE_USEFUL=no
+  fi
+}
+
+l1_candidate_admission_checks() {
+  local inspect_dir="$1" scope_rc=0 secret_rc=0
+  local -a admission_scope=(--worktree "$inspect_dir" --base "$packet_base_ref")
+  local f
+  for f in "${owned_files[@]}"; do admission_scope+=(--allow-prefix "$f"); done
+  for f in "${forbidden_files[@]}"; do admission_scope+=(--forbid-prefix "$f"); done
+  "$SCRIPT_DIR/scope-check.sh" "${admission_scope[@]}" \
+    >"$run_dir/admission-scope-check.log" 2>&1 || scope_rc=$?
+  "$SCRIPT_DIR/secret-scan.sh" --worktree "$inspect_dir" --base "$packet_base_ref" \
+    >"$run_dir/admission-secret-scan.log" 2>&1 || secret_rc=$?
+  [[ "$scope_rc" -eq 0 && "$secret_rc" -eq 0 ]]
+}
+
+l1_preserve_candidate() {
+  local from="$1" reason="$2" retained head branch
+  retained="$SINGULAR_STATE_DIR/retained-worktrees/${task_id}-${run_id}"
+  [[ ! -e "$retained" ]] || {
+    echo "l1-drive: retained candidate destination already exists: $retained" >&2
+    return 2
+  }
+  mkdir -p "$(dirname "$retained")"
+  head="$(git -C "$from" rev-parse HEAD 2>/dev/null)" || return 2
+  branch="$(git -C "$from" branch --show-current 2>/dev/null || true)"
+  # Ask Git to move the linked worktree directly. Path spelling may differ on
+  # platforms where /var resolves through /private/var, so an exact textual
+  # worktree-list membership check is not a sound ownership test here.
+  git -C "$SINGULAR_ROOT" worktree move "$from" "$retained" || return 2
+  if [[ -n "$branch" ]]; then
+    git -C "$retained" checkout -q --detach "$head" || return 2
+  fi
+  python3 - "$run_dir/retained-candidate.json" "$task_id" "$run_id" "$from" \
+      "$retained" "$head" "$branch" "$packet_base_ref" "$reason" <<'PY'
+import json, os, sys
+(path, task, run, original, retained, head, branch, base, reason) = sys.argv[1:]
+value = {"schema": "singular.orchestration.retained-candidate.v0", "taskId": task,
+         "runId": run, "originalWorktree": original, "retainedWorktree": retained,
+         "headSha": head, "branch": branch, "admittedBaseSha": base, "reason": reason}
+with open(path + ".tmp", "w", encoding="utf-8") as stream:
+    json.dump(value, stream, indent=2, sort_keys=True); stream.write("\n")
+os.replace(path + ".tmp", path)
+PY
+  singular_append_event "l1.candidate_preserved" \
+    "useful unaccepted candidate preserved before canonical reprovisioning" \
+    "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"headSha\":\"$head\",\"admittedBaseSha\":\"$packet_base_ref\",\"retainedWorktree\":\"$retained\",\"reason\":\"$reason\"}" || true
+}
+
 # Resume publication for an immutable head whose product audit was already
 # accepted but whose final evidence materialization exhausted its transient
 # infrastructure budget.  This recovery runs before --reset/orphan cleanup so
@@ -754,38 +1066,53 @@ remove_worktree() {
 l1_try_resume_accepted_awaiting_evidence() {
   [[ "${SINGULAR_RESUME_ACCEPTED_EVIDENCE:-1}" == "1" ]] || return 1
   local lease_status accepted_run accepted_run_dir accepted_packet accepted_audit
-  local accepted_head actual_branch_head actual_workspace_head audit_schema
-  local checkpoint_binding audit_binding lease_binding
+  local accepted_base accepted_head actual_branch_head actual_workspace_head audit_schema
+  local accepted_lease_base accepted_resolved_base accepted_resolved_head
+  local checkpoint_binding audit_binding lease_binding publication_state authority_state
+  local checkpoint_packet_json allowed_historical_run=""
+  local publication_needs_evidence="no"
   local -a _checkpoint_bindings=()
+  [[ -n "$accepted_checkpoint_mode" ]] || return 1
   lease_status="$(singular_lease_status "$task_id" 2>/dev/null || true)"
-  [[ "$lease_status" == "blocked" || "$lease_status" == "failed" ]] || return 1
-  accepted_run="$(singular_lease_field "$task_id" runId 2>/dev/null || true)"
+  [[ "$lease_status" == "blocked" || "$lease_status" == "failed" \
+      || "$lease_status" == "accepted" || "$lease_status" == "integrated" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-lease-status-invalid"
+  accepted_run="$accepted_checkpoint_run"
   [[ -n "$accepted_run" ]] || return 1
   accepted_run_dir="$SINGULAR_RUNS_DIR/$accepted_run"
   accepted_packet="$accepted_run_dir/packet.json"
   accepted_audit="$(singular_audit_record_path "$accepted_run")"
   [[ -f "$accepted_packet" ]] || return 1
 
-  # First recognize the host-written checkpoint marker using only its minimal
-  # identity. Once recognized, every later mismatch fails closed *without*
-  # falling through to reset/orphan cleanup of the accepted head.
-  if ! python3 - "$accepted_packet" "$task_id" <<'PY' >/dev/null 2>&1
+  # Recognition has already fenced cleanup. Determine which producer-created
+  # publication transition was retained without treating recognition as
+  # acceptance authority.
+  if ! python3 - "$accepted_packet" "$task_id" "$accepted_checkpoint_mode" <<'PY' >/dev/null 2>&1
 import json, sys
 packet = json.load(open(sys.argv[1], encoding="utf-8"))
 assert packet.get("taskId") == sys.argv[2]
-assert packet.get("status") == "blocked"
-assert any(
-    isinstance(item, dict)
-    and item.get("class") == "blocked-external"
-    and item.get("reason") == "awaiting-evidence"
-    and item.get("productAuditVerdict") == "accepted"
-    and item.get("consumesProductRepairBudget") is False
-    for item in packet.get("blockers", [])
-)
+mode = sys.argv[3]
+if mode == "awaiting-evidence":
+    assert packet.get("status") == "blocked"
+    assert isinstance(packet.get("blockers"), list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("class") == "blocked-external"
+        and item.get("reason") == "awaiting-evidence"
+        and item.get("productAuditVerdict") == "accepted"
+        and item.get("consumesProductRepairBudget") is False
+        for item in packet["blockers"]
+    )
+elif mode == "accepted-existing":
+    assert packet.get("status") == "accepted"
+else:
+    raise AssertionError(mode)
 PY
   then
-    return 1
+    l1_refuse_recognized_accepted_checkpoint "accepted-checkpoint-shape-invalid"
   fi
+  [[ "$accepted_checkpoint_mode" != "awaiting-evidence" ]] \
+    || publication_needs_evidence="yes"
   checkpoint_binding="$(python3 - "$accepted_packet" <<'PY' 2>/dev/null || true
 import json
 import sys
@@ -800,8 +1127,8 @@ PY
     checkpoint_binding="legacy"
   fi
   [[ -n "$checkpoint_binding" && "$checkpoint_binding" == "$l1_campaign_binding" ]] \
-    || l1_campaign_mismatch_exit \
-      "accepted evidence checkpoint belongs to a different or unbound campaign"
+    || l1_refuse_recognized_accepted_checkpoint \
+      "accepted-checkpoint-campaign-mismatch"
   l1_evidence_resume_refuse() {
     local reason="$1"
     if ! l1_campaign_publication_begin \
@@ -810,8 +1137,6 @@ PY
         "campaign identity changed while refusing an evidence checkpoint"
     fi
     _l1_outcome="terminal"
-    singular_lease_set_status "$task_id" "blocked" 2>/dev/null || true
-    singular_task_set_status "$task_file" "blocked" 2>/dev/null || true
     singular_append_event "l1.accepted_evidence_resume_refused" \
       "accepted evidence checkpoint failed closed and was preserved" \
       "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"reason\":\"$reason\",\"productAccepted\":true,\"published\":false,\"consumesProductRepairBudget\":false}" \
@@ -845,26 +1170,51 @@ assert packet.get("taskId") == task_id
 assert packet.get("runId") == run_id
 assert packet.get("branch") == branch
 assert os.path.realpath(packet.get("workspace", "")) == os.path.realpath(worktree)
-assert packet.get("status") == "blocked"
+assert packet.get("status") in {"blocked", "accepted"}
 assert head
 assert audit.get("taskId") == task_id
 assert audit.get("verdict") == "accepted"
 assert audit.get("branch") == branch
-assert any(
-    isinstance(item, dict)
-    and item.get("class") == "blocked-external"
-    and item.get("reason") == "awaiting-evidence"
-    and item.get("headSha") == head
-    and item.get("productAuditVerdict") == "accepted"
-    and item.get("consumesProductRepairBudget") is False
-    for item in packet.get("blockers", [])
-)
+if packet.get("status") == "blocked":
+    assert any(
+        isinstance(item, dict)
+        and item.get("class") == "blocked-external"
+        and item.get("reason") == "awaiting-evidence"
+        and item.get("headSha") == head
+        and item.get("productAuditVerdict") == "accepted"
+        and item.get("consumesProductRepairBudget") is False
+        for item in packet.get("blockers", [])
+    )
 PY
   then
     l1_evidence_resume_refuse "checkpoint-identity-mismatch"
   fi
   singular_validate_packet_basic "$accepted_packet" >/dev/null 2>&1 \
     || l1_evidence_resume_refuse "checkpoint-packet-invalid"
+  checkpoint_packet_json="$(python3 - "$accepted_packet" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.dumps(json.load(handle), separators=(",", ":")))
+PY
+  )" || l1_evidence_resume_refuse "checkpoint-packet-invalid"
+  singular_json_schema_check "$checkpoint_packet_json" "$SINGULAR_PACKET_SCHEMA" \
+    "accepted publication packet" >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "checkpoint-packet-schema-invalid"
+  python3 - "$SCRIPT_DIR" "$accepted_packet" "$task_json" <<'PY' >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "checkpoint-task-ownership-mismatch"
+import json
+import sys
+sys.path.insert(0, sys.argv[1])
+from git_changes import require_scope_membership
+
+packet = json.load(open(sys.argv[2], encoding="utf-8"))
+task = json.loads(sys.argv[3])
+assert packet.get("ownedFiles") == task.get("ownedFiles")
+changed = packet.get("changedFiles")
+assert isinstance(changed, list) and all(isinstance(path, str) for path in changed)
+require_scope_membership(changed, task.get("ownedFiles", []), task.get("forbiddenFiles", []))
+PY
   audit_schema="$(singular_json_field "$accepted_audit" schema 2>/dev/null || true)"
   if [[ "$audit_schema" == "singular.orchestration.audit-verdict.v1" ]]; then
     SINGULAR_AUDIT_SCHEMA="$SINGULAR_SCHEMA_DIR/audit-verdict.v1.schema.json" \
@@ -910,14 +1260,28 @@ PY
   [[ "$checkpoint_binding" == "$l1_campaign_binding" \
       && "$audit_binding" == "$l1_campaign_binding" \
       && "$lease_binding" == "$l1_campaign_binding" ]] \
-    || l1_campaign_mismatch_exit \
-      "accepted evidence artifacts disagree on campaign identity"
+    || l1_evidence_resume_refuse "accepted-campaign-evidence-mismatch"
   singular_campaign_binding_matches \
     "$checkpoint_binding" l1-drive pre-evidence-resume \
-    || l1_campaign_mismatch_exit \
-      "campaign identity changed before evidence resume"
+    || l1_evidence_resume_refuse "accepted-current-campaign-mismatch"
 
+  accepted_base="$(singular_json_field "$accepted_packet" baseRef 2>/dev/null || true)"
   accepted_head="$(singular_json_field "$accepted_packet" headSha 2>/dev/null || true)"
+  accepted_lease_base="$(singular_lease_field "$task_id" baseSha 2>/dev/null || true)"
+  [[ -n "$accepted_base" && "$accepted_base" == "$accepted_lease_base" \
+      && "$accepted_base" == "$packet_base_ref" \
+      && "$accepted_head" == "$accepted_checkpoint_head" ]] \
+    || l1_evidence_resume_refuse "accepted-admission-identity-mismatch"
+  accepted_resolved_base="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_base^{commit}" 2>/dev/null || true)"
+  accepted_resolved_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_head^{commit}" 2>/dev/null || true)"
+  [[ "$accepted_resolved_base" == "$accepted_base" \
+      && "$accepted_resolved_head" == "$accepted_head" ]] \
+    || l1_evidence_resume_refuse "accepted-base-head-invalid"
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor \
+    "$accepted_base" "$accepted_head" >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "accepted-base-head-lineage-invalid"
   actual_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse "$worker_branch" 2>/dev/null || true)"
   actual_workspace_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   [[ -n "$accepted_head" && "$actual_branch_head" == "$accepted_head" \
@@ -939,29 +1303,122 @@ PY
   [[ -z "$non_generated_dirty" ]] \
     || l1_evidence_resume_refuse "accepted-workspace-dirty"
 
+  # Validate the same packet/audit identity consumed at import, plus the exact
+  # lifecycle writer contract for a claimed native repair successor. This is
+  # read-only: a valid claim remains claimed until import retains the audit.
+  singular_packet_module_guard "$accepted_packet" "$task_file" \
+    "$worktree" "$accepted_run_dir" >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "checkpoint-task-ownership-mismatch"
+  authority_state="$(python3 "$SINGULAR_TASK_LIFECYCLE" validate-accepted-publication \
+    --lease "$(singular_lease_path "$task_id")" --packet "$accepted_packet" \
+    --audit "$accepted_audit" --task-contract "$task_file" --task "$task_id" \
+    --run "$accepted_run" --branch "$worker_branch" --worktree "$worktree" \
+    --base "$accepted_base" --head "$accepted_head" \
+    --campaign "$checkpoint_binding" --repo-root "$SINGULAR_ROOT" 2>/dev/null)" \
+    || l1_evidence_resume_refuse "checkpoint-lifecycle-authority-mismatch"
+  if [[ "$authority_state" == repair-* ]]; then
+    allowed_historical_run="$(singular_lease_field "$task_id" \
+      recoveryAuthorization.predecessorRunId 2>/dev/null || true)"
+  fi
+
+  # Duplicate success is permitted only after the complete accepted authority
+  # above validates. Exact artifacts are compared as JSON values because the
+  # supported producer/importer may reserialize canonical JSON without changing
+  # its acceptance identity. An unrelated packet under this task is conflict,
+  # never evidence for this run.
+  publication_state="$(python3 - "$accepted_packet" "$accepted_audit" \
+      "$SINGULAR_INBOX_DIR" "$SINGULAR_ORCH_DIR/packets/imported/$task_id" \
+      "$accepted_run" "$task_id" "$allowed_historical_run" <<'PY'
+import json
+import os
+import stat
+import sys
+
+packet_path, audit_path, inbox_dir, imported_dir, run_id, task_id, allowed_historical_run = sys.argv[1:]
+
+def load_regular(path, label):
+    value = os.lstat(path)
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+        raise ValueError(f"{label} is not a regular non-symlink file")
+    with open(path, encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} is not a JSON object")
+    return value
+
+canonical_packet = load_regular(packet_path, "canonical packet")
+canonical_audit = load_regular(audit_path, "canonical audit")
+states = []
+inbox = os.path.join(inbox_dir, run_id + ".json")
+if os.path.lexists(inbox):
+    if load_regular(inbox, "queued packet") != canonical_packet:
+        raise ValueError("queued packet does not match the accepted run")
+    states.append("queued")
+
+exact_packet = os.path.join(imported_dir, run_id + ".json")
+exact_audit = os.path.join(imported_dir, run_id + ".audit.json")
+if os.path.isdir(imported_dir):
+    for name in os.listdir(imported_dir):
+        path = os.path.join(imported_dir, name)
+        if not name.endswith(".json") or name.endswith(".audit.json"):
+            continue
+        if allowed_historical_run and name == allowed_historical_run + ".json":
+            continue
+        if name != run_id + ".json":
+            raise ValueError("unrelated imported packet exists for accepted task")
+        if load_regular(path, "imported packet") != canonical_packet:
+            raise ValueError("imported packet does not match the accepted run")
+    if os.path.lexists(exact_packet):
+        if not os.path.lexists(exact_audit):
+            raise ValueError("imported accepted packet has no audit sidecar")
+        if load_regular(exact_audit, "imported audit") != canonical_audit:
+            raise ValueError("imported audit does not match the accepted run")
+        states.append("imported")
+    elif os.path.lexists(exact_audit):
+        raise ValueError("imported audit exists without its accepted packet")
+print("imported" if "imported" in states else "queued" if states else "none")
+PY
+  )" || l1_evidence_resume_refuse "accepted-publication-artifact-mismatch"
+  if [[ "$publication_state" != "none" ]]; then
+    echo "accepted packet for $task_id already queued/imported; dispatch is a no-op"
+    _l1_outcome="accepted"
+    l1_status terminal completed "Existing accepted packet is already queued or imported" true \
+      "Continue origin reconciliation" "accepted-existing"
+    exit 0
+  fi
+
   singular_append_event "l1.accepted_evidence_resume_started" \
-    "resuming evidence finalization for an immutable accepted product head" \
-    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"consumesProductRepairBudget\":false}" \
+    "resuming accepted publication for an immutable product head" \
+    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"authorityState\":\"$authority_state\",\"evidenceFinalizationRequired\":\"$publication_needs_evidence\",\"consumesProductRepairBudget\":false}" \
     || true
-  l1_status auditing active "Resuming evidence finalization for accepted head" true \
-    "Materialize final evidence and enqueue the existing accepted packet" "" "evidence-resume"
+  l1_status auditing active "Resuming accepted publication for exact head" true \
+    "Complete only the missing evidence/publication transitions" "" "evidence-resume"
 
   local evidence_try evidence_rc=0 evidence_log
-  for ((evidence_try=0; evidence_try<=evidence_infra_max; evidence_try++)); do
-    evidence_log="$accepted_run_dir/evidence-manifest-resume-try-${evidence_try}.log"
-    if [[ "$evidence_try" -gt 0 ]]; then
-      singular_append_event "evidence.infra_retry" \
-        "accepted-head evidence finalization failed; retrying evidence only" \
-        "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"stage\":\"accepted-publication-resume\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-infrastructure\",\"maxExtraRetries\":$evidence_infra_max,\"consumesProductRepairBudget\":false}" \
-        || true
-    fi
-    evidence_rc=0
-    "$SCRIPT_DIR/evidence-manifest.sh" \
-      --run-dir "$accepted_run_dir" --task-id "$task_id" --worktree "$worktree" \
-      --base-ref "$(singular_json_field "$accepted_packet" baseRef)" \
-      --head-sha "$accepted_head" >"$evidence_log" 2>&1 || evidence_rc=$?
-    [[ "$evidence_rc" -eq 0 ]] && break
-  done
+  if [[ "$publication_needs_evidence" == "yes" ]]; then
+    for ((evidence_try=0; evidence_try<=evidence_infra_max; evidence_try++)); do
+      evidence_log="$accepted_run_dir/evidence-manifest-resume-try-${evidence_try}.log"
+      if [[ "$evidence_try" -gt 0 ]]; then
+        singular_append_event "evidence.infra_retry" \
+          "accepted-head evidence finalization failed; retrying evidence only" \
+          "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"stage\":\"accepted-publication-resume\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-infrastructure\",\"maxExtraRetries\":$evidence_infra_max,\"consumesProductRepairBudget\":false}" \
+          || true
+      fi
+      evidence_rc=0
+      "$SCRIPT_DIR/evidence-manifest.sh" \
+        --run-dir "$accepted_run_dir" --task-id "$task_id" --worktree "$worktree" \
+        --base-ref "$(singular_json_field "$accepted_packet" baseRef)" \
+        --head-sha "$accepted_head" >"$evidence_log" 2>&1 || evidence_rc=$?
+      [[ "$evidence_rc" -eq 0 ]] && break
+      if [[ "$evidence_rc" -eq 2 ]]; then
+        singular_append_event "evidence.input_rejected" \
+          "deterministic accepted-head evidence input rejected; unchanged retry suppressed" \
+          "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"stage\":\"accepted-publication-resume\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-input\",\"consumesProductRepairBudget\":false}" \
+          || true
+        break
+      fi
+    done
+  fi
   if [[ "$evidence_rc" -ne 0 ]]; then
     if ! l1_campaign_publication_begin \
         "$checkpoint_binding" pre-resume-exhausted-state; then
@@ -987,9 +1444,11 @@ PY
       "campaign identity changed while evidence resume was running"
   fi
 
-  # Evidence is now durable. Remove only the host-authored awaiting-evidence
-  # blocker and restore the ordinary accepted packet handoff shape atomically.
-  python3 - "$accepted_packet" "$accepted_head" <<'PY'
+  # When evidence was the missing transition, remove only the host-authored
+  # blocker and restore the accepted handoff shape atomically. A packet already
+  # accepted before interruption remains byte-identical.
+  if [[ "$publication_needs_evidence" == "yes" ]]; then
+    python3 - "$accepted_packet" "$accepted_head" <<'PY'
 import json
 import os
 import sys
@@ -1011,12 +1470,13 @@ with open(temporary, "w", encoding="utf-8") as stream:
     json.dump(packet, stream, indent=2)
     stream.write("\n")
 PY
-  local resumed_packet_tmp="$accepted_packet.evidence-resumed.tmp"
-  singular_validate_packet_basic "$resumed_packet_tmp" >/dev/null 2>&1 || {
-    rm -f "$resumed_packet_tmp"
-    l1_evidence_resume_refuse "resumed-packet-invalid"
-  }
-  mv "$resumed_packet_tmp" "$accepted_packet"
+    local resumed_packet_tmp="$accepted_packet.evidence-resumed.tmp"
+    singular_validate_packet_basic "$resumed_packet_tmp" >/dev/null 2>&1 || {
+      rm -f "$resumed_packet_tmp"
+      l1_evidence_resume_refuse "resumed-packet-invalid"
+    }
+    mv "$resumed_packet_tmp" "$accepted_packet"
+  fi
   singular_lease_set_status "$task_id" "accepted"
   singular_task_set_status "$task_file" "accepted"
   "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "accept" \
@@ -1030,27 +1490,13 @@ PY
   l1_status terminal completed "Accepted evidence finalized and packet queued" true \
     "Continue origin integration" "accepted-evidence-resumed"
   singular_append_event "l1.accepted_evidence_resume_completed" \
-    "accepted product packet published after evidence-only recovery" \
-    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"productAccepted\":true,\"published\":true,\"workerRerun\":false,\"auditorRerun\":false,\"consumesProductRepairBudget\":false}" \
+    "accepted product packet completed its retained publication" \
+    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"authorityState\":\"$authority_state\",\"evidenceFinalizationRequired\":\"$publication_needs_evidence\",\"productAccepted\":true,\"published\":true,\"workerRerun\":false,\"auditorRerun\":false,\"consumesProductRepairBudget\":false}" \
     || true
   l1_campaign_publication_end
   echo "RESUMED ACCEPTED EVIDENCE: $task_id — queued accepted head $accepted_head."
   exit 0
 }
-
-# Evidence recovery takes precedence over destructive reset and orphan cleanup.
-l1_try_resume_accepted_awaiting_evidence || true
-
-if [[ "$reset" == "yes" ]]; then
-  if ! l1_git_campaign_publication_begin \
-      "$l1_campaign_binding" pre-reset-worktree-mutation; then
-    l1_campaign_mismatch_exit \
-      "campaign identity changed before reset worktree cleanup"
-  fi
-  remove_worktree
-  git -C "$SINGULAR_ROOT" branch -D "$worker_branch" 2>/dev/null || true
-  l1_git_campaign_publication_end
-fi
 
 # A deterministic refusal that repeats forever starves the loop (0.4.0: a
 # task-id collision re-dispatched into a preserved worktree every cycle until
@@ -1094,14 +1540,6 @@ l1_try_auto_accept_existing() {
   local prev_run cand cand_binding
   prev_run="$(singular_lease_field "$task_id" runId 2>/dev/null || true)"
   [[ -n "$prev_run" ]] || return 1
-  # Already queued or imported: the work is in flight — dispatch is a no-op.
-  if [[ -f "$SINGULAR_INBOX_DIR/$prev_run.json" ]]     || find "$SINGULAR_ORCH_DIR/packets/imported/$task_id" -maxdepth 1 -name '*.json'          -not -name '*.audit.json' -type f 2>/dev/null | grep -q .; then
-    echo "accepted packet for $task_id already queued/imported; dispatch is a no-op"
-    _l1_outcome="accepted"
-    l1_status terminal completed "Existing accepted packet is already queued or imported" true \
-      "Continue origin reconciliation" "accepted-existing"
-    exit 0
-  fi
   cand="$SINGULAR_RUNS_DIR/$prev_run/packet.json"
   [[ -f "$cand" ]] || return 1
   [[ "$(singular_json_field "$cand" taskId 2>/dev/null || true)" == "$task_id" ]] || return 1
@@ -1148,43 +1586,20 @@ PY
   return 1
 }
 
-if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
-  [[ -d "$worktree" && "$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)" == "${authorized_continuation[2]}" \
-      && "$(git -C "$worktree" branch --show-current 2>/dev/null || true)" == "$worker_branch" ]] || {
-    echo "l1-drive: authorized continuation worktree identity changed before preparation" >&2
-    exit 2
-  }
-elif singular_worktree_registered "$worktree" || [[ -e "$worktree" ]]; then
-  existing_lease="$(singular_lease_status "$task_id" 2>/dev/null || echo none)"
-  case "$existing_lease" in
-    accepted)
-      l1_try_auto_accept_existing || true
-      l1_note_refusal_and_maybe_park "accepted worktree without importable packet (lease: $existing_lease)"
-      echo "active/accepted worktree for $task_id (lease: $existing_lease); refusing (use --reset)" >&2
-      exit 2 ;;
-    running|planned|needs-review|integrated)
-      l1_note_refusal_and_maybe_park "active/accepted worktree (lease: $existing_lease)"
-      echo "active/accepted worktree for $task_id (lease: $existing_lease); refusing (use --reset)" >&2
-      exit 2 ;;
-    *)
-      echo "auto-recovering orphaned worktree for $task_id (lease: $existing_lease)"
-      if ! l1_git_campaign_publication_begin \
-          "$l1_campaign_binding" pre-orphan-worktree-mutation; then
-        l1_campaign_mismatch_exit \
-          "campaign identity changed before orphan worktree recovery"
-      fi
-      remove_worktree
-      git -C "$SINGULAR_ROOT" branch -D "$worker_branch" 2>/dev/null || true
-      l1_git_campaign_publication_end
-      singular_append_event "l1.orphan_recovered" "reclaimed orphaned worktree" \
-        "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"priorLease\":\"$existing_lease\"}" ;;
-  esac
+# Accepted recovery and the established accepted-packet no-op are authoritative
+# terminal continuations, not fresh product work. They must run before the
+# exhausted product-repair guard and before reset/orphan cleanup.
+l1_try_resume_accepted_awaiting_evidence || true
+if [[ "$accepted_checkpoint_mode" == "accepted-existing" ]]; then
+  l1_try_auto_accept_existing || true
+fi
+if [[ -n "$accepted_checkpoint_mode" ]]; then
+  l1_refuse_recognized_accepted_checkpoint "accepted-checkpoint-recovery-refused"
 fi
 
-# A durable started marker (or the conservative legacy fallback) proves a prior
-# product pass already started. retryCount then accounts for every subsequently
-# authorized repair. Bound this invocation to the remaining total passes so
-# deleting/resetting a worktree cannot mint a fresh initial attempt.
+# A prior started pass owns its counters and candidate regardless of checkout
+# status or --reset. Refuse before any orphan/reset mutation, but only after the
+# accepted terminal continuations above have had their idempotent opportunity.
 if [[ "$prior_product_lease" == "yes" && "$product_passes_remaining" -le 0 ]]; then
   if ! l1_campaign_publication_begin \
       "$l1_campaign_binding" pre-exhausted-reentry-state; then
@@ -1205,6 +1620,94 @@ if [[ "$prior_product_lease" == "yes" && "$product_passes_remaining" -le 0 ]]; t
     --run "$run_id" --branch "$worker_branch" --authority l1 >/dev/null 2>&1 || true
   echo "NOT ACCEPTED (escalate-parked): $task_id — durable product repair ceiling already exhausted."
   exit 3
+fi
+
+if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
+  [[ -d "$worktree" && "$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)" == "${authorized_continuation[2]}" \
+      && "$(git -C "$worktree" branch --show-current 2>/dev/null || true)" == "$worker_branch" ]] || {
+    echo "l1-drive: authorized continuation worktree identity changed before preparation" >&2
+    exit 2
+  }
+  if ! l1_candidate_inspect "$worktree"; then
+    echo "l1-drive: continuation candidate Git/lineage inspection failed before preparation" >&2
+    exit 2
+  fi
+  if ! l1_candidate_admission_checks "$worktree"; then
+    singular_append_event "l1.candidate_admission_refused" \
+      "authorized continuation failed scope or secret admission before provider work" \
+      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"admittedBaseSha\":\"$packet_base_ref\",\"consumesProductRepairBudget\":false}" || true
+    echo "l1-drive: authorized continuation failed candidate admission; checkout preserved" >&2
+    exit 3
+  fi
+elif singular_worktree_registered "$worktree" || [[ -e "$worktree" ]]; then
+  existing_lease="$(singular_lease_status "$task_id" 2>/dev/null || echo none)"
+  assess_existing=no
+  case "$existing_lease" in
+    accepted)
+      if [[ "$reset" != yes ]]; then
+        l1_try_auto_accept_existing || true
+        l1_note_refusal_and_maybe_park "accepted worktree without importable packet (lease: $existing_lease)"
+        echo "active/accepted worktree for $task_id (lease: $existing_lease); refusing (use --reset)" >&2
+        exit 2
+      fi
+      assess_existing=yes ;;
+    running|planned|needs-review|integrated)
+      if [[ "$reset" != yes ]]; then
+        l1_note_refusal_and_maybe_park "active/accepted worktree (lease: $existing_lease)"
+        echo "active/accepted worktree for $task_id (lease: $existing_lease); refusing (use --reset)" >&2
+        exit 2
+      fi
+      assess_existing=yes ;;
+    *) assess_existing=yes ;;
+  esac
+  if [[ "$assess_existing" == yes ]]; then
+    echo "assessing retained worktree for $task_id (lease: $existing_lease)"
+    if ! l1_candidate_inspect "$worktree"; then
+      echo "l1-drive: retained candidate Git/lineage inspection failed; preserving checkout" >&2
+      exit 2
+    fi
+    admission_ok=yes
+    l1_candidate_admission_checks "$worktree" || admission_ok=no
+    if ! l1_git_campaign_publication_begin \
+        "$l1_campaign_binding" pre-orphan-worktree-mutation; then
+      l1_campaign_mismatch_exit \
+        "campaign identity changed before orphan worktree recovery"
+    fi
+    if [[ "$L1_CANDIDATE_USEFUL" == yes ]]; then
+      preserve_reason="reprovision-committed-candidate"
+      [[ "$L1_CANDIDATE_DIRTY" == yes ]] && preserve_reason="partial-candidate-requires-continuation"
+      [[ "$admission_ok" == yes ]] || preserve_reason="candidate-admission-refused"
+      if ! l1_preserve_candidate "$worktree" "$preserve_reason"; then
+        l1_git_campaign_publication_end
+        echo "l1-drive: could not preserve useful candidate; refusing cleanup" >&2
+        exit 2
+      fi
+    else
+      remove_worktree
+      branch_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify "$worker_branch^{commit}" 2>/dev/null || true)"
+      if [[ -n "$branch_head" && "$branch_head" == "$packet_base_ref" ]]; then
+        git -C "$SINGULAR_ROOT" branch -D "$worker_branch" >/dev/null 2>&1 || {
+          l1_git_campaign_publication_end
+          echo "l1-drive: failed to remove empty orphan branch" >&2
+          exit 2
+        }
+      fi
+    fi
+    l1_git_campaign_publication_end
+    if [[ "$admission_ok" != yes ]]; then
+      singular_append_event "l1.candidate_admission_refused" \
+        "retained candidate failed scope or secret admission before provider work" \
+        "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"admittedBaseSha\":\"$packet_base_ref\",\"consumesProductRepairBudget\":false}" || true
+      echo "l1-drive: retained candidate failed admission; preserved without dispatch" >&2
+      exit 3
+    fi
+    if [[ "$L1_CANDIDATE_DIRTY" == yes ]]; then
+      echo "l1-drive: retained partial candidate requires explicit continuation; no worker dispatched" >&2
+      exit 3
+    fi
+    singular_append_event "l1.orphan_recovered" "reclaimed orphaned worktree" \
+      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"priorLease\":\"$existing_lease\",\"candidatePreserved\":$([[ "$L1_CANDIDATE_USEFUL" == yes ]] && printf true || printf false)}"
+  fi
 fi
 
 # ---- Lease + branch + worktree ----
@@ -1341,6 +1844,27 @@ if [[ "${#authorized_continuation[@]}" -eq 10 && -n "$bootstrap_failure" ]]; the
   exit 3
 fi
 
+# A retained branch can exist without its canonical worktree. Inspect the
+# provisioned candidate as the final admission boundary, still before the
+# product-pass marker, continuation claim, or provider invocation. This also
+# catches deterministic bootstrap-created scope/secret violations.
+if ! l1_candidate_inspect "$worktree"; then
+  echo "l1-drive: provisioned candidate Git/lineage inspection failed before provider work" >&2
+  exit 2
+fi
+if ! l1_candidate_admission_checks "$worktree"; then
+  _l1_outcome="terminal"
+  singular_lease_set_status "$task_id" "blocked" 2>/dev/null || true
+  singular_task_set_status "$task_file" "blocked" 2>/dev/null || true
+  l1_status terminal failed "Candidate admission rejected before provider work" true \
+    "Inspect the retained candidate scope and secret results" "candidate-admission-refused"
+  singular_append_event "l1.candidate_admission_refused" \
+    "provisioned candidate failed scope or secret admission before provider work" \
+    "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"admittedBaseSha\":\"$packet_base_ref\",\"consumesProductRepairBudget\":false}" || true
+  echo "l1-drive: provisioned candidate failed admission; checkout preserved" >&2
+  exit 3
+fi
+
 # ---- One attempt: worker -> scope -> gate -> commit -> stamp -> audit ----
 # Sets globals: attempt_failure (class), attempt_ctx (file). worker_rc/audit_rc
 # hold the raw runner exit codes of the latest attempt (captured, not yet acted
@@ -1389,6 +1913,13 @@ l1_build_evidence_manifest() {
       >"$try_log" 2>&1 || evidence_rc=$?
     cp "$try_log" "$canonical_log" 2>/dev/null || true
     [[ "$evidence_rc" -eq 0 ]] && return 0
+    if [[ "$evidence_rc" -eq 2 ]]; then
+      singular_append_event "evidence.input_rejected" \
+        "deterministic evidence input rejected; unchanged retry suppressed" \
+        "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"stage\":\"$stage\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-input\",\"consumesProductRepairBudget\":false}" \
+        || true
+      return 2
+    fi
   done
   singular_append_event "evidence.infra_exhausted" \
     "evidence infrastructure retry budget exhausted" \
@@ -1784,7 +2315,7 @@ run_worker_phase() {
       if ! singular_lifecycle_claim_continuation "$task_id" "${authorized_continuation[0]}" \
           "${authorized_continuation[7]}" "${authorized_continuation[8]}" "$run_id" \
           "${authorized_continuation[2]}" "${authorized_continuation[3]}" \
-          "${authorized_continuation[6]}" "$task_file" >/dev/null; then
+          "${authorized_continuation[6]}" "$task_file" "$packet_base_ref" >/dev/null; then
         attempt_failure="continuation-claim-failed"
         attempt_ctx="$(singular_lease_path "$task_id")"
         return 1
@@ -1946,7 +2477,7 @@ run_worker_phase() {
   fi
 
   # Scope (owned allow + forbidden deny).
-  local scope_args=(--worktree "$worktree")
+  local scope_args=(--worktree "$worktree" --base "$packet_base_ref")
   local f
   for f in "${owned_files[@]}"; do scope_args+=(--allow-prefix "$f"); done
   for f in "${forbidden_files[@]}"; do scope_args+=(--forbid-prefix "$f"); done
@@ -1988,11 +2519,42 @@ run_worker_phase() {
   singular_append_event "l1.gate_passed" "regression gate passed" \
     "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"outcome\":\"$gate_outcome\"}"
 
-  # Secret-scan staged-to-be content (working changes), then stage owned + commit.
-  for f in "${owned_files[@]}"; do [[ -e "$worktree/$f" ]] && git -C "$worktree" add -- "$f"; done
+  # Stage the complete owned delta, including deletions, then scan both the
+  # immutable committed range and every staged/working/untracked content surface.
+  local stage_rc=0 tracked_scope_file="$run_dir/stage-owned-paths.z"
+  local visible_scope_file="$run_dir/stage-visible-paths.z"
+  for f in "${owned_files[@]}"; do
+    if ! git -C "$worktree" ls-files -z -- "$f" >"$tracked_scope_file"; then
+      stage_rc=2
+      break
+    fi
+    if ! git -C "$worktree" status --porcelain=v1 -z --untracked-files=all -- "$f" \
+        >"$visible_scope_file"; then
+      stage_rc=2
+      break
+    fi
+    # Ignored, untracked evidence is intentionally not a product commit.
+    # Tracked paths still use -A so owned deletions and mode changes are staged.
+    if [[ -s "$tracked_scope_file" || -s "$visible_scope_file" ]]; then
+      git -C "$worktree" add -A -- "$f" || { stage_rc=$?; break; }
+    fi
+  done
+  if [[ "$stage_rc" -ne 0 ]]; then
+    attempt_failure="commit-failed"; attempt_ctx="$run_dir/stage-owned-paths.z"; return 1
+  fi
+  local secret_rc=0
+  "$SCRIPT_DIR/secret-scan.sh" --worktree "$worktree" --base "$packet_base_ref" \
+    >"$run_dir/secret-scan.log" 2>&1 || secret_rc=$?
   singular_check_result_write "$run_dir/secret-scan-result.json" secret \
-    not-run 0 ""
-  if git -C "$worktree" diff --cached --quiet; then
+    "$([[ "$secret_rc" -eq 0 ]] && echo passed || echo failed)" \
+    "$secret_rc" "$run_dir/secret-scan.log"
+  if [[ "$secret_rc" -ne 0 ]]; then
+    git -C "$worktree" reset -q >/dev/null 2>&1 || true
+    attempt_failure="secret-detected"; attempt_ctx="$run_dir/secret-scan.log"; return 1
+  fi
+  local cached_diff_rc=0
+  git -C "$worktree" diff --cached --quiet || cached_diff_rc=$?
+  if [[ "$cached_diff_rc" -eq 0 ]]; then
     # Empty staged diff. If the owned files at HEAD already differ from the
     # base — a PRIOR attempt committed the content — and the gate above just
     # passed, this is a valid empty-diff retry, not a failure. 0.4.0 raised
@@ -2012,17 +2574,7 @@ run_worker_phase() {
       # rc 0 = no content vs base; rc >1 = diff failed — both fail conservatively.
       attempt_failure="no-changes"; attempt_ctx="$run_dir/worker-codex.log"; return 1
     fi
-  else
-    local secret_rc=0
-    "$SCRIPT_DIR/secret-scan.sh" --worktree "$worktree" --staged \
-      >"$run_dir/secret-scan.log" 2>&1 || secret_rc=$?
-    singular_check_result_write "$run_dir/secret-scan-result.json" secret \
-      "$([[ "$secret_rc" -eq 0 ]] && echo passed || echo failed)" \
-      "$secret_rc" "$run_dir/secret-scan.log"
-    if [[ "$secret_rc" -ne 0 ]]; then
-      git -C "$worktree" reset -q
-      attempt_failure="secret-detected"; attempt_ctx="$run_dir/secret-scan.log"; return 1
-    fi
+  elif [[ "$cached_diff_rc" -eq 1 ]]; then
     singular_git_lock_acquire
     local commit_ec=0
     set +e
@@ -2038,6 +2590,8 @@ run_worker_phase() {
     head_sha="$(git -C "$worktree" rev-parse HEAD)"
     singular_append_event "l1.committed" "worker branch committed" \
       "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"headSha\":\"$head_sha\"}"
+  else
+    attempt_failure="commit-failed"; attempt_ctx="$run_dir/worker-codex.log"; return 1
   fi
 
   # The gate ran immediately before commit. Bind its command and full-log
@@ -2049,11 +2603,15 @@ run_worker_phase() {
     attempt_failure="audit-infra"; attempt_ctx="$run_dir/gate-report-bind.log"; return 1
   fi
 
-  mapfile -t changed_files < <(git -C "$worktree" diff --name-only "$target_branch"...HEAD)
+  local changed_json
+  if ! changed_json="$(python3 "$SCRIPT_DIR/git_changes.py" --worktree "$worktree" \
+      --base "$packet_base_ref" --head "$head_sha")"; then
+    attempt_failure="packet-invalid"; attempt_ctx="$run_dir/packet.json"; return 1
+  fi
   python3 - "$run_dir/last-message.json" "$packet" "$run_id" "$task_id" "$area" \
     "$worker_branch" "$packet_base_ref" "$head_sha" "$worktree" \
     "$(printf '%s\n' "${owned_files[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')" \
-    "$(printf '%s\n' "${changed_files[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')" \
+    "$changed_json" \
     "$l1_campaign_binding" <<'PY'
 import json, sys
 (src,dst,run_id,task_id,area,branch,base_ref,head_sha,workspace,owned_json,changed_json,campaign_binding)=sys.argv[1:13]
@@ -2063,8 +2621,8 @@ p["area"]=area; p["role"]=p.get("role") or "l2-developer"; p["baseRef"]=base_ref
 p["branch"]=branch; p["headSha"]=head_sha; p["workspace"]=workspace
 p["ownedFiles"]=json.loads(owned_json)
 changed=json.loads(changed_json)
-if changed: p["changedFiles"]=changed
-p.setdefault("packetId",f"{run_id}-packet"); p.setdefault("changedFiles",[])
+p["changedFiles"]=changed
+p.setdefault("packetId",f"{run_id}-packet")
 for k in ("commands","tests","evidence","blockers"): p.setdefault(k,[])
 p.setdefault("nextAction","await auditor verdict"); p.setdefault("status","needs-review")
 p["evidence"].append({"kind":"gate-report","ref":f"runs/{run_id}/gate-report.json"})
@@ -2076,9 +2634,12 @@ PY
 
   # Compact, hash-bound reviewer input. Full raw evidence remains available
   # only through evidence-show.sh's declared-reference and byte-budget checks.
-  if ! l1_build_evidence_manifest \
-      "pre-audit-build" "$run_dir/evidence-manifest-build.log"; then
-    attempt_failure="audit-infra"; attempt_ctx="$run_dir/evidence-manifest-build.log"; return 1
+  local manifest_rc=0
+  l1_build_evidence_manifest \
+    "pre-audit-build" "$run_dir/evidence-manifest-build.log" || manifest_rc=$?
+  if [[ "$manifest_rc" -ne 0 ]]; then
+    [[ "$manifest_rc" -eq 2 ]] && attempt_failure="evidence-invalid" || attempt_failure="audit-infra"
+    attempt_ctx="$run_dir/evidence-manifest-build.log"; return 1
   fi
 
   # Implementer context capsule (additive observability; never aborts the
@@ -2587,13 +3148,15 @@ PY
   fi
 
   # Refresh the compact manifest so it includes the host verification report.
-  if ! l1_build_evidence_manifest \
-      "host-verification-refresh" "$run_dir/evidence-manifest-audit-refresh.log"; then
+  local manifest_rc=0
+  l1_build_evidence_manifest \
+    "host-verification-refresh" "$run_dir/evidence-manifest-audit-refresh.log" || manifest_rc=$?
+  if [[ "$manifest_rc" -ne 0 ]]; then
     write_host_audit_verdict "inconclusive-infrastructure" "blocked" \
       "The host verification completed, but its hash-bound evidence manifest could not be refreshed."
     verdict="blocked"
     append_audit_evidence
-    attempt_failure="audit-infra"
+    [[ "$manifest_rc" -eq 2 ]] && attempt_failure="evidence-invalid" || attempt_failure="audit-infra"
     attempt_ctx="$run_dir/evidence-manifest-audit-refresh.log"
     return 1
   fi
@@ -3046,14 +3609,18 @@ print(json.dumps({"taskId": sys.argv[1], "runId": sys.argv[2], "attempt": int(sy
   # Persist the final provider usage and every per-try runner sidecar after the
   # auditor invocation. The pre-audit manifest remains the bounded prompt input;
   # this refresh is the durable post-run accounting record.
-  if ! l1_build_evidence_manifest \
-      "post-verdict-finalization" "$run_dir/evidence-manifest-final-refresh.log"; then
+  local manifest_rc=0
+  l1_build_evidence_manifest \
+    "post-verdict-finalization" "$run_dir/evidence-manifest-final-refresh.log" || manifest_rc=$?
+  if [[ "$manifest_rc" -ne 0 ]]; then
     # audit.json already contains a parseable verdict for this exact head.  An
     # evidence writer failure may delay publication, but it cannot erase an
     # accepted product audit or send the implementation through a repair cycle.
     if [[ "$require_audit" == "1" && "$verdict" == "accepted" ]]; then
       accepted_audit_pending_evidence="yes"
-      attempt_failure="evidence-infra-after-accept"
+      [[ "$manifest_rc" -eq 2 ]] \
+        && attempt_failure="evidence-invalid-after-accept" \
+        || attempt_failure="evidence-infra-after-accept"
       singular_append_event "l1.audit_accepted_awaiting_evidence" \
         "accepted product audit preserved; evidence finalization is blocked externally" \
         "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"headSha\":\"$head_sha\",\"stage\":\"final-manifest-refresh\",\"auditVerdict\":\"accepted\",\"consumesProductRepairBudget\":false}" \
@@ -3557,6 +4124,11 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
       # mandatory domain separation even when ordinary decider fast paths are
       # disabled: a model action may not convert it into a product repair.
       fast_action="escalate-infra"
+      ;;
+    evidence-invalid*)
+      # Schema/identity/lineage/budget input rejection is stable for unchanged
+      # bytes. It is neither retryable infrastructure nor product repair work.
+      fast_action="escalate-parked"
       ;;
     *)
       fast_action="$(singular_decider_fast_action "$attempt_failure" "$product_repairs_used" "$max_retries" "$prev_failure_class")"

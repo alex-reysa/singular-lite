@@ -547,6 +547,15 @@ singular_ensure_gitignore_entries() {
 }
 
 singular_ensure_repo_scaffold() {
+  local schema_sync_mode="${1:-preserve}"
+  case "$schema_sync_mode" in
+    preserve|sync) ;;
+    *)
+      echo "singular_ensure_repo_scaffold: expected schema mode preserve or sync, got: $schema_sync_mode" >&2
+      return 2
+      ;;
+  esac
+
   mkdir -p \
     "$SINGULAR_ORCH_DIR/prompts" \
     "$SINGULAR_ORCH_DIR/tasks" \
@@ -632,13 +641,21 @@ PY
     if [[ -f "$SINGULAR_ENGINE_HOME/SCHEMA_VERSION" ]]; then
       engine_schema="$(tr -d '[:space:]' <"$SINGULAR_ENGINE_HOME/SCHEMA_VERSION")"
     fi
-    # The engine bundle becomes authoritative only after migration has advanced
-    # the consumer config to the same schema version. Until then, preserve every
-    # existing mirror byte-for-byte and do not introduce newer contracts.
+    # The engine bundle becomes eligible only after migration has advanced the
+    # consumer config to the same schema version. Routine callers install
+    # missing baseline contracts but preserve every existing consumer mirror:
+    # tracked mirrors are product source and may legitimately advance after an
+    # engine campaign is frozen. Explicit installation requests `sync`, while
+    # migrations retain their own complete staged refresh.
     if [[ -n "$repo_schema" && "$repo_schema" == "$engine_schema" ]]; then
       while IFS= read -r schema; do
         [[ -n "$schema" ]] || continue
         base="$(basename "$schema")"
+        if [[ "$schema_sync_mode" == "preserve" \
+            && ( -e "$SINGULAR_ROOT/schemas/orchestration/$base" \
+              || -L "$SINGULAR_ROOT/schemas/orchestration/$base" ) ]]; then
+          continue
+        fi
         tmp="$SINGULAR_ROOT/schemas/orchestration/.$base.tmp.$$"
         cp "$schema" "$tmp"
         mv "$tmp" "$SINGULAR_ROOT/schemas/orchestration/$base"

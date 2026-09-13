@@ -87,7 +87,7 @@ do_import="no"
 [[ "$mode" == "apply" || "$mode" == "actuate" ]] && do_import="yes"
 
 singular_ensure_state_dirs
-singular_ensure_repo_scaffold
+singular_ensure_repo_scaffold preserve
 
 # Drain: block until no launched dispatch records remain (detached-mode tests
 # and clean shutdown). Each poll reaps under the origin lock so finished or

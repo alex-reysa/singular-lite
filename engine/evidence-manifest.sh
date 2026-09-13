@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 run_dir=""
 task_id=""
 worktree=""
@@ -39,7 +41,7 @@ out="$run_dir/evidence-manifest.json"
 tmp="$out.tmp.$$"
 trap 'rm -f "$tmp"' EXIT
 
-python3 - "$run_dir" "$task_id" "$worktree" "$base_ref" "$head_sha" "$tmp" <<'PY'
+python3 - "$run_dir" "$task_id" "$worktree" "$base_ref" "$head_sha" "$tmp" "$SCRIPT_DIR" <<'PY'
 import datetime
 import hashlib
 import json
@@ -49,9 +51,11 @@ import subprocess
 import sys
 
 run_dir = pathlib.Path(sys.argv[1]).resolve()
-task_id, worktree_raw, base_ref, head_sha, output_raw = sys.argv[2:7]
+task_id, worktree_raw, base_ref, head_sha, output_raw, engine_dir = sys.argv[2:8]
 worktree = pathlib.Path(worktree_raw).resolve()
 output = pathlib.Path(output_raw)
+sys.path.insert(0, engine_dir)
+from git_changes import GitChangeError, committed_paths, require_ancestor
 defaults = {
     "maxComposedBytes": 262144,
     "maxExcerptBytes": 2048,
@@ -140,15 +144,17 @@ def artifact_ref(path):
     raise ValueError("artifact outside allowed roots")
 
 try:
-    resolved_head = git("rev-parse", "--verify", f"{head_sha}^{{commit}}", text=True).strip()
-    git("merge-base", "--is-ancestor", base_ref, resolved_head)
-except subprocess.CalledProcessError as exc:
+    resolved_base, resolved_head = require_ancestor(worktree, base_ref, head_sha)
+except (GitChangeError, OSError, UnicodeError):
     sys.stderr.write("evidence-manifest: invalid base/head lineage\n")
     sys.exit(2)
 
-diff = git("diff", "--binary", f"{base_ref}...{resolved_head}")
-changed_raw = git("diff", "--name-only", "-z", f"{base_ref}...{resolved_head}")
-changed = [part.decode("utf-8", errors="surrogateescape") for part in changed_raw.split(b"\0") if part]
+try:
+    diff = git("diff", "--binary", f"{resolved_base}...{resolved_head}")
+    changed = committed_paths(worktree, resolved_base, resolved_head)
+except (subprocess.CalledProcessError, GitChangeError, OSError, UnicodeError):
+    sys.stderr.write("evidence-manifest: Git evidence collection failed\n")
+    sys.exit(2)
 diff_artifact = run_dir / "committed.diff"
 diff_temporary = diff_artifact.with_name(diff_artifact.name + ".tmp")
 diff_temporary.write_bytes(diff)
@@ -159,6 +165,7 @@ for name in changed:
     try:
         data = git("show", f"{resolved_head}:{name}")
     except subprocess.CalledProcessError:
+        # A missing path at the candidate is an owned deletion or rename source.
         data = b""
     files.append({"path": name, "sha256": sha_bytes(data)})
 
@@ -168,7 +175,22 @@ if packet_path.is_file():
     try:
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        packet = {}
+        sys.stderr.write("evidence-manifest: invalid packet input\n")
+        sys.exit(2)
+if packet_path.is_file():
+    if packet.get("schema") != "singular.orchestration.state-packet.v0":
+        sys.stderr.write("evidence-manifest: unsupported packet schema\n")
+        sys.exit(2)
+    expected_packet = {
+        "taskId": task_id,
+        "runId": run_dir.name,
+        "headSha": resolved_head,
+        "baseRef": resolved_base,
+        "changedFiles": changed,
+    }
+    if any(packet.get(key) != value for key, value in expected_packet.items()):
+        sys.stderr.write("evidence-manifest: packet base/head/delta identity mismatch\n")
+        sys.exit(2)
 
 gate = {}
 gate_record_path = None
@@ -401,17 +423,32 @@ if gate_record_path is not None:
         elif gate_outcome == "inconclusive-infrastructure":
             gate_check["status"] = "inconclusive"
 
+scope_check = structured_check("scope", "scope-check-result.json")
+secret_check = structured_check("secret", "secret-scan-result.json")
+if changed and secret_check.get("status") != "passed":
+    sys.stderr.write("evidence-manifest: committed delta lacks a passing secret scan\n")
+    sys.exit(2)
+
 # Refresh cannot reset the retrieval domain by dropping an existing binding.
 prior_binding = None
 prior_path = run_dir / "evidence-manifest.json"
 if prior_path.is_file():
-    prior = json.loads(prior_path.read_text(encoding="utf-8"))
+    try:
+        prior = json.loads(prior_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sys.stderr.write("evidence-manifest: existing manifest is invalid\n")
+        sys.exit(2)
+    if prior.get("schema") != "singular.orchestration.evidence-manifest.v0":
+        sys.stderr.write("evidence-manifest: existing manifest schema is invalid\n")
+        sys.exit(2)
     if prior.get("taskId") != task_id or prior.get("runId") != run_dir.name:
-        raise SystemExit("evidence-manifest: existing manifest identity mismatch")
+        sys.stderr.write("evidence-manifest: existing manifest identity mismatch\n")
+        sys.exit(2)
     prior_binding = prior.get("campaignBinding", "legacy")
 campaign_binding = os.environ.get("SINGULAR_EVIDENCE_CAMPAIGN_BINDING", prior_binding or "legacy")
 if prior_binding is not None and campaign_binding != prior_binding:
-    raise SystemExit("evidence-manifest: refresh cannot change campaign identity")
+    sys.stderr.write("evidence-manifest: refresh cannot change campaign identity\n")
+    sys.exit(2)
 
 manifest = {
     "schema": "singular.orchestration.evidence-manifest.v0",
@@ -425,8 +462,8 @@ manifest = {
     "expectedFailureCount": len(expected),
     "unexpectedFailureCount": len(unexpected),
     "checks": {
-        "scope": structured_check("scope", "scope-check-result.json"),
-        "secret": structured_check("secret", "secret-scan-result.json"),
+        "scope": scope_check,
+        "secret": secret_check,
         "gate": gate_check,
     },
     "artifacts": artifacts,
@@ -483,7 +520,7 @@ if len(encoded) > limit_bytes:
     sys.stderr.write(
         f"evidence-manifest: composed evidence exceeds {limit_bytes} bytes ({len(encoded)})\n"
     )
-    sys.exit(3)
+    sys.exit(2)
 output.write_bytes(encoded)
 PY
 

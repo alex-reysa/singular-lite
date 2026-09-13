@@ -26,8 +26,14 @@ PY
 cp "$run/worker-evidence/huge.log" "$run/gate-check.log"
 printf 'scope clean\n' >"$run/scope-check.log"
 printf 'secret log exists but has no structured result\n' >"$run/secret-scan.log"
-cat >"$run/packet.json" <<'JSON'
+cat >"$run/packet.json" <<JSON
 {
+  "schema": "singular.orchestration.state-packet.v0",
+  "taskId": "TASK-0001",
+  "runId": "RUN-evidence",
+  "headSha": "$head",
+  "baseRef": "$base",
+  "changedFiles": ["src/value.txt"],
   "commands": [
     {
       "cmd": "run tests",
@@ -71,6 +77,9 @@ python3 "$ROOT/engine/gate_report.py" \
 SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
   bash -c 'source "$1"; singular_check_result_write "$2" scope passed 0 "$3"' \
   _ "$ROOT/engine/lib.sh" "$run/scope-check-result.json" "$run/scope-check.log"
+SINGULAR_ROOT="$repo" SINGULAR_STATE_DIR="$repo/.singular-state" \
+  bash -c 'source "$1"; singular_check_result_write "$2" secret passed 0 "$3"' \
+  _ "$ROOT/engine/lib.sh" "$run/secret-scan-result.json" "$run/secret-scan.log"
 cat >"$run/worker-runner-result.json" <<'JSON'
 {
   "schema": "singular.orchestration.runner-result.v0",
@@ -109,7 +118,7 @@ assert data["files"][0]["path"] == "src/value.txt"
 assert data["expectedFailureCount"] == 1
 assert data["unexpectedFailureCount"] == 0
 assert data["checks"]["scope"]["status"] == "passed"
-assert data["checks"]["secret"]["status"] == "not-run"
+assert data["checks"]["secret"]["status"] == "passed"
 assert data["checks"]["gate"]["status"] == "passed"
 assert data["budget"]["limitBytes"] == 65536
 assert data["budget"]["composedBytes"] <= 65536
@@ -133,6 +142,44 @@ assert data["providerUsage"] == {
     "outputTokens": 800,
 }
 PY
+
+# Exact packet identity and a structured passing secret result are deterministic
+# evidence inputs. Re-running unchanged bad bytes must fail with the dedicated
+# input-rejection exit and leave the last valid manifest intact.
+manifest_sha="$(shasum -a 256 "$run/evidence-manifest.json" | awk '{print $1}')"
+cp "$run/packet.json" "$tmp/packet.valid.json"
+python3 - "$run/packet.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+packet = json.load(open(path, encoding="utf-8"))
+packet["changedFiles"] = ["worker-invented.txt"]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(packet, stream); stream.write("\n")
+PY
+rc=0
+SINGULAR_EVIDENCE_CONFIG_JSON="$evidence_config" "$ROOT/engine/evidence-manifest.sh" \
+  --run-dir "$run" --task-id TASK-0001 --worktree "$repo" \
+  --base-ref "$base" --head-sha "$head" >/dev/null 2>&1 || rc=$?
+[[ "$rc" -eq 2 ]] || { echo "packet delta mismatch was not deterministic rc=2" >&2; exit 1; }
+[[ "$(shasum -a 256 "$run/evidence-manifest.json" | awk '{print $1}')" == "$manifest_sha" ]] \
+  || { echo "packet mismatch replaced the valid manifest" >&2; exit 1; }
+cp "$tmp/packet.valid.json" "$run/packet.json"
+
+cp "$run/secret-scan-result.json" "$tmp/secret.valid.json"
+python3 - "$run/secret-scan-result.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+result = json.load(open(path, encoding="utf-8"))
+result["status"] = "not-run"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(result, stream); stream.write("\n")
+PY
+rc=0
+SINGULAR_EVIDENCE_CONFIG_JSON="$evidence_config" "$ROOT/engine/evidence-manifest.sh" \
+  --run-dir "$run" --task-id TASK-0001 --worktree "$repo" \
+  --base-ref "$base" --head-sha "$head" >/dev/null 2>&1 || rc=$?
+[[ "$rc" -eq 2 ]] || { echo "not-run secret result was not deterministic rc=2" >&2; exit 1; }
+cp "$tmp/secret.valid.json" "$run/secret-scan-result.json"
 
 canary_warning="$tmp/canary-warning.log"
 cp "$run/evidence-manifest.json" "$tmp/evidence-manifest-before-canary.json"
@@ -193,8 +240,22 @@ if "$ROOT/engine/evidence-show.sh" "$run/evidence-manifest.json" \
 fi
 
 RETRIEVE
-python3 "$ROOT/engine/evidence_delivery.py" run \
-  --manifest "$run/evidence-manifest.json" --ledger "$tmp/delivery.sqlite3" -- \
-  "$BASH" "$tmp/retrieve.sh" "$ROOT" "$run" "$tmp"
+consumer="$tmp/consumer"
+mkdir -p "$consumer/.singular-state"
+git -C "$consumer" init -q
+(
+  cd "$consumer"
+  unset SINGULAR_JSON_CONFIG_FILE SINGULAR_JSON_CONFIG_SOURCE \
+    SINGULAR_CONFIG_PROVENANCE_FILE SINGULAR_CAMPAIGN_MANIFEST
+  SINGULAR_ROOT="$consumer" \
+  SINGULAR_STATE_DIR="$consumer/.singular-state" \
+  SINGULAR_ENGINE_HOME="$ROOT" \
+  SINGULAR_CONFIG_FILE=/dev/null \
+  SINGULAR_LOCAL_CONFIG_FILE=/dev/null \
+  SINGULAR_BASH_BIN=/opt/homebrew/bin/bash \
+  python3 "$ROOT/engine/evidence_delivery.py" run \
+    --manifest "$run/evidence-manifest.json" --ledger "$tmp/delivery.sqlite3" -- \
+    "$BASH" "$tmp/retrieve.sh" "$ROOT" "$run" "$tmp"
+)
 
 echo "evidence manifest tests passed"

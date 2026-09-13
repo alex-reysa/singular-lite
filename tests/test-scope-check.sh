@@ -110,11 +110,64 @@ test_forbidden_directory_prefix_denies_in_both_forms() {
   done
 }
 
+test_committed_and_working_paths_are_nul_safe_and_complete() {
+  with_fixture
+  local base out rc=0 source_name destination_name working_name paths_json
+  source_name=$'source "quoted" -> arrow\nand newline.txt'
+  destination_name=$'destination -> literal\nname.txt'
+  mkdir -p "$SINGULAR_ROOT/owned" "$SINGULAR_ROOT/outside"
+  printf 'rename me\n' >"$SINGULAR_ROOT/outside/$source_name"
+  printf 'delete me\n' >"$SINGULAR_ROOT/outside/delete.txt"
+  printf 'mode\n' >"$SINGULAR_ROOT/owned/mode.sh"
+  git -C "$SINGULAR_ROOT" add owned outside
+  git -C "$SINGULAR_ROOT" -c user.name=test -c user.email=test@example.local commit -q -m paths
+  base="$(git -C "$SINGULAR_ROOT" rev-parse HEAD)"
+  git -C "$SINGULAR_ROOT" mv "outside/$source_name" "owned/$destination_name"
+  git -C "$SINGULAR_ROOT" rm -q outside/delete.txt
+  chmod +x "$SINGULAR_ROOT/owned/mode.sh"
+  git -C "$SINGULAR_ROOT" add owned/mode.sh
+  git -C "$SINGULAR_ROOT" -c user.name=test -c user.email=test@example.local commit -q -m delta
+  working_name=$'untracked -> name\ntail.txt'
+  printf 'working\n' >"$SINGULAR_ROOT/owned/$working_name"
+
+  paths_json="$(python3 "$SCRIPT_DIR/git_changes.py" --worktree "$SINGULAR_ROOT" \
+    --base "$base" --head HEAD --include-working)"
+  python3 - "$paths_json" "outside/$source_name" "owned/$destination_name" \
+    "outside/delete.txt" "owned/mode.sh" "owned/$working_name" <<'PY'
+import json, sys
+actual = json.loads(sys.argv[1])
+expected = sys.argv[2:]
+assert all(path in actual for path in expected), (actual, expected)
+assert len(actual) == len(set(actual)), actual
+PY
+
+  out="$(/bin/bash "$SCRIPT_DIR/scope-check.sh" --worktree "$SINGULAR_ROOT" \
+    --base "$base" --allow-prefix owned 2>&1)" || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "rename source and committed deletion outside scope were not checked"
+  assert_contains "$out" "outside/delete.txt" "committed deletion path"
+
+  rc=0
+  out="$(/bin/bash "$SCRIPT_DIR/scope-check.sh" --worktree "$SINGULAR_ROOT" \
+    --base "$base" --allow-prefix owned --allow-prefix outside 2>&1)" || rc=$?
+  [[ "$rc" -eq 0 ]] || fail "NUL-safe committed/working scope should pass: $out"
+}
+
+test_git_errors_fail_closed() {
+  with_fixture
+  local out rc=0
+  out="$(/bin/bash "$SCRIPT_DIR/scope-check.sh" --worktree "$SINGULAR_ROOT" \
+    --base does-not-exist --allow-prefix internal 2>&1)" || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "invalid Git base was treated as an empty successful scope"
+  assert_contains "$out" "Git change discovery failed" "Git failure diagnostic"
+}
+
 test_empty_forbid_prefixes_are_safe_under_system_bash
 test_forbidden_prefix_still_fails_under_system_bash
 test_directory_prefix_admits_its_contents_in_both_forms
 test_directory_prefix_still_rejects_outside_writes_in_both_forms
 test_directory_prefix_does_not_match_sibling_names
 test_forbidden_directory_prefix_denies_in_both_forms
+test_committed_and_working_paths_are_nul_safe_and_complete
+test_git_errors_fail_closed
 
 echo "test-scope-check.sh: ok"

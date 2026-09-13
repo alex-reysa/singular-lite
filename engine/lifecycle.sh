@@ -82,6 +82,7 @@ singular_lifecycle_claim_repair() {
 singular_lifecycle_claim_continuation() {
   local task_id="$1" authorization_id="$2" owner="$3" generation="$4"
   local run_id="$5" candidate_source="$6" integration_target="$7" worktree="$8" task_contract="$9"
+  local candidate_base="${10}"
   local record reservation_run reservation_base campaign_binding engine_source_fingerprint
   record="$(singular_dispatch_record_path "$task_id")"
   local ticks=0
@@ -99,7 +100,8 @@ singular_lifecycle_claim_continuation() {
     --task-contract "$task_contract" \
     --authorization-id "$authorization_id" --owner "$owner" --generation "$generation" \
     --reservation-run "$reservation_run" --campaign "$campaign_binding" \
-    --candidate-source "$candidate_source" --integration-target "$integration_target" \
+    --candidate-source "$candidate_source" --candidate-base "$candidate_base" \
+    --integration-target "$integration_target" \
     --engine-source-fingerprint "$engine_source_fingerprint" --repo-root "$SINGULAR_ROOT" \
     --reservation-base "$reservation_base" --worktree "$worktree" --run "$run_id"
 }
