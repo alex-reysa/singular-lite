@@ -324,8 +324,21 @@ All per-repo variation lives in the consumer repo, never in engine files:
 - **`singular.config.json`** — declarative: `targetBranch`, `gateCommand`, `runner`,
   `areas{}`, `areaPrefix`, `prewarm`, `worktreeCopyPaths[]`, `modules[]`,
   `identity{}`, `env{}`, `provisionFiles[]`, `envAllowlist[]`,
-  `capabilityProfiles{}`, `roleProfiles{}`, `evidence{}`, `bootstrap{}`,
+  `capabilityProfiles{}`, `roleProfiles{}`, `roleRunners{}`, `evidence{}`, `bootstrap{}`,
   `resources{}`, `promoter`, `controlState{}`, and `legacyCompatibility{}`.
+
+### Per-role runners and review isolation
+
+`roleRunners` pins an adapter per role (`implementer`, `auditor`, `planner`,
+`critic`, `decider`, `supervisor`, `integrator`). A bare name resolves inside
+`engine/`; a relative path is consumer-root relative. Review-evidence delivery
+admits an adapter only when `engine/providers.json` declares
+`readOnlyEnforcement` for this host **and** the argv is the engine's own file —
+copies and wrappers are refused. On macOS, `claude-run.sh` at `--level readonly`
+wraps the CLI in `/usr/bin/sandbox-exec` (deny `file-write*` under the worktree,
+repo root, and state dir). Codex uses its native OS sandbox on every platform.
+Grok has no declared read-only enforcement and is an implementer (l2) runner
+only. See `docs/providers.md`.
 
 **`promoter` is the one most consumers need and miss.** It names the script that
 decides when a DAG node's gate may be promoted — a bare name resolves to

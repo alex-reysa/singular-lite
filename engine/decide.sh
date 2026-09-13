@@ -23,7 +23,8 @@ source "$SCRIPT_DIR/lib.sh"
 
 # Decider runner. Defaults to the codex runner; set SINGULAR_RUNNER to a drop-in
 # (e.g. claude-run.sh) to dispatch a different CLI under the same contract.
-SINGULAR_RUNNER_BIN="${SINGULAR_RUNNER:-$SCRIPT_DIR/codex-run.sh}"
+# SINGULAR_ROLE_RUNNER_DECIDER (from config roleRunners.decider) wins when set.
+SINGULAR_RUNNER_BIN="$(singular_role_runner decider "${SINGULAR_RUNNER:-$SCRIPT_DIR/codex-run.sh}")" || exit 78
 
 task_id=""
 failure_class=""

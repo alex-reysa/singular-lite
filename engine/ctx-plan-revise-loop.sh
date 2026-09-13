@@ -222,7 +222,8 @@ singular_plan_revise_loop() {
   # SEPARATE knob from the critic's SINGULAR_RUNNER so a stub critic and a stub
   # planner can be wired independently; it falls back to SINGULAR_RUNNER, then the
   # default codex runner.
-  local planner_runner="${SINGULAR_PLAN_REVISE_PLANNER:-${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}}"
+  local planner_runner
+  planner_runner="$(singular_role_runner planner "${SINGULAR_PLAN_REVISE_PLANNER:-${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}}")" || return 78
   local runner_basename; runner_basename="$(basename "$planner_runner")"
 
   # The canonical per-node planner session-meta the resume decider consults and

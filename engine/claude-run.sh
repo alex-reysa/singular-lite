@@ -16,10 +16,12 @@ set -euo pipefail
 #
 # Privilege levels (mapped from codex sandbox semantics):
 #   readonly  -> agent may read + run read-only shell, MUST NOT mutate the repo.
-#                Enforced at the orchestration layer: file-write tools are denied
-#                AND any working-tree mutation the run leaves behind is reverted
-#                after the run (git restore guard). This is bulletproof regardless
-#                of Claude's internal sandbox and cannot hang on a network prompt.
+#                Enforced in layers: on macOS, sandbox-exec denies file-write*
+#                under the worktree / SINGULAR_ROOT / SINGULAR_STATE_DIR; file-write
+#                tools are denied; any working-tree mutation the run leaves behind
+#                is reverted after the run (git restore guard). The OS sandbox is
+#                the review-evidence admission surface; tool denial + restore
+#                remain defense in depth.
 #   l2        -> workspace-write + Bash + NETWORK (real-PostgreSQL proof needs
 #                egress). File scope is enforced downstream by scope-check.sh in
 #                l1-drive.sh, identical to the codex path.
@@ -250,6 +252,67 @@ cmd+=(--dangerously-skip-permissions)
 if [[ -n "${SINGULAR_CLAUDE_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
   cmd+=(${SINGULAR_CLAUDE_EXTRA_ARGS})
+fi
+
+# --- OS-enforced read-only (sandbox-exec on macOS) ------------------------------
+# Applies only at readonly. SINGULAR_CLAUDE_OS_SANDBOX=auto|1|0 (default auto);
+# SINGULAR_CLAUDE_SANDBOX_EXEC defaults to /usr/bin/sandbox-exec. Evidence
+# delivery sets SINGULAR_RUNNER_REQUIRE_OS_READONLY=1 so a missing tool fails
+# closed here, before the restore-guard snapshot or any provider launch.
+if [[ "$readonly_run" == "yes" ]]; then
+  claude_os_sandbox="${SINGULAR_CLAUDE_OS_SANDBOX:-auto}"
+  claude_sandbox_exec="${SINGULAR_CLAUDE_SANDBOX_EXEC:-/usr/bin/sandbox-exec}"
+  sandbox_available="no"
+  [[ -n "$claude_sandbox_exec" && -x "$claude_sandbox_exec" ]] && sandbox_available="yes"
+  apply_sandbox="no"
+  case "$claude_os_sandbox" in
+    1) apply_sandbox="yes" ;;
+    0) apply_sandbox="no" ;;
+    auto) [[ "$sandbox_available" == "yes" ]] && apply_sandbox="yes" ;;
+  esac
+  if [[ "$apply_sandbox" == "yes" && "$sandbox_available" != "yes" ]]; then
+    apply_sandbox="no"
+  fi
+  if [[ "${SINGULAR_RUNNER_REQUIRE_OS_READONLY:-}" == "1" && "$apply_sandbox" != "yes" ]]; then
+    echo "claude-run: OS-enforced read-only is required for this invocation but unavailable" >&2
+    exit 78
+  fi
+  if [[ "$apply_sandbox" == "yes" ]]; then
+    singular_claude_sandbox_realpath() {
+      local dir="$1"
+      [[ -n "$dir" && -d "$dir" ]] || return 1
+      ( cd "$dir" && pwd -P )
+    }
+    sandbox_paths=()
+    singular_claude_sandbox_add_path() {
+      local resolved existing
+      resolved="$(singular_claude_sandbox_realpath "$1")" || return 0
+      for existing in "${sandbox_paths[@]+"${sandbox_paths[@]}"}"; do
+        [[ "$existing" == "$resolved" ]] && return 0
+      done
+      sandbox_paths+=("$resolved")
+    }
+    singular_claude_sandbox_add_path "$worktree"
+    singular_claude_sandbox_add_path "${SINGULAR_ROOT:-}"
+    singular_claude_sandbox_add_path "${SINGULAR_STATE_DIR:-}"
+    if [[ -n "$run_dir" && -d "$run_dir" ]]; then
+      os_readonly_profile="$run_dir/claude-readonly-sandbox.sb"
+    else
+      # BSD/macOS mktemp only substitutes trailing X's, so the profile lives
+      # in a temp directory under the exact name the contract asks for.
+      os_readonly_dir="$(mktemp -d "${TMPDIR:-/tmp}/claude-readonly-sandbox.XXXXXX")"
+      os_readonly_profile="$os_readonly_dir/claude-readonly-sandbox.sb"
+      SINGULAR_RUNNER_CLEANUP_PATHS+=("$os_readonly_dir")
+    fi
+    {
+      printf '(version 1)\n(allow default)\n'
+      for sandbox_path in "${sandbox_paths[@]+"${sandbox_paths[@]}"}"; do
+        printf '(deny file-write* (subpath "%s"))\n' "$sandbox_path"
+      done
+    } >"$os_readonly_profile"
+    cmd=("$claude_sandbox_exec" -f "$os_readonly_profile" "${cmd[@]}")
+    echo "claude-run: readonly os-sandbox=sandbox-exec profile=$os_readonly_profile" >&2
+  fi
 fi
 
 # --- Read-only snapshot (for restore-after) -------------------------------------
