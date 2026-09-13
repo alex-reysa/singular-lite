@@ -8,11 +8,79 @@ PYTHON_BIN_DIR="/Library/Frameworks/Python.framework/Versions/3.12/bin"
 export PATH="$PYTHON_BIN_DIR:$PATH"
 export PYTHONDONTWRITEBYTECODE=1
 tmp="$(mktemp -d)"
+frozen=""
+frozen_snapshot=""
+
+snapshot_fixture_tree() {
+  python3 - "$1" "$2" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+output = pathlib.Path(sys.argv[2])
+snapshot = {}
+for path in [root, *sorted(root.rglob("*"))]:
+    relative = "." if path == root else path.relative_to(root).as_posix()
+    info = path.lstat()
+    entry = {"mode": stat.S_IMODE(info.st_mode)}
+    if path.is_symlink():
+        entry.update(kind="symlink", target=os.readlink(path))
+    elif path.is_dir():
+        entry["kind"] = "directory"
+    elif path.is_file():
+        entry.update(
+            kind="file",
+            bytes=info.st_size,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+    else:
+        raise SystemExit(f"unsupported frozen fixture entry: {path}")
+    snapshot[relative] = entry
+output.write_text(
+    json.dumps(snapshot, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
+assert_fixture_immutable() {
+  python3 - "$1" <<'PY'
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for path in [root, *root.rglob("*")]:
+    if path.is_symlink():
+        continue
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o222:
+        raise SystemExit(f"writable frozen fixture entry: {mode:04o} {path}")
+PY
+}
+
 cleanup() {
+  local cleanup_rc=$?
+  trap - EXIT
+  if [[ -n "$frozen_snapshot" && -d "$frozen" ]]; then
+    actual_frozen_snapshot="$tmp/frozen-engine.exit.json"
+    if ! snapshot_fixture_tree "$frozen" "$actual_frozen_snapshot" \
+        || ! cmp -s "$frozen_snapshot" "$actual_frozen_snapshot" \
+        || ! assert_fixture_immutable "$frozen"; then
+      echo "frozen engine bytes or modes changed during qualification" >&2
+      cleanup_rc=1
+    fi
+  fi
   # Only the disposable copy may have restrictive fixture modes. Never chmod
-  # the source engine merely to make teardown succeed.
+  # the input engine merely to make teardown succeed. Integrity is checked
+  # above before this relaxation.
   chmod -R u+w "$tmp" 2>/dev/null || true
   rm -rf "$tmp"
+  exit "$cleanup_rc"
 }
 trap cleanup EXIT
 repo="$tmp/repo"
@@ -69,9 +137,8 @@ for item in engine schemas templates vendor singular-ext cli; do
   cp -R "$ENGINE_SOURCE/$item" "$frozen/$item"
 done
 cp "$ENGINE_SOURCE/VERSION" "$ENGINE_SOURCE/SCHEMA_VERSION" "$frozen/"
-# The campaign canary makes and instruments its own nested engine fixture, so
-# its input copy must remain owner-writable during setup. Campaign publication
-# below freezes and verifies the exact resulting bytes and modes.
+# Only the owned disposable copy is writable during fixture preparation. It is
+# frozen after scaffold setup and before manifest creation below.
 chmod -R u+w "$frozen"
 
 campaign_repo="$tmp/campaign-consumer"
@@ -122,10 +189,10 @@ run_frozen() {
 }
 
 publish_frozen_campaign_fixture() {
-  # campaign start currently depends on the repository-wide lifecycle canary,
-  # whose unrelated audit fixture is not part of this schema regression. Use
-  # the canonical manifest producer, then prove the public verifier accepts the
-  # complete ACTIVE/manifest/epoch/latch state before any reconcile call.
+  # This deterministic schema fixture does not claim campaign-start/canary or
+  # adoption qualification. Use the canonical manifest producer, then prove the
+  # public verifier accepts the complete ACTIVE/manifest/epoch/latch state
+  # before any reconcile call.
   (
     cd "$campaign_repo"
     env \
@@ -163,7 +230,8 @@ critic_template="${SINGULAR_PLAN_CRITIC_TEMPLATE:-$SINGULAR_ORCH_DIR/prompts/pla
 context_config="${SINGULAR_CONTEXT_CONFIG_FILE:-$SINGULAR_JSON_CONFIG_FILE}"
 python3 "$engine/engine/campaign_manifest.py" create \
   --output "$manifest" --campaign-id schema-ownership-regression \
-  --campaign-epoch "$epoch" --provider-assurance deterministic-test-fixture \
+  --campaign-epoch "$epoch" \
+  --provider-assurance deterministic-schema-fixture-no-canary \
   --engine-home "$SINGULAR_ENGINE_HOME" \
   --config-json "$SINGULAR_JSON_CONFIG_FILE" \
   --config-shell "$SINGULAR_CONFIG_FILE" \
@@ -212,6 +280,10 @@ EOF
 git -C "$campaign_repo" add .
 git -C "$campaign_repo" commit -qm 'initial singular scaffold'
 
+chmod -R a-w "$frozen"
+frozen_snapshot="$tmp/frozen-engine.expected.json"
+snapshot_fixture_tree "$frozen" "$frozen_snapshot"
+assert_fixture_immutable "$frozen"
 publish_frozen_campaign_fixture
 manifest="$campaign_repo/.singular-state/campaign/manifest.json"
 [[ -f "$manifest" ]] || {
@@ -219,9 +291,12 @@ manifest="$campaign_repo/.singular-state/campaign/manifest.json"
   exit 1
 }
 
-# Model the later task's legitimate, integrated context-contract extension.
+# Model the later task's legitimate, integrated context-contract extension and
+# a consumer-owned mirror that deliberately weakens only packet status syntax.
 context_mirror="$campaign_repo/schemas/orchestration/context-bundle.v1.schema.json"
+packet_mirror="$campaign_repo/schemas/orchestration/state-packet.v0.schema.json"
 chmod u+w "$context_mirror"
+chmod u+w "$packet_mirror"
 python3 - "$context_mirror" <<'PY'
 import json
 import sys
@@ -234,15 +309,97 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(schema, handle, indent=2)
     handle.write("\n")
 PY
+python3 - "$packet_mirror" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    schema = json.load(handle)
+schema["properties"]["status"] = {"type": "string", "minLength": 1}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(schema, handle, indent=2)
+    handle.write("\n")
+PY
 chmod 0755 "$context_mirror"
-git -C "$campaign_repo" add schemas/orchestration/context-bundle.v1.schema.json
-git -C "$campaign_repo" commit -qm 'integrate context schema extension'
+git -C "$campaign_repo" add \
+  schemas/orchestration/context-bundle.v1.schema.json \
+  schemas/orchestration/state-packet.v0.schema.json
+git -C "$campaign_repo" commit -qm 'integrate consumer schema extensions'
 integrated_head="$(git -C "$campaign_repo" rev-parse HEAD)"
 integrated_sha="$(shasum -a 256 "$context_mirror" | awk '{print $1}')"
 integrated_mode="$(stat -f '%Lp' "$context_mirror")"
+packet_mirror_sha="$(shasum -a 256 "$packet_mirror" | awk '{print $1}')"
+packet_mirror_mode="$(stat -f '%Lp' "$packet_mirror")"
+
+invalid_packet="$campaign_repo/.singular-state/consumer-permissive-invalid-packet.json"
+python3 - "$invalid_packet" "$campaign_repo" <<'PY'
+import json
+import sys
+
+path, workspace = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "singular.orchestration.state-packet.v0",
+        "packetId": "RUN-CONSUMER-PERMISSIVE-invalid",
+        "runId": "RUN-CONSUMER-PERMISSIVE",
+        "taskId": "TASK-1115",
+        "area": "core",
+        "role": "l2-developer",
+        "status": "consumer-permissive-invalid",
+        "baseRef": "integration",
+        "branch": "integration",
+        "headSha": "not-reached",
+        "workspace": workspace,
+        "ownedFiles": [],
+        "changedFiles": [],
+        "commands": [],
+        "tests": [],
+        "evidence": [],
+        "blockers": [],
+        "nextAction": "must be rejected by immutable runtime schema",
+        "createdAt": "2026-09-13T00:00:00Z",
+    }, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+invalid_packet_json="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])),separators=(",",":")))' "$invalid_packet")"
+
+# Establish the counterfactual: the intentionally permissive consumer mirror
+# accepts this packet's invalid status. The public importer below must still
+# reject it at runtime-schema validation, before later import preconditions.
+(
+  cd "$campaign_repo"
+  env PYTHONDONTWRITEBYTECODE=1 SINGULAR_BASH_BIN="$BASH_BIN" \
+    SINGULAR_ROOT="$campaign_repo" SINGULAR_ENGINE_HOME="$frozen" \
+    "$BASH_BIN" -c \
+      'source "$1/engine/lib.sh"; singular_json_schema_check "$2" "$3" "consumer packet mirror"' \
+      bash "$frozen" "$invalid_packet_json" "$packet_mirror"
+) >/dev/null
+
+assert_runtime_schema_rejects_packet() {
+  local label="$1" output="" rc=0
+  output="$(run_frozen import-packet.sh "$invalid_packet" 2>&1)" || rc=$?
+  [[ "$rc" -eq 2 ]] || {
+    echo "$label: public importer did not reject invalid packet with exit 2 (got $rc)" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  }
+  [[ "$output" == *"packet schema validation failed"* ]] || {
+    echo "$label: public importer did not reject at runtime schema validation" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  }
+  [[ "$output" == *"state packet.status"* \
+      && "$output" != *"packet status must be accepted"* ]] || {
+    echo "$label: rejection did not identify the strict runtime status contract" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  }
+}
 
 # Record real gate/source evidence on the integrated tree before reconciliation.
 run_frozen campaign.sh verify --quiet
+assert_runtime_schema_rejects_packet "before reconcile"
 run_frozen gate-check.sh RUN-SCHEMA-OWNERSHIP \
   --task-id TASK-1115 -- true >/dev/null
 gate_report="$campaign_repo/.singular-state/runs/RUN-SCHEMA-OWNERSHIP/gate-report.json"
@@ -258,6 +415,8 @@ report = json.load(open(report_path, encoding="utf-8"))
 assert manifest["engine"]["sourceFingerprint"], manifest
 schema_policy = manifest["activePolicy"]["active-schema-root"]
 assert pathlib.Path(schema_policy["resolvedPath"]) == pathlib.Path(frozen, "schemas").resolve(), schema_policy
+packet_schema = manifest["evidence"]["packetSchema"]
+assert pathlib.Path(packet_schema["path"]) == pathlib.Path(frozen, "schemas/state-packet.v0.schema.json"), packet_schema
 assert report["outcome"] == "passed", report
 assert report["sourceIntegrity"]["status"] == "verified", report
 PY
@@ -272,6 +431,14 @@ assert_integrated_source_unchanged() {
   }
   [[ "$(stat -f '%Lp' "$context_mirror")" == "$integrated_mode" ]] || {
     echo "$label changed the integrated context schema mode" >&2
+    exit 1
+  }
+  [[ "$(shasum -a 256 "$packet_mirror" | awk '{print $1}')" == "$packet_mirror_sha" ]] || {
+    echo "$label rewrote the permissive consumer packet schema" >&2
+    exit 1
+  }
+  [[ "$(stat -f '%Lp' "$packet_mirror")" == "$packet_mirror_mode" ]] || {
+    echo "$label changed the permissive consumer packet schema mode" >&2
     exit 1
   }
   [[ "$(git -C "$campaign_repo" rev-parse HEAD)" == "$integrated_head" ]] || {
@@ -298,6 +465,7 @@ run_frozen reconcile.sh --dry-run >"$tmp/reconcile-dry-run.log"
 assert_integrated_source_unchanged "dry-run reconcile"
 run_frozen reconcile.sh --apply >"$tmp/reconcile-apply.log"
 assert_integrated_source_unchanged "apply reconcile"
+assert_runtime_schema_rejects_packet "after reconcile"
 
 # The gate's tracked-source snapshot remains byte-for-byte current because the
 # existing mirror was never opened for replacement, even by apply mode.
@@ -367,6 +535,30 @@ cmp -s "$frozen/schemas/context-graph.v0.schema.json" "$missing_mirror" || {
   exit 1
 }
 run_frozen reconcile.sh --apply >"$tmp/reconcile-missing-apply.log"
+run_frozen campaign.sh verify --quiet
+
+# An existing dangling entry is still consumer-owned, not a missing baseline.
+# Exercise the real reconcile path so the explicit -L preservation branch stays
+# covered without introducing archive-specific fixture machinery here.
+dangling_mirror="$campaign_repo/schemas/orchestration/audit-verdict.v0.schema.json"
+chmod u+w "$dangling_mirror"
+rm "$dangling_mirror"
+ln -s consumer-owned-missing-target.schema.json "$dangling_mirror"
+git -C "$campaign_repo" add schemas/orchestration/audit-verdict.v0.schema.json
+git -C "$campaign_repo" commit -qm 'track consumer-owned dangling schema entry'
+dangling_head="$(git -C "$campaign_repo" rev-parse HEAD)"
+run_frozen reconcile.sh --dry-run >"$tmp/reconcile-dangling.log"
+run_frozen reconcile.sh --apply >"$tmp/reconcile-dangling-apply.log"
+[[ -L "$dangling_mirror" \
+    && "$(readlink "$dangling_mirror")" == consumer-owned-missing-target.schema.json ]] || {
+  echo "routine reconcile replaced a consumer-owned dangling schema entry" >&2
+  exit 1
+}
+[[ "$(git -C "$campaign_repo" rev-parse HEAD)" == "$dangling_head" \
+    && -z "$(git -C "$campaign_repo" status --porcelain=v1 --untracked-files=all)" ]] || {
+  echo "dangling schema preservation changed consumer source state" >&2
+  exit 1
+}
 run_frozen campaign.sh verify --quiet
 
 echo "schema scaffold sync tests passed"
