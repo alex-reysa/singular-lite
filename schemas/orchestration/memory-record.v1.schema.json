@@ -43,10 +43,11 @@
     },
     "proposer": {
       "type": "object",
-      "required": ["actorId", "taskId"],
+      "required": ["actorId", "taskId", "credential"],
       "properties": {
         "actorId": { "type": "string", "minLength": 1 },
-        "taskId": { "type": "string", "minLength": 1 }
+        "taskId": { "type": "string", "minLength": 1 },
+        "credential": { "$ref": "#/$defs/credential" }
       }
     },
     "content": { "$ref": "#/$defs/artifact" },
@@ -87,9 +88,23 @@
         }
       ]
     },
+    "credential": {
+      "type": "object",
+      "required": ["path", "sha256", "claimsSha256", "keyId", "subjectId", "subjectType", "claims", "signature"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "claimsSha256": { "$ref": "#/$defs/sha256" },
+        "keyId": { "type": "string", "minLength": 1 },
+        "subjectId": { "type": "string", "minLength": 1 },
+        "subjectType": { "enum": ["human", "internal-role"] },
+        "claims": { "type": "object" },
+        "signature": { "type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$" }
+      }
+    },
     "decision": {
       "type": "object",
-      "required": ["authorityId", "subjectId", "subjectType", "roles", "source", "codeIdentity", "operationId", "decidedAt"],
+      "required": ["authorityId", "subjectId", "subjectType", "roles", "source", "codeIdentity", "operationId", "decidedAt", "credential"],
       "properties": {
         "authorityId": { "type": "string", "minLength": 1 },
         "subjectId": { "type": "string", "minLength": 1 },
@@ -98,7 +113,8 @@
         "source": { "$ref": "#/$defs/source" },
         "codeIdentity": { "type": "array", "items": { "$ref": "#/$defs/source" } },
         "operationId": { "type": "string", "minLength": 1 },
-        "decidedAt": { "type": "string", "format": "date-time" }
+        "decidedAt": { "type": "string", "format": "date-time" },
+        "credential": { "$ref": "#/$defs/credential" }
       }
     }
   }

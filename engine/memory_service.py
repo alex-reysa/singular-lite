@@ -13,6 +13,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -156,6 +157,8 @@ class MemoryStore:
         return records
 
     def _operation_path(self, operation_id: str) -> Path:
+        if not isinstance(operation_id, str) or not operation_id:
+            raise MemoryError("operation-id must be non-empty")
         name = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
         return self.store / "operations" / f"{name}.json"
 
@@ -167,18 +170,108 @@ class MemoryStore:
         fingerprint = _sha256(_canonical(request))
         if operation.get("operationId") != operation_id or operation.get("fingerprint") != fingerprint:
             raise MemoryError(f"operation-id conflict: {operation_id}")
+        self._recover_operation(path, operation)
         response = operation.get("response")
         if not isinstance(response, dict):
             raise MemoryError(f"operation record is corrupt: {operation_id}")
         return response
 
-    def remember(self, operation_id: str, request: Mapping[str, Any],
-                 response: dict[str, Any]) -> None:
-        _atomic_json(self._operation_path(operation_id), {
+    def _recover_operation(self, path: Path, operation: dict[str, Any]) -> None:
+        if operation.get("state") == "committed":
+            return
+        if operation.get("state") != "prepared":
+            raise MemoryError(f"operation journal is corrupt: {operation.get('operationId')}")
+        for record in operation.get("recordWrites", []):
+            if not isinstance(record, dict):
+                raise MemoryError("operation journal contains an invalid memory record")
+            self.write_record(record)
+        for checkpoint in operation.get("checkpointWrites", []):
+            if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("checkpointId"), str):
+                raise MemoryError("operation journal contains an invalid checkpoint")
+            _atomic_json(
+                self.store / "checkpoints" / f"{checkpoint['checkpointId']}.json",
+                checkpoint,
+            )
+        if operation.get("refreshIndex", False):
+            self._write_index_unlocked()
+        if os.environ.get("SINGULAR_MEMORY_FAIL_AFTER_STATE") == operation.get("operationId"):
+            raise MemoryError(
+                f"injected interruption after durable state: {operation.get('operationId')}"
+            )
+        operation["state"] = "committed"
+        _atomic_json(path, operation)
+
+    def commit_operation(
+        self,
+        operation_id: str,
+        request: Mapping[str, Any],
+        response: dict[str, Any],
+        *,
+        record_writes: list[dict[str, Any]] | None = None,
+        checkpoint_writes: list[dict[str, Any]] | None = None,
+        refresh_index: bool = False,
+    ) -> None:
+        path = self._operation_path(operation_id)
+        operation = {
             "operationId": operation_id,
             "fingerprint": _sha256(_canonical(request)),
             "response": response,
-        })
+            "state": "prepared",
+            "recordWrites": record_writes or [],
+            "checkpointWrites": checkpoint_writes or [],
+            "refreshIndex": refresh_index,
+        }
+        _atomic_json(path, operation)
+        if os.environ.get("SINGULAR_MEMORY_FAIL_AFTER_JOURNAL") == operation_id:
+            raise MemoryError(f"injected interruption after durable journal: {operation_id}")
+        self._recover_operation(path, operation)
+
+    def verify_credential(
+        self, credential_path: str, expected: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        configured_id = self.settings.get("credentialKeyId")
+        configured_hash = self.settings.get("credentialKeySha256")
+        if not isinstance(configured_id, str) or not configured_id:
+            raise MemoryError("memoryService.credentialKeyId must be configured")
+        if not isinstance(configured_hash, str) or not HASH_RE.match(configured_hash):
+            raise MemoryError("memoryService.credentialKeySha256 must be configured")
+        secret = os.environ.get("SINGULAR_MEMORY_CREDENTIAL_KEY")
+        if not secret or _sha256(secret.encode("utf-8")) != configured_hash:
+            raise MemoryError("authenticated host credential key is unavailable or invalid")
+        relative, _, raw = self.local_file(credential_path, "decision credential")
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MemoryError("decision credential is invalid") from exc
+        if not isinstance(document, dict):
+            raise MemoryError("decision credential must be an object")
+        signature = document.pop("signature", None)
+        expected_signature = "hmac-sha256:" + hmac.new(
+            secret.encode("utf-8"), _canonical(document), hashlib.sha256
+        ).hexdigest()
+        if not isinstance(signature, str) or not hmac.compare_digest(signature, expected_signature):
+            raise MemoryError("decision credential signature is invalid")
+        if document.get("schema") != "singular.memory.credential.v1":
+            raise MemoryError("decision credential schema is invalid")
+        if document.get("keyId") != configured_id:
+            raise MemoryError("decision credential key identity is invalid")
+        for key, value in expected.items():
+            if document.get(key) != value:
+                label = "credential subject" if key in {"subjectId", "subjectType"} else "credential claim"
+                raise MemoryError(f"{label} mismatch for {key}")
+        allowed = {"schema", "keyId", *expected.keys()}
+        if set(document) != allowed:
+            raise MemoryError("decision credential has unbound claims")
+        return {
+            "path": relative,
+            "sha256": _sha256(raw),
+            "claimsSha256": _sha256(_canonical(document)),
+            "keyId": configured_id,
+            "subjectId": str(document["subjectId"]),
+            "subjectType": str(document["subjectType"]),
+            "claims": document,
+            "signature": signature,
+        }
 
     def local_file(self, raw: str, label: str, maximum: int | None = None) -> tuple[str, Path, bytes]:
         relative = _relative(raw, label)
@@ -247,6 +340,10 @@ class MemoryStore:
             verified_code.append({"path": relative, "sha256": expected_code})
         if record is not None:
             policy = self.policy(record["policyId"])
+            if record.get("scope") not in policy["scopes"]:
+                raise MemoryError(
+                    f"memory scope {record.get('scope')!r} is revoked by current consumer policy"
+                )
             roles = document.get("roles", [])
             if not isinstance(roles, list) or not set(roles).intersection(policy["approverRoles"]):
                 raise MemoryError(f"authority has no policy approver role: {authority_id}")
@@ -315,6 +412,13 @@ class MemoryStore:
         policy = self.policy(args.policy)
         if args.scope not in policy["scopes"]:
             raise MemoryError(f"scope {args.scope!r} is not allowed by policy {args.policy!r}")
+        credential = self.verify_credential(args.credential, {
+            "action": "propose", "operationId": args.operation_id,
+            "subjectId": args.actor, "subjectType": "internal-role", "taskId": args.task,
+            "scope": args.scope, "policyId": args.policy,
+            "contentPath": args.content_file, "sourcePath": args.source,
+            "codePaths": args.code,
+        })
         content_rel, _, content = self.local_file(args.content_file, "content-file", self.max_content)
         source_rel, _, source = self.local_file(args.source, "retained source")
         code: list[dict[str, str]] = []
@@ -325,6 +429,7 @@ class MemoryStore:
             "kind": "propose", "taskId": args.task, "actorId": args.actor,
             "scope": args.scope, "policyId": args.policy, "content": content_rel,
             "source": source_rel, "code": code,
+            "credentialClaims": credential["claimsSha256"],
         }
         with self.locked():
             replay = self.replay(args.operation_id, request)
@@ -343,7 +448,8 @@ class MemoryStore:
                 "policyId": args.policy,
                 "proposal": {"operationId": args.operation_id, "taskId": args.task,
                              "createdAt": created},
-                "proposer": {"actorId": args.actor, "taskId": args.task},
+                "proposer": {"actorId": args.actor, "taskId": args.task,
+                             "credential": credential},
                 "content": {"path": content_rel, "sha256": _sha256(content),
                             "bytes": len(content)},
                 "sources": [{"path": source_rel, "sha256": _sha256(source)}],
@@ -351,10 +457,11 @@ class MemoryStore:
                 "createdAt": created,
                 "updatedAt": created,
             }
-            self.write_record(record)
-            self._write_index_unlocked()
             response = {"schema": "singular.memory.operation.v1", "memory": record}
-            self.remember(args.operation_id, request, response)
+            self.commit_operation(
+                args.operation_id, request, response,
+                record_writes=[record], refresh_index=True,
+            )
             return response
 
     def review(self, args: argparse.Namespace) -> dict[str, Any]:
@@ -364,15 +471,26 @@ class MemoryStore:
                 "eligible": record["status"] == "proposed", "authority": authority}
 
     def decide(self, args: argparse.Namespace, action: str) -> dict[str, Any]:
-        request = {"kind": action, "memoryId": args.memory_id,
-                   "authorityId": args.authority, "reason": getattr(args, "reason", None)}
         with self.locked():
-            replay = self.replay(args.operation_id, request)
-            if replay is not None:
-                return replay
             record = self.read_record(args.memory_id)
             permission = "reject" if action == "quarantine" else action
             authority = self.authority(args.authority, permission, record)
+            expected_credential = {
+                "action": action, "operationId": args.operation_id,
+                "subjectId": authority["subjectId"],
+                "subjectType": authority["subjectType"],
+                "authorityId": args.authority, "memoryId": args.memory_id,
+            }
+            if getattr(args, "reason", None) is not None:
+                expected_credential["reason"] = args.reason
+            credential = self.verify_credential(args.credential, expected_credential)
+            request = {"kind": action, "memoryId": args.memory_id,
+                       "authorityId": args.authority,
+                       "reason": getattr(args, "reason", None),
+                       "credentialClaims": credential["claimsSha256"]}
+            replay = self.replay(args.operation_id, request)
+            if replay is not None:
+                return replay
             if record["status"] != "proposed":
                 raise MemoryError(f"{action} requires proposed memory; found {record['status']}")
             if action == "approve":
@@ -389,24 +507,34 @@ class MemoryStore:
             record[decision_field] = {
                 **authority, "operationId": args.operation_id,
                 "reason": getattr(args, "reason", None), "decidedAt": _now(),
+                "credential": credential,
             }
             record["updatedAt"] = _now()
-            self.write_record(record)
-            self._write_index_unlocked()
             response = {"schema": "singular.memory.operation.v1", "memory": self.view(record)}
-            self.remember(args.operation_id, request, response)
+            self.commit_operation(
+                args.operation_id, request, response,
+                record_writes=[record], refresh_index=True,
+            )
             return response
 
     def supersede(self, args: argparse.Namespace) -> dict[str, Any]:
-        request = {"kind": "supersede", "memoryId": args.memory_id,
-                   "by": args.by, "authorityId": args.authority}
         with self.locked():
-            replay = self.replay(args.operation_id, request)
-            if replay is not None:
-                return replay
             old = self.read_record(args.memory_id)
             replacement = self.read_record(args.by)
             authority = self.authority(args.authority, "supersede", old)
+            credential = self.verify_credential(args.credential, {
+                "action": "supersede", "operationId": args.operation_id,
+                "subjectId": authority["subjectId"],
+                "subjectType": authority["subjectType"],
+                "authorityId": args.authority, "memoryId": args.memory_id,
+                "byMemoryId": args.by,
+            })
+            request = {"kind": "supersede", "memoryId": args.memory_id,
+                       "by": args.by, "authorityId": args.authority,
+                       "credentialClaims": credential["claimsSha256"]}
+            replay = self.replay(args.operation_id, request)
+            if replay is not None:
+                return replay
             if old["status"] != "approved" or replacement["status"] != "approved":
                 raise MemoryError("supersession requires approved current and replacement memories")
             if self.trust(replacement) != "trusted":
@@ -414,34 +542,46 @@ class MemoryStore:
             old["status"] = "superseded"
             old["trust"] = "retired"
             old["supersession"] = {**authority, "operationId": args.operation_id,
-                                    "byMemoryId": args.by, "decidedAt": _now()}
+                                    "byMemoryId": args.by, "decidedAt": _now(),
+                                    "credential": credential}
             old["updatedAt"] = _now()
-            self.write_record(old)
-            self._write_index_unlocked()
             response = {"schema": "singular.memory.operation.v1", "memory": old}
-            self.remember(args.operation_id, request, response)
+            self.commit_operation(
+                args.operation_id, request, response,
+                record_writes=[old], refresh_index=True,
+            )
             return response
 
     def tombstone(self, args: argparse.Namespace) -> dict[str, Any]:
-        request = {"kind": "tombstone", "memoryId": args.memory_id,
-                   "authorityId": args.authority, "reason": args.reason}
         with self.locked():
+            record = self.read_record(args.memory_id)
+            authority = self.authority(args.authority, "tombstone", record)
+            credential = self.verify_credential(args.credential, {
+                "action": "tombstone", "operationId": args.operation_id,
+                "subjectId": authority["subjectId"],
+                "subjectType": authority["subjectType"],
+                "authorityId": args.authority, "memoryId": args.memory_id,
+                "reason": args.reason,
+            })
+            request = {"kind": "tombstone", "memoryId": args.memory_id,
+                       "authorityId": args.authority, "reason": args.reason,
+                       "credentialClaims": credential["claimsSha256"]}
             replay = self.replay(args.operation_id, request)
             if replay is not None:
                 return replay
-            record = self.read_record(args.memory_id)
-            authority = self.authority(args.authority, "tombstone", record)
             if record["status"] not in {"approved", "superseded"}:
                 raise MemoryError(f"tombstone cannot retire status {record['status']}")
             record["status"] = "tombstoned"
             record["trust"] = "retired"
             record["tombstone"] = {**authority, "operationId": args.operation_id,
-                                   "reason": args.reason, "decidedAt": _now()}
+                                   "reason": args.reason, "decidedAt": _now(),
+                                   "credential": credential}
             record["updatedAt"] = _now()
-            self.write_record(record)
-            self._write_index_unlocked()
             response = {"schema": "singular.memory.operation.v1", "memory": record}
-            self.remember(args.operation_id, request, response)
+            self.commit_operation(
+                args.operation_id, request, response,
+                record_writes=[record], refresh_index=True,
+            )
             return response
 
     def rebuild(self) -> dict[str, Any]:
@@ -449,6 +589,11 @@ class MemoryStore:
             return self._write_index_unlocked()
 
     def checkpoint_save(self, args: argparse.Namespace) -> dict[str, Any]:
+        credential = self.verify_credential(args.credential, {
+            "action": "checkpoint", "operationId": args.operation_id,
+            "subjectId": args.actor, "subjectType": "internal-role", "taskId": args.task,
+            "payloadPath": args.payload_file, "sourcePath": args.source,
+        })
         payload_rel, _, raw = self.local_file(args.payload_file, "checkpoint payload",
                                               self.max_checkpoint)
         try:
@@ -457,7 +602,8 @@ class MemoryStore:
             raise MemoryError("checkpoint payload must be valid UTF-8 JSON") from exc
         source_rel, _, source = self.local_file(args.source, "retained source")
         request = {"kind": "checkpoint-save", "taskId": args.task,
-                   "actorId": args.actor, "payload": payload_rel, "source": source_rel}
+                   "actorId": args.actor, "payload": payload_rel, "source": source_rel,
+                   "credentialClaims": credential["claimsSha256"]}
         with self.locked():
             replay = self.replay(args.operation_id, request)
             if replay is not None:
@@ -470,10 +616,12 @@ class MemoryStore:
                 "taskId": args.task, "actorId": args.actor, "payload": payload,
                 "payloadSource": {"path": payload_rel, "sha256": _sha256(raw)},
                 "sources": [{"path": source_rel, "sha256": _sha256(source)}],
+                "credential": credential,
                 "createdAt": _now(),
             }
-            _atomic_json(self.store / "checkpoints" / f"{checkpoint_id}.json", result)
-            self.remember(args.operation_id, request, result)
+            self.commit_operation(
+                args.operation_id, request, result, checkpoint_writes=[result]
+            )
             return result
 
     def checkpoint_recover(self, task: str) -> dict[str, Any]:
@@ -509,26 +657,56 @@ def trusted_memories(config_path: Path, root: Path, role: str) -> list[dict[str,
             return []
         raise
     results: list[dict[str, Any]] = []
-    for record in store.records():
-        policy = store.policy(record["policyId"])
-        if role not in policy["contextRoles"] or store.trust(record) != "trusted":
-            continue
-        content = record["content"]
-        path = _contained(root, content["path"], "authored artifact")
-        raw = path.read_bytes()
-        results.append({
-            "ref": "memory:" + record["memoryId"], "path": path,
-            "relativePath": content["path"], "raw": raw,
-            "sha256": content["sha256"], "title": PurePosixPath(content["path"]).name,
-            "provenance": {
-                "origin": SCHEMA,
-                "proposal": record["proposal"],
-                "proposer": record["proposer"],
-                "sources": record["sources"],
-                "approval": record["approval"],
-                "policyId": record["policyId"],
-            },
-        })
+    with store.locked():
+        for record in store.records():
+            policy = store.policy(record["policyId"])
+            if role not in policy["contextRoles"] or store.trust(record) != "trusted":
+                continue
+            dependencies: dict[Path, str] = {}
+
+            def dependency(relative: str, expected: str, label: str) -> tuple[Path, bytes]:
+                _, path, raw = store.local_file(relative, label)
+                actual = _sha256(raw)
+                if actual != expected:
+                    raise MemoryError(f"{label} identity drift: {relative}")
+                dependencies[path] = actual
+                return path, raw
+
+            record_path = store._record_path(record["memoryId"])
+            record_raw = record_path.read_bytes()
+            dependencies[record_path] = _sha256(record_raw)
+            content = record["content"]
+            path, raw = dependency(content["path"], content["sha256"], "authored artifact")
+            for source in record["sources"]:
+                dependency(source["path"], source["sha256"], "retained source")
+            for source in record.get("codeIdentity", []):
+                dependency(source["path"], source["sha256"], "code provenance")
+            approval = record["approval"]
+            dependency(
+                approval["source"]["path"], approval["source"]["sha256"],
+                "approval authority source",
+            )
+            for source in approval.get("codeIdentity", []):
+                dependency(source["path"], source["sha256"], "approval code identity")
+            results.append({
+                "ref": "memory:" + record["memoryId"], "path": path,
+                "relativePath": content["path"], "raw": raw,
+                "sha256": content["sha256"], "title": PurePosixPath(content["path"]).name,
+                "eligibilityInputs": [
+                    {"path": input_path, "sha256": input_hash}
+                    for input_path, input_hash in sorted(
+                        dependencies.items(), key=lambda item: str(item[0])
+                    )
+                ],
+                "provenance": {
+                    "origin": SCHEMA,
+                    "proposal": record["proposal"],
+                    "proposer": record["proposer"],
+                    "sources": record["sources"],
+                    "approval": record["approval"],
+                    "policyId": record["policyId"],
+                },
+            })
     return sorted(results, key=lambda item: item["ref"])
 
 
@@ -538,6 +716,7 @@ def _leaf(subparsers: argparse._SubParsersAction, name: str, help_text: str,
     parser.add_argument("--config")
     if operation:
         parser.add_argument("--operation-id", required=True)
+        parser.add_argument("--credential", required=True)
     if authority:
         parser.add_argument("--authority", required=True)
     return parser

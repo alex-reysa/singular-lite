@@ -642,6 +642,8 @@ human (rather than an authorized internal reviewer role) is required:
     "storePath": ".singular-memory",
     "maxContentBytes": 16384,
     "maxCheckpointBytes": 32768,
+    "credentialKeyId": "host-memory-key-v1",
+    "credentialKeySha256": "sha256:...",
     "authorities": {
       "independent-reviewer": {
         "source": "policy/memory-reviewer.json",
@@ -669,31 +671,52 @@ human (rather than an authorized internal reviewer role) is required:
 
 Routine policy-authorized internal approval does not interrupt the user.
 Set `humanReviewRequired` only for consumers that require it. The service
+requires every proposal, lifecycle decision, and checkpoint write to carry an
+operation-bound HMAC credential minted by the host. The credential binds the
+authenticated subject, action, operation, target memory, and relevant reason or
+replacement; `SINGULAR_MEMORY_CREDENTIAL_KEY` is host-held and must match the
+configured key hash. Merely naming a configured authority or proposer is never
+sufficient. Human-only consumers additionally require a credential whose
+authenticated subject matches the configured human authority.
+
+The service
 revalidates retained sources, authored artifact bytes, authority documents, and
 configured code identity before trusted retrieval. Missing or drifted identity
 fails closed. Rejection, supersession, and tombstones are durable record states;
 the trusted index is derived and can be rebuilt without restoring retired
-content. Operation IDs provide conflict-detecting idempotent replay, and bounded
+content. Each lifecycle mutation first persists a write-ahead operation journal
+containing its exact request fingerprint, response, and intended record writes;
+a fresh process deterministically completes a prepared journal before returning
+an idempotent replay. Context snapshots bind the approved artifact, memory
+record, citations, current policy, authority source, and applicable code
+identity, and revalidate them immediately before returning retrieved bytes.
+Operation IDs provide conflict-detecting idempotent replay, and bounded
 checkpoints recover solely from local retained files:
 
 ```bash
 singular memory propose --operation-id capture-1 --task TASK-1234 \
   --actor implementer-1 --scope project --policy task \
-  --content-file findings/retry.md --source events/task-complete.json
+  --content-file findings/retry.md --source events/task-complete.json \
+  --credential .host-credentials/capture-1.json
 singular memory review --memory-id mem-... --authority independent-reviewer
 singular memory approve --operation-id approve-1 --memory-id mem-... \
-  --authority independent-reviewer
+  --authority independent-reviewer --credential .host-credentials/approve-1.json
 singular memory reject --operation-id reject-1 --memory-id mem-... \
-  --authority independent-reviewer --reason "not reusable"
+  --authority independent-reviewer --reason "not reusable" \
+  --credential .host-credentials/reject-1.json
 singular memory quarantine --operation-id quarantine-1 --memory-id mem-... \
-  --authority independent-reviewer --reason "citation requires investigation"
+  --authority independent-reviewer --reason "citation requires investigation" \
+  --credential .host-credentials/quarantine-1.json
 singular memory supersede --operation-id supersede-1 --memory-id mem-old \
-  --by mem-new --authority independent-reviewer
+  --by mem-new --authority independent-reviewer \
+  --credential .host-credentials/supersede-1.json
 singular memory tombstone --operation-id retire-1 --memory-id mem-... \
-  --authority independent-reviewer --reason "policy retirement"
+  --authority independent-reviewer --reason "policy retirement" \
+  --credential .host-credentials/retire-1.json
 singular memory checkpoint save --operation-id cp-1 --task TASK-1234 \
   --actor implementer-1 --payload-file checkpoints/task.json \
-  --source events/task-progress.json
+  --source events/task-progress.json \
+  --credential .host-credentials/cp-1.json
 singular memory checkpoint recover --task TASK-1234
 singular memory rebuild
 ```

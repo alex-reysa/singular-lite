@@ -195,6 +195,7 @@ class ContextService:
         budget_bytes: int,
         budget_source: str = "contextService.budgetBytes",
         eligibility_inputs: tuple[tuple[Path, str], ...] = (),
+        memory_eligibility_inputs: tuple[tuple[Path, str], ...] = (),
     ) -> None:
         self.enabled = enabled
         self.root = root
@@ -209,6 +210,7 @@ class ContextService:
         self.budget_bytes = budget_bytes
         self.budget_source = budget_source
         self.eligibility_inputs = eligibility_inputs
+        self.memory_eligibility_inputs = memory_eligibility_inputs
         self.policy_identity = {
             "version": POLICY_BINDING_VERSION,
             "configPath": str(config_path),
@@ -227,6 +229,10 @@ class ContextService:
             "policyVersion": POLICY_VERSION,
             "configSha256": config_hash,
             "sources": source_versions,
+            "eligibilityInputs": [
+                {"path": str(path), "sha256": digest}
+                for path, digest in eligibility_inputs
+            ],
         }
         self.identity = {
             "projectId": project_id,
@@ -323,12 +329,23 @@ class ContextService:
 
         sources: list[Source] = []
         eligibility_inputs: dict[Path, str] = {}
+        memory_eligibility_inputs: dict[Path, str] = {}
         if "memory" in allowed:
             try:
                 memories = memory_service.trusted_memories(config_path, root, role)
             except memory_service.MemoryError as exc:
                 raise ContextError(f"memory source is invalid: {exc}") from exc
             for item in memories:
+                for dependency in item["eligibilityInputs"]:
+                    path = Path(dependency["path"]).resolve()
+                    expected = dependency["sha256"]
+                    prior = memory_eligibility_inputs.get(path)
+                    if prior is not None and prior != expected:
+                        raise ContextError(
+                            f"memory source has conflicting snapshot identity: {path}"
+                        )
+                    memory_eligibility_inputs[path] = expected
+                    eligibility_inputs[path] = expected
                 sources.append(Source(
                     ref=item["ref"],
                     kind="memory",
@@ -419,6 +436,9 @@ class ContextService:
             eligibility_inputs=tuple(sorted(
                 eligibility_inputs.items(), key=lambda item: str(item[0])
             )),
+            memory_eligibility_inputs=tuple(sorted(
+                memory_eligibility_inputs.items(), key=lambda item: str(item[0])
+            )),
         )
 
     def describe(self) -> dict[str, Any]:
@@ -481,6 +501,32 @@ class ContextService:
             if current != source.raw:
                 raise ContextError(
                     f"configured source changed during invocation: {source.ref}"
+                )
+
+    def validate_memory_snapshot(self) -> None:
+        """Refuse retirement or dependency drift of snapshotted memory."""
+        if not self.memory_eligibility_inputs:
+            return
+        try:
+            current_config = self.config_path.read_bytes()
+        except OSError as exc:
+            raise ContextError(
+                f"context configuration changed during invocation: {self.config_path}: {exc}"
+            ) from exc
+        if _sha256(current_config) != self.config_hash:
+            raise ContextError(
+                f"context configuration changed during invocation: {self.config_path}"
+            )
+        for path, expected_hash in self.memory_eligibility_inputs:
+            try:
+                current = path.read_bytes()
+            except OSError as exc:
+                raise ContextError(
+                    f"context eligibility metadata changed during invocation: {path}: {exc}"
+                ) from exc
+            if _sha256(current) != expected_hash:
+                raise ContextError(
+                    f"context eligibility metadata changed during invocation: {path}"
                 )
 
     def _disabled(self, schema: str) -> dict[str, Any]:
@@ -552,6 +598,7 @@ class ContextService:
             raise ContextError("search query must be non-empty")
         if limit < 0 or max_bytes < 0:
             raise ContextError("search limit and max-bytes must be non-negative")
+        self.validate_memory_snapshot()
         ranked: list[tuple[int, str, list[str], Source]] = []
         for source in self.sources:
             if source.raw is None or source.validity not in {"current", "current-reviewed"}:
@@ -587,7 +634,7 @@ class ContextService:
                 "truncated": truncated,
                 "provenance": source.provenance,
             })
-        return {
+        result = {
             "schema": SEARCH_SCHEMA,
             "status": "ok",
             "identity": self.identity,
@@ -602,6 +649,8 @@ class ContextService:
                 "usedBytes": max_bytes - remaining, "remainingBytes": remaining,
             },
         }
+        self.validate_memory_snapshot()
+        return result
 
     def get(
         self,
@@ -621,6 +670,8 @@ class ContextService:
         if start_line < 1 or (line_count is not None and line_count < 1) or max_bytes < 0:
             raise ContextError("pagination values are outside their valid range")
         source = self._source(ref)
+        if source.kind == "memory":
+            self.validate_memory_snapshot()
         if source.raw is None or source.validity == "missing":
             raise ContextError(f"missing source: {ref}: {source.path}")
         if source.validity not in {"current", "current-reviewed"}:
@@ -710,7 +761,7 @@ class ContextService:
         has_more = truncated_bytes or target_end < section_end
         line_at_start = selected[:relative_start].count(b"\n") + 1
         next_line = line_at_start + page.count(b"\n")
-        return {
+        result = {
             "schema": GET_SCHEMA,
             "status": "ok",
             "identity": self.identity,
@@ -735,6 +786,9 @@ class ContextService:
             "provenance": source.provenance,
             "budget": {"unit": "utf8-bytes", "limitBytes": max_bytes, "usedBytes": len(page)},
         }
+        if source.kind == "memory":
+            self.validate_memory_snapshot()
+        return result
 
     @staticmethod
     def _obligations(source: Source) -> list[tuple[int, int, bytes]]:

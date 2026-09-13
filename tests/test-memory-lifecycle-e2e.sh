@@ -17,6 +17,8 @@ import json, sys
 schema = json.load(open(sys.argv[1], encoding="utf-8"))
 assert schema["$id"] == "singular.orchestration.memory-record.v1"
 assert schema["properties"]["schema"]["const"] == "singular.orchestration.memory-record.v1"
+assert "credential" in schema["properties"]["proposer"]["required"]
+assert "credential" in schema["$defs"]["decision"]["required"]
 PY
 
 echo "test-memory-lifecycle-e2e: all assertions passed"
