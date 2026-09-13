@@ -1,0 +1,307 @@
+{
+  "schema": "singular.orchestration.gate-result.v1",
+  "node": "context-invocations",
+  "status": "passed",
+  "authoritative": true,
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A11:sha256:d1450174d00a7fb1367918cf559ab6932b605860b0630765b651c72be8912cb9:epoch:cbf4c3f9fa29b5f3a967d7aea73cf88d033468d5a93bce43",
+  "evidenceClass": "deterministic-proof",
+  "evidence": [
+    {
+      "kind": "source-path",
+      "ref": "tests/test-context-invocation-e2e.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "e1adafb7dfe327c9eeb424aa84eb10e9bedab097e3e3d59b886977c2b4da08cf"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/run.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "b8bf1a2333426e6c6565292d43153e6edb1c15cd8d5da59434a44f3f9604fe47"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test_context_invocation.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "69c0c0aec7786ef9d0930216a639bda66feca9494e108f451e84512e873d8655"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test_evidence_delivery.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "7a274a32d74fef013d6da67390593d2b920a2106f12f3560997ed3f57db63b95"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test_context_service.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "0853ee6ddab864058ed318c817f3d80ea873dee52993f9a612d027d30c899f77"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-campaign-freeze.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "0a09d12b52c19728b4ee6e92e4ec049d6cf773f805319bce6b12f2120901e9ea"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-context-service-e2e.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "55d747e0a724e00bc675b0845eddcd9ef6a692cb9e84a5d648ccab99c7595f22"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-decider-fastpath.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "49e8c5bf034ecf1ec2ccc419b5b58303ab035de4add0bf39c65161b935961ed4"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-effective-config-parity.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "3fd6058381747eab7cbe540c00f8cdd4f50ebde4e4c688d76f2e38051fa7b872"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-frozen-campaign-terminal.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "072351e839b97ae6b11144c74391cd78d468420df8a6aa11ca2f266295fa6674"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-scope-check.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "978425030b1324ad9bd754abe32ff58e79ae2918d28780082a157c2f637315af"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-secret-scan.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "3a34dd505fe7d291e5f7ec5a2908b28731153d8944ee7ef51e0e8d008e724120"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-evidence-manifest.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "da70306b7e27ce4d944a264b54c721a8b764be1cde07bf1d58cd14c6853730c6"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-readonly-evidence-access.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "fca89eb2c5cbbf8037d9eb35fa768c24b7f603743aca2e4ed9a2441bb498e9c1"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-task-lifecycle.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "88047a3f9b11fc6a7377b4374d5cc319a2f05010dcbbaedbd935ae3cb2489ee7"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-no-changes-prior-commit.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "f90891be2f02aea78c9831837209b6378e417e2bf59cf1c681b4c2d1b91ffbf9"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/l1-drive.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "a917e5949930f9138e0bc30e521654b763bf4e164da533a7b2b90ec508f2f456"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/generate-tasks.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "23e4c5ec367925655931320d64ff2b6e597dcd0f6b2a813259382bafe1822221"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/l1-plan-node.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "d7b077c4d858fc625ec2e01e8323f4c070c8d0f6b21d5d27f5ab592a2311c083"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/ctx-planner-session.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "c024355157f612a18ae6f03216de3977fc510e578ec44f9c6387f30f18a0cdca"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/ctx-paired-audit.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "bcb07287adf61688a57d586e1f6a81e71bc31ad58aa53cdd1abd856ff4bc50e8"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/ctx-rehydrate-event.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "c95fe547544af19da801d5d60aee317a4d187aa1fea1ea0da4f784888c795c67"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/context_service.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "6df2f46e9194cc77d22b0f6f23b68d3b74ab948ed912f68cf59703ddf8cba707"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/brain_documents.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "aef4b4d6f90306ff0acb04660aad06fc67ad76d45e225661de0f42699df9afb2"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/context_cli.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "3e0a6776e043ac87d5858381f2727f018114ace1d39646fc9906e4334fe1577c"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/doctor.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "7da786a4af5716ea81612dcbb6798a3e424653780cd0d9c3fbf2f8bd7582b662"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/evidence_delivery.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "4525e5ffa624cedd35e2753d6a5de581bc2ae12f5421bf984fce05499083e54e"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/campaign_manifest.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "6e54ce00ebb3e620735d5c581ec04436be4000ebc80dd4bf6d4d75f51830d235"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/campaign.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "cf7d47b5b40105b6e97f8716e76b355afb1b336674d2dee49aa1251ab7c2811b"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/git_changes.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "be9bc0f0bf822def9ae6e40947464252e963a939ff262f5ba2db0fc7589f9491"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/scope-check.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "9d31cbd222384a06521fef3ed2d8740f5ddf70300cad7d98e583cadd147748d2"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/secret-scan.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "11d3eaede9e956baf56ecb29dfa69b833a4156990ee6fbb3e2f68601ea6d7a43"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/secret-patterns.tsv",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "ffdee1b305f3d007827ade7f3623a6f6c47c9ebce9ac5fbd18a349d319aeaf4a"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/evidence-manifest.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "a660a632c3cea9e3956937f69897e351bb559bf73f5c2f6021ef26f91c58e86d"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/ops.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "850c249926e804a9c374840fab051c4f4525d5b556ce410096bf7f5d4f1af130"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/lifecycle.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "d09254fb95ac67566b3e37fdee6021f817cc6cf9e45a8e809d488caeba0021c7"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/task_lifecycle.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "678507dc8dc1da16c4cbd5cffa48fb48c8dd11668da20cd18df37ad84c75e035"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/lib.sh",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "4b410ed995c2358c11361d434c7037179e359575f2bc7ff5ac153e1a5c7ea98b"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/provider_resolver.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "06e04f99f0fc82a871306849529cdeeb42b6a5b99f8f2ff140961f1e3de2d4d1"
+    },
+    {
+      "kind": "source-path",
+      "ref": "cli/singular",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "b508a05dacc7cc1e686dd8fc1514b4021b48dcfdd7245b8046bfa568d5068e1e"
+    },
+    {
+      "kind": "source-path",
+      "ref": "plugin/scripts/singular_graph_server.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "6ce98c76aaf4fdbe69bf052a86a3278b082e4d4276d4b11c76f196a0e000eb0a"
+    },
+    {
+      "kind": "source-path",
+      "ref": "plugin/scripts/test_singular_graph_server.py",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "8c84c6341cb8b75a98492b8a979786314fa9b40e2be4949b480148fe5c07db06"
+    },
+    {
+      "kind": "source-path",
+      "ref": "schemas/context-bundle.v1.schema.json",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "191183a1b813ee514cffc60393d5b436fc281913fc01648417c3dc90d5d79343"
+    },
+    {
+      "kind": "source-path",
+      "ref": "schemas/orchestration/context-bundle.v1.schema.json",
+      "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
+      "sha256": "191183a1b813ee514cffc60393d5b436fc281913fc01648417c3dc90d5d79343"
+    },
+    {
+      "kind": "task-set",
+      "ref": "context-invocations-integrated-tasks",
+      "description": "Integrated task slices cited by the context-invocations gate-result candidate.",
+      "taskIds": [
+        "TASK-1113"
+      ],
+      "sha256": "0579f9bd15df0512aa3ccf7c49ab6a9cb1b9e7e18ec713100ccbe09853bc08df"
+    },
+    {
+      "kind": "command-log",
+      "ref": "context-invocations-regression",
+      "description": "Authoritative registered acceptance command captured on the exact promoted tree during integration or L0 gate promotion.",
+      "command": "bash tests/run.sh test-context-invocation-e2e.sh",
+      "exitCode": 0,
+      "logRef": "docs/orchestration/gates/evidence/context-invocations.regression.txt",
+      "sha256": "34b4c37998ddbab22c0c0a167918a54fee4148b77dea3a619b02078ebeafc0f3",
+      "headSha": "81e624622cb349ecca618d0487e252c9c899a53b"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "docs/orchestration/gates/evidence/context-invocations.gate-report.json",
+      "sha256": "580ff9557820f0b304e7890bbfa57bd01e427b46522d5fe14f9c86d79881f4f0",
+      "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
+    }
+  ],
+  "upstreamGates": [
+    "context-service"
+  ],
+  "decidedBy": "l0-gate-promoter",
+  "rationale": "Integrated audited end-to-end acceptance for context-invocations plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
+  "recordedAt": "2026-09-13T05:09:44Z",
+  "verificationClassification": "passed",
+  "gateReportRef": "docs/orchestration/gates/evidence/context-invocations.gate-report.json"
+}

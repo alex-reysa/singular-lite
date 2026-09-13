@@ -3,7 +3,7 @@
   "node": "brain-package",
   "status": "passed",
   "authoritative": true,
-  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A10:sha256:32433b41ebae6e9128eba3c55785eaf203bd7a0e51afa46838cf650ec2b9598d:epoch:bddb11fc2d7dbd22d35df6216dc74f8091dfd2d0d9694950",
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A11:sha256:d1450174d00a7fb1367918cf559ab6932b605860b0630765b651c72be8912cb9:epoch:cbf4c3f9fa29b5f3a967d7aea73cf88d033468d5a93bce43",
   "evidenceClass": "deterministic-proof",
   "evidence": [
     {
@@ -58,31 +58,31 @@
       "kind": "source-path",
       "ref": "engine/ctx-rehydrate-event.sh",
       "description": "Explicit brain-package implementation or acceptance-test input for the promoted gate.",
-      "sha256": "b5a5d99a41c6e1cf8b31ea86e0db1e9757a6e14c7438214c1bed8431405103cd"
+      "sha256": "c95fe547544af19da801d5d60aee317a4d187aa1fea1ea0da4f784888c795c67"
     },
     {
       "kind": "source-path",
       "ref": "engine/l1-drive.sh",
       "description": "Explicit brain-package implementation or acceptance-test input for the promoted gate.",
-      "sha256": "d9a4f8f6839c7d4b19a062350ce7fb528ae8594e4e4e518c3e1a411650dd9b44"
+      "sha256": "a917e5949930f9138e0bc30e521654b763bf4e164da533a7b2b90ec508f2f456"
     },
     {
       "kind": "source-path",
       "ref": "engine/doctor.py",
       "description": "Explicit brain-package implementation or acceptance-test input for the promoted gate.",
-      "sha256": "128d99b15b37237f0dff4a06360441e22dc9dccf377214b5a9cd0ab4fd7601e9"
+      "sha256": "7da786a4af5716ea81612dcbb6798a3e424653780cd0d9c3fbf2f8bd7582b662"
     },
     {
       "kind": "source-path",
       "ref": "engine/campaign_manifest.py",
       "description": "Explicit brain-package implementation or acceptance-test input for the promoted gate.",
-      "sha256": "02b9d7b397e015af4accbb56f834bd7910ce14db3bfd477803ac71d06baa5354"
+      "sha256": "6e54ce00ebb3e620735d5c581ec04436be4000ebc80dd4bf6d4d75f51830d235"
     },
     {
       "kind": "source-path",
       "ref": "cli/singular",
       "description": "Explicit brain-package implementation or acceptance-test input for the promoted gate.",
-      "sha256": "ffd347ec9825fb174123fd8101d3047e457310a02f699f26866caf49d0ba168b"
+      "sha256": "b508a05dacc7cc1e686dd8fc1514b4021b48dcfdd7245b8046bfa568d5068e1e"
     },
     {
       "kind": "source-path",
@@ -119,19 +119,19 @@
       "exitCode": 0,
       "logRef": "docs/orchestration/gates/evidence/brain-package.regression.txt",
       "sha256": "cf52b7fc253b588d1713ebb66dfc4ea7262b4a845bf5706783c826ec42d0e53f",
-      "headSha": "b9f1c6117cc2731e7e089747db1543cda3147dff"
+      "headSha": "81e624622cb349ecca618d0487e252c9c899a53b"
     },
     {
       "kind": "gate-report",
       "ref": "docs/orchestration/gates/evidence/brain-package.gate-report.json",
-      "sha256": "57138d38309fc062e8406975275e8d42c63f3962a8e44fd9be9eb98e33d3475f",
+      "sha256": "d197e9d592e2c2ec93ce9764a95641eadd3f01f1182f213eeb16214843584681",
       "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
     }
   ],
   "upstreamGates": [],
   "decidedBy": "l0-gate-promoter",
   "rationale": "Integrated audited end-to-end acceptance for brain-package plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
-  "recordedAt": "2026-09-12T21:32:58Z",
+  "recordedAt": "2026-09-13T05:06:28Z",
   "verificationClassification": "passed",
   "gateReportRef": "docs/orchestration/gates/evidence/brain-package.gate-report.json"
 }
