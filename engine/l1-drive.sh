@@ -155,7 +155,7 @@ except Exception:
 authority = lease.get("recoveryAuthorization")
 if not isinstance(authority, dict) or authority.get("action") != "repair":
     raise SystemExit(0)
-if authority.get("state") not in {"issued", "claimed"}:
+if authority.get("state") not in {"issued", "claimed", "audit-accepted", "gate-passed"}:
     raise SystemExit(0)
 for key in (
     "authorizationId", "successorRunId", "successorBranch", "successorWorktree",
@@ -232,6 +232,7 @@ accepted_checkpoint_packet=""
 accepted_checkpoint_base=""
 accepted_checkpoint_head=""
 accepted_checkpoint_workspace=""
+accepted_checkpoint_recognition=""
 l1_refuse_recognized_accepted_checkpoint() {
   local reason="$1"
   echo "AWAITING EVIDENCE: $task_id — accepted checkpoint preserved; resume refused ($reason)." >&2
@@ -244,17 +245,32 @@ if [[ -f "$lease_path" ]]; then
       && "$retained_lease_run" != */* \
       && "$retained_lease_run" != *..* ]]; then
     retained_packet="$SINGULAR_RUNS_DIR/$retained_lease_run/packet.json"
+    retained_audit="$(singular_audit_record_path "$retained_lease_run")"
     if [[ -f "$retained_packet" ]]; then
       mapfile -d '' -t _accepted_checkpoint_fields < <(
-        python3 - "$retained_packet" "$retained_lease_status" <<'PY' 2>/dev/null || true
+        python3 - "$retained_packet" "$retained_audit" "$retained_lease_status" <<'PY' 2>/dev/null || true
 import json
 import sys
 
-path, lease_status = sys.argv[1:]
-packet = json.load(open(path, encoding="utf-8"))
-blockers = packet.get("blockers", [])
+path, audit_path, lease_status = sys.argv[1:]
+packet = None
+try:
+    value = json.load(open(path, encoding="utf-8"))
+    if isinstance(value, dict):
+        packet = value
+except Exception:
+    pass
+audit_accepted = False
+try:
+    audit = json.load(open(audit_path, encoding="utf-8"))
+    audit_accepted = isinstance(audit, dict) and audit.get("verdict") == "accepted"
+except Exception:
+    pass
+blockers = packet.get("blockers", []) if isinstance(packet, dict) else None
 awaiting = (
-    packet.get("status") == "blocked"
+    isinstance(packet, dict)
+    and packet.get("status") == "blocked"
+    and isinstance(blockers, list)
     and any(
         isinstance(item, dict)
         and item.get("class") == "blocked-external"
@@ -264,21 +280,24 @@ awaiting = (
         for item in blockers
     )
 )
-accepted = lease_status == "accepted" and packet.get("status") == "accepted"
+packet_accepted = isinstance(packet, dict) and packet.get("status") == "accepted"
+retained = lease_status == "accepted" or audit_accepted or awaiting or packet_accepted
 if awaiting:
     mode = "awaiting-evidence"
-elif accepted:
+elif packet_accepted:
     mode = "accepted-existing"
+elif retained:
+    mode = "invalid-retained"
 else:
     raise SystemExit(0)
 values = (
     mode,
-    packet.get("runId", ""),
-    packet.get("taskId", ""),
-    packet.get("branch", ""),
-    packet.get("workspace", ""),
-    packet.get("baseRef", ""),
-    packet.get("headSha", ""),
+    packet.get("runId", "") if isinstance(packet, dict) else "",
+    packet.get("taskId", "") if isinstance(packet, dict) else "",
+    packet.get("branch", "") if isinstance(packet, dict) else "",
+    packet.get("workspace", "") if isinstance(packet, dict) else "",
+    packet.get("baseRef", "") if isinstance(packet, dict) else "",
+    packet.get("headSha", "") if isinstance(packet, dict) else "",
 )
 encoded = [
     value if isinstance(value, str) else "__invalid_accepted_checkpoint_field__"
@@ -296,15 +315,36 @@ PY
         accepted_checkpoint_base="${_accepted_checkpoint_fields[5]}"
         accepted_checkpoint_head="${_accepted_checkpoint_fields[6]}"
         accepted_checkpoint_packet="$retained_packet"
+        accepted_checkpoint_recognition="packet-or-audit"
       fi
+    fi
+    retained_audit_accepted="$(python3 - "$retained_audit" <<'PY' 2>/dev/null || true
+import json
+import sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    if isinstance(value, dict) and value.get("verdict") == "accepted":
+        print("yes")
+except Exception:
+    pass
+PY
+)"
+    if [[ -z "$accepted_checkpoint_mode" \
+        && ( "$retained_lease_status" == "accepted" \
+          || "$retained_audit_accepted" == "yes" ) ]]; then
+      accepted_checkpoint_mode="invalid-retained"
+      accepted_checkpoint_run="$retained_lease_run"
+      accepted_checkpoint_recognition="accepted-lease-or-audit"
     fi
   fi
 fi
 if [[ -n "$accepted_checkpoint_mode" ]]; then
-  [[ "${#authorized_repair[@]}" -ne 7 \
-      && "${#authorized_continuation[@]}" -ne 10 ]] \
+  [[ "${#authorized_continuation[@]}" -ne 10 ]] \
     || l1_refuse_recognized_accepted_checkpoint \
-      "accepted-checkpoint-recovery-authority-conflict"
+      "accepted-checkpoint-continuation-authority-conflict"
+  [[ "$accepted_checkpoint_mode" != "invalid-retained" ]] \
+    || l1_refuse_recognized_accepted_checkpoint \
+      "accepted-checkpoint-invalid-retained-state"
   retained_lease_base="$(singular_lease_field "$task_id" baseSha 2>/dev/null || true)"
   retained_lease_branch="$(singular_lease_field "$task_id" branch 2>/dev/null || true)"
   retained_lease_worktree="$(singular_lease_field "$task_id" worktree 2>/dev/null || true)"
@@ -789,7 +829,7 @@ fi
 # continuation is claimed atomically with its started-attempt disposition at
 # the provider invocation boundary below. No provider process starts before
 # either recovery authority is claimed.
-if [[ "${#authorized_repair[@]}" -eq 7 ]]; then
+if [[ "${#authorized_repair[@]}" -eq 7 && -z "$accepted_checkpoint_mode" ]]; then
   singular_lifecycle_claim_repair "$task_id" "${authorized_repair[0]}" \
     "${authorized_repair[1]}" "${authorized_repair[4]}" "${authorized_repair[5]}" \
     >/dev/null || exit 2
@@ -1020,37 +1060,51 @@ l1_try_resume_accepted_awaiting_evidence() {
   local lease_status accepted_run accepted_run_dir accepted_packet accepted_audit
   local accepted_base accepted_head actual_branch_head actual_workspace_head audit_schema
   local accepted_lease_base accepted_resolved_base accepted_resolved_head
-  local checkpoint_binding audit_binding lease_binding
+  local checkpoint_binding audit_binding lease_binding publication_state authority_state
+  local checkpoint_packet_json allowed_historical_run=""
+  local publication_needs_evidence="no"
   local -a _checkpoint_bindings=()
+  [[ -n "$accepted_checkpoint_mode" ]] || return 1
   lease_status="$(singular_lease_status "$task_id" 2>/dev/null || true)"
-  [[ "$lease_status" == "blocked" || "$lease_status" == "failed" ]] || return 1
-  accepted_run="$(singular_lease_field "$task_id" runId 2>/dev/null || true)"
+  [[ "$lease_status" == "blocked" || "$lease_status" == "failed" \
+      || "$lease_status" == "accepted" || "$lease_status" == "integrated" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-lease-status-invalid"
+  accepted_run="$accepted_checkpoint_run"
   [[ -n "$accepted_run" ]] || return 1
   accepted_run_dir="$SINGULAR_RUNS_DIR/$accepted_run"
   accepted_packet="$accepted_run_dir/packet.json"
   accepted_audit="$(singular_audit_record_path "$accepted_run")"
   [[ -f "$accepted_packet" ]] || return 1
 
-  # First recognize the host-written checkpoint marker using only its minimal
-  # identity. Once recognized, every later mismatch fails closed *without*
-  # falling through to reset/orphan cleanup of the accepted head.
-  if ! python3 - "$accepted_packet" "$task_id" <<'PY' >/dev/null 2>&1
+  # Recognition has already fenced cleanup. Determine which producer-created
+  # publication transition was retained without treating recognition as
+  # acceptance authority.
+  if ! python3 - "$accepted_packet" "$task_id" "$accepted_checkpoint_mode" <<'PY' >/dev/null 2>&1
 import json, sys
 packet = json.load(open(sys.argv[1], encoding="utf-8"))
 assert packet.get("taskId") == sys.argv[2]
-assert packet.get("status") == "blocked"
-assert any(
-    isinstance(item, dict)
-    and item.get("class") == "blocked-external"
-    and item.get("reason") == "awaiting-evidence"
-    and item.get("productAuditVerdict") == "accepted"
-    and item.get("consumesProductRepairBudget") is False
-    for item in packet.get("blockers", [])
-)
+mode = sys.argv[3]
+if mode == "awaiting-evidence":
+    assert packet.get("status") == "blocked"
+    assert isinstance(packet.get("blockers"), list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("class") == "blocked-external"
+        and item.get("reason") == "awaiting-evidence"
+        and item.get("productAuditVerdict") == "accepted"
+        and item.get("consumesProductRepairBudget") is False
+        for item in packet["blockers"]
+    )
+elif mode == "accepted-existing":
+    assert packet.get("status") == "accepted"
+else:
+    raise AssertionError(mode)
 PY
   then
-    return 1
+    l1_refuse_recognized_accepted_checkpoint "accepted-checkpoint-shape-invalid"
   fi
+  [[ "$accepted_checkpoint_mode" != "awaiting-evidence" ]] \
+    || publication_needs_evidence="yes"
   checkpoint_binding="$(python3 - "$accepted_packet" <<'PY' 2>/dev/null || true
 import json
 import sys
@@ -1065,8 +1119,8 @@ PY
     checkpoint_binding="legacy"
   fi
   [[ -n "$checkpoint_binding" && "$checkpoint_binding" == "$l1_campaign_binding" ]] \
-    || l1_campaign_mismatch_exit \
-      "accepted evidence checkpoint belongs to a different or unbound campaign"
+    || l1_refuse_recognized_accepted_checkpoint \
+      "accepted-checkpoint-campaign-mismatch"
   l1_evidence_resume_refuse() {
     local reason="$1"
     if ! l1_campaign_publication_begin \
@@ -1075,8 +1129,6 @@ PY
         "campaign identity changed while refusing an evidence checkpoint"
     fi
     _l1_outcome="terminal"
-    singular_lease_set_status "$task_id" "blocked" 2>/dev/null || true
-    singular_task_set_status "$task_file" "blocked" 2>/dev/null || true
     singular_append_event "l1.accepted_evidence_resume_refused" \
       "accepted evidence checkpoint failed closed and was preserved" \
       "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"reason\":\"$reason\",\"productAccepted\":true,\"published\":false,\"consumesProductRepairBudget\":false}" \
@@ -1110,26 +1162,46 @@ assert packet.get("taskId") == task_id
 assert packet.get("runId") == run_id
 assert packet.get("branch") == branch
 assert os.path.realpath(packet.get("workspace", "")) == os.path.realpath(worktree)
-assert packet.get("status") == "blocked"
+assert packet.get("status") in {"blocked", "accepted"}
 assert head
 assert audit.get("taskId") == task_id
 assert audit.get("verdict") == "accepted"
 assert audit.get("branch") == branch
-assert any(
-    isinstance(item, dict)
-    and item.get("class") == "blocked-external"
-    and item.get("reason") == "awaiting-evidence"
-    and item.get("headSha") == head
-    and item.get("productAuditVerdict") == "accepted"
-    and item.get("consumesProductRepairBudget") is False
-    for item in packet.get("blockers", [])
-)
+if packet.get("status") == "blocked":
+    assert any(
+        isinstance(item, dict)
+        and item.get("class") == "blocked-external"
+        and item.get("reason") == "awaiting-evidence"
+        and item.get("headSha") == head
+        and item.get("productAuditVerdict") == "accepted"
+        and item.get("consumesProductRepairBudget") is False
+        for item in packet.get("blockers", [])
+    )
 PY
   then
     l1_evidence_resume_refuse "checkpoint-identity-mismatch"
   fi
   singular_validate_packet_basic "$accepted_packet" >/dev/null 2>&1 \
     || l1_evidence_resume_refuse "checkpoint-packet-invalid"
+  checkpoint_packet_json="$(python3 - "$accepted_packet" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.dumps(json.load(handle), separators=(",", ":")))
+PY
+  )" || l1_evidence_resume_refuse "checkpoint-packet-invalid"
+  singular_json_schema_check "$checkpoint_packet_json" "$SINGULAR_PACKET_SCHEMA" \
+    "accepted publication packet" >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "checkpoint-packet-schema-invalid"
+  python3 - "$accepted_packet" "$task_json" <<'PY' >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "checkpoint-task-ownership-mismatch"
+import json
+import sys
+packet = json.load(open(sys.argv[1], encoding="utf-8"))
+task = json.loads(sys.argv[2])
+assert packet.get("ownedFiles") == task.get("ownedFiles")
+assert set(packet.get("changedFiles", [])) <= set(task.get("ownedFiles", []))
+PY
   audit_schema="$(singular_json_field "$accepted_audit" schema 2>/dev/null || true)"
   if [[ "$audit_schema" == "singular.orchestration.audit-verdict.v1" ]]; then
     SINGULAR_AUDIT_SCHEMA="$SINGULAR_SCHEMA_DIR/audit-verdict.v1.schema.json" \
@@ -1175,12 +1247,10 @@ PY
   [[ "$checkpoint_binding" == "$l1_campaign_binding" \
       && "$audit_binding" == "$l1_campaign_binding" \
       && "$lease_binding" == "$l1_campaign_binding" ]] \
-    || l1_campaign_mismatch_exit \
-      "accepted evidence artifacts disagree on campaign identity"
+    || l1_evidence_resume_refuse "accepted-campaign-evidence-mismatch"
   singular_campaign_binding_matches \
     "$checkpoint_binding" l1-drive pre-evidence-resume \
-    || l1_campaign_mismatch_exit \
-      "campaign identity changed before evidence resume"
+    || l1_evidence_resume_refuse "accepted-current-campaign-mismatch"
 
   accepted_base="$(singular_json_field "$accepted_packet" baseRef 2>/dev/null || true)"
   accepted_head="$(singular_json_field "$accepted_packet" headSha 2>/dev/null || true)"
@@ -1220,36 +1290,122 @@ PY
   [[ -z "$non_generated_dirty" ]] \
     || l1_evidence_resume_refuse "accepted-workspace-dirty"
 
+  # Validate the same packet/audit identity consumed at import, plus the exact
+  # lifecycle writer contract for a claimed native repair successor. This is
+  # read-only: a valid claim remains claimed until import retains the audit.
+  singular_packet_module_guard "$accepted_packet" "$task_file" \
+    "$worktree" "$accepted_run_dir" >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "checkpoint-task-ownership-mismatch"
+  authority_state="$(python3 "$SINGULAR_TASK_LIFECYCLE" validate-accepted-publication \
+    --lease "$(singular_lease_path "$task_id")" --packet "$accepted_packet" \
+    --audit "$accepted_audit" --task-contract "$task_file" --task "$task_id" \
+    --run "$accepted_run" --branch "$worker_branch" --worktree "$worktree" \
+    --base "$accepted_base" --head "$accepted_head" \
+    --campaign "$checkpoint_binding" --repo-root "$SINGULAR_ROOT" 2>/dev/null)" \
+    || l1_evidence_resume_refuse "checkpoint-lifecycle-authority-mismatch"
+  if [[ "$authority_state" == repair-* ]]; then
+    allowed_historical_run="$(singular_lease_field "$task_id" \
+      recoveryAuthorization.predecessorRunId 2>/dev/null || true)"
+  fi
+
+  # Duplicate success is permitted only after the complete accepted authority
+  # above validates. Exact artifacts are compared as JSON values because the
+  # supported producer/importer may reserialize canonical JSON without changing
+  # its acceptance identity. An unrelated packet under this task is conflict,
+  # never evidence for this run.
+  publication_state="$(python3 - "$accepted_packet" "$accepted_audit" \
+      "$SINGULAR_INBOX_DIR" "$SINGULAR_ORCH_DIR/packets/imported/$task_id" \
+      "$accepted_run" "$task_id" "$allowed_historical_run" <<'PY'
+import json
+import os
+import stat
+import sys
+
+packet_path, audit_path, inbox_dir, imported_dir, run_id, task_id, allowed_historical_run = sys.argv[1:]
+
+def load_regular(path, label):
+    value = os.lstat(path)
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+        raise ValueError(f"{label} is not a regular non-symlink file")
+    with open(path, encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} is not a JSON object")
+    return value
+
+canonical_packet = load_regular(packet_path, "canonical packet")
+canonical_audit = load_regular(audit_path, "canonical audit")
+states = []
+inbox = os.path.join(inbox_dir, run_id + ".json")
+if os.path.lexists(inbox):
+    if load_regular(inbox, "queued packet") != canonical_packet:
+        raise ValueError("queued packet does not match the accepted run")
+    states.append("queued")
+
+exact_packet = os.path.join(imported_dir, run_id + ".json")
+exact_audit = os.path.join(imported_dir, run_id + ".audit.json")
+if os.path.isdir(imported_dir):
+    for name in os.listdir(imported_dir):
+        path = os.path.join(imported_dir, name)
+        if not name.endswith(".json") or name.endswith(".audit.json"):
+            continue
+        if allowed_historical_run and name == allowed_historical_run + ".json":
+            continue
+        if name != run_id + ".json":
+            raise ValueError("unrelated imported packet exists for accepted task")
+        if load_regular(path, "imported packet") != canonical_packet:
+            raise ValueError("imported packet does not match the accepted run")
+    if os.path.lexists(exact_packet):
+        if not os.path.lexists(exact_audit):
+            raise ValueError("imported accepted packet has no audit sidecar")
+        if load_regular(exact_audit, "imported audit") != canonical_audit:
+            raise ValueError("imported audit does not match the accepted run")
+        states.append("imported")
+    elif os.path.lexists(exact_audit):
+        raise ValueError("imported audit exists without its accepted packet")
+print("imported" if "imported" in states else "queued" if states else "none")
+PY
+  )" || l1_evidence_resume_refuse "accepted-publication-artifact-mismatch"
+  if [[ "$publication_state" != "none" ]]; then
+    echo "accepted packet for $task_id already queued/imported; dispatch is a no-op"
+    _l1_outcome="accepted"
+    l1_status terminal completed "Existing accepted packet is already queued or imported" true \
+      "Continue origin reconciliation" "accepted-existing"
+    exit 0
+  fi
+
   singular_append_event "l1.accepted_evidence_resume_started" \
-    "resuming evidence finalization for an immutable accepted product head" \
-    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"consumesProductRepairBudget\":false}" \
+    "resuming accepted publication for an immutable product head" \
+    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"authorityState\":\"$authority_state\",\"evidenceFinalizationRequired\":\"$publication_needs_evidence\",\"consumesProductRepairBudget\":false}" \
     || true
-  l1_status auditing active "Resuming evidence finalization for accepted head" true \
-    "Materialize final evidence and enqueue the existing accepted packet" "" "evidence-resume"
+  l1_status auditing active "Resuming accepted publication for exact head" true \
+    "Complete only the missing evidence/publication transitions" "" "evidence-resume"
 
   local evidence_try evidence_rc=0 evidence_log
-  for ((evidence_try=0; evidence_try<=evidence_infra_max; evidence_try++)); do
-    evidence_log="$accepted_run_dir/evidence-manifest-resume-try-${evidence_try}.log"
-    if [[ "$evidence_try" -gt 0 ]]; then
-      singular_append_event "evidence.infra_retry" \
-        "accepted-head evidence finalization failed; retrying evidence only" \
-        "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"stage\":\"accepted-publication-resume\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-infrastructure\",\"maxExtraRetries\":$evidence_infra_max,\"consumesProductRepairBudget\":false}" \
-        || true
-    fi
-    evidence_rc=0
-    "$SCRIPT_DIR/evidence-manifest.sh" \
-      --run-dir "$accepted_run_dir" --task-id "$task_id" --worktree "$worktree" \
-      --base-ref "$(singular_json_field "$accepted_packet" baseRef)" \
-      --head-sha "$accepted_head" >"$evidence_log" 2>&1 || evidence_rc=$?
-    [[ "$evidence_rc" -eq 0 ]] && break
-    if [[ "$evidence_rc" -eq 2 ]]; then
-      singular_append_event "evidence.input_rejected" \
-        "deterministic accepted-head evidence input rejected; unchanged retry suppressed" \
-        "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"stage\":\"accepted-publication-resume\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-input\",\"consumesProductRepairBudget\":false}" \
-        || true
-      break
-    fi
-  done
+  if [[ "$publication_needs_evidence" == "yes" ]]; then
+    for ((evidence_try=0; evidence_try<=evidence_infra_max; evidence_try++)); do
+      evidence_log="$accepted_run_dir/evidence-manifest-resume-try-${evidence_try}.log"
+      if [[ "$evidence_try" -gt 0 ]]; then
+        singular_append_event "evidence.infra_retry" \
+          "accepted-head evidence finalization failed; retrying evidence only" \
+          "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"stage\":\"accepted-publication-resume\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-infrastructure\",\"maxExtraRetries\":$evidence_infra_max,\"consumesProductRepairBudget\":false}" \
+          || true
+      fi
+      evidence_rc=0
+      "$SCRIPT_DIR/evidence-manifest.sh" \
+        --run-dir "$accepted_run_dir" --task-id "$task_id" --worktree "$worktree" \
+        --base-ref "$(singular_json_field "$accepted_packet" baseRef)" \
+        --head-sha "$accepted_head" >"$evidence_log" 2>&1 || evidence_rc=$?
+      [[ "$evidence_rc" -eq 0 ]] && break
+      if [[ "$evidence_rc" -eq 2 ]]; then
+        singular_append_event "evidence.input_rejected" \
+          "deterministic accepted-head evidence input rejected; unchanged retry suppressed" \
+          "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"stage\":\"accepted-publication-resume\",\"try\":$evidence_try,\"budgetDomain\":\"evidence-input\",\"consumesProductRepairBudget\":false}" \
+          || true
+        break
+      fi
+    done
+  fi
   if [[ "$evidence_rc" -ne 0 ]]; then
     if ! l1_campaign_publication_begin \
         "$checkpoint_binding" pre-resume-exhausted-state; then
@@ -1275,9 +1431,11 @@ PY
       "campaign identity changed while evidence resume was running"
   fi
 
-  # Evidence is now durable. Remove only the host-authored awaiting-evidence
-  # blocker and restore the ordinary accepted packet handoff shape atomically.
-  python3 - "$accepted_packet" "$accepted_head" <<'PY'
+  # When evidence was the missing transition, remove only the host-authored
+  # blocker and restore the accepted handoff shape atomically. A packet already
+  # accepted before interruption remains byte-identical.
+  if [[ "$publication_needs_evidence" == "yes" ]]; then
+    python3 - "$accepted_packet" "$accepted_head" <<'PY'
 import json
 import os
 import sys
@@ -1299,12 +1457,13 @@ with open(temporary, "w", encoding="utf-8") as stream:
     json.dump(packet, stream, indent=2)
     stream.write("\n")
 PY
-  local resumed_packet_tmp="$accepted_packet.evidence-resumed.tmp"
-  singular_validate_packet_basic "$resumed_packet_tmp" >/dev/null 2>&1 || {
-    rm -f "$resumed_packet_tmp"
-    l1_evidence_resume_refuse "resumed-packet-invalid"
-  }
-  mv "$resumed_packet_tmp" "$accepted_packet"
+    local resumed_packet_tmp="$accepted_packet.evidence-resumed.tmp"
+    singular_validate_packet_basic "$resumed_packet_tmp" >/dev/null 2>&1 || {
+      rm -f "$resumed_packet_tmp"
+      l1_evidence_resume_refuse "resumed-packet-invalid"
+    }
+    mv "$resumed_packet_tmp" "$accepted_packet"
+  fi
   singular_lease_set_status "$task_id" "accepted"
   singular_task_set_status "$task_file" "accepted"
   "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "accept" \
@@ -1318,8 +1477,8 @@ PY
   l1_status terminal completed "Accepted evidence finalized and packet queued" true \
     "Continue origin integration" "accepted-evidence-resumed"
   singular_append_event "l1.accepted_evidence_resume_completed" \
-    "accepted product packet published after evidence-only recovery" \
-    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"productAccepted\":true,\"published\":true,\"workerRerun\":false,\"auditorRerun\":false,\"consumesProductRepairBudget\":false}" \
+    "accepted product packet completed its retained publication" \
+    "{\"taskId\":\"$task_id\",\"runId\":\"$accepted_run\",\"resumeRunId\":\"$run_id\",\"headSha\":\"$accepted_head\",\"auditVerdict\":\"accepted\",\"authorityState\":\"$authority_state\",\"evidenceFinalizationRequired\":\"$publication_needs_evidence\",\"productAccepted\":true,\"published\":true,\"workerRerun\":false,\"auditorRerun\":false,\"consumesProductRepairBudget\":false}" \
     || true
   l1_campaign_publication_end
   echo "RESUMED ACCEPTED EVIDENCE: $task_id — queued accepted head $accepted_head."
@@ -1368,14 +1527,6 @@ l1_try_auto_accept_existing() {
   local prev_run cand cand_binding
   prev_run="$(singular_lease_field "$task_id" runId 2>/dev/null || true)"
   [[ -n "$prev_run" ]] || return 1
-  # Already queued or imported: the work is in flight — dispatch is a no-op.
-  if [[ -f "$SINGULAR_INBOX_DIR/$prev_run.json" ]]     || find "$SINGULAR_ORCH_DIR/packets/imported/$task_id" -maxdepth 1 -name '*.json'          -not -name '*.audit.json' -type f 2>/dev/null | grep -q .; then
-    echo "accepted packet for $task_id already queued/imported; dispatch is a no-op"
-    _l1_outcome="accepted"
-    l1_status terminal completed "Existing accepted packet is already queued or imported" true \
-      "Continue origin reconciliation" "accepted-existing"
-    exit 0
-  fi
   cand="$SINGULAR_RUNS_DIR/$prev_run/packet.json"
   [[ -f "$cand" ]] || return 1
   [[ "$(singular_json_field "$cand" taskId 2>/dev/null || true)" == "$task_id" ]] || return 1

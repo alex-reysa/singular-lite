@@ -320,7 +320,12 @@ make_seq_runner() {
   local stub="$1"
   cat >"$stub" <<'STUB'
 #!/usr/bin/env bash
-level=""; out=""; chdir=""; prompt=""
+if [[ "${1:-}" == "--describe-contract" ]]; then
+  printf '%s\n' '{"schema":"singular.runner-contract.v1","version":1,"provider":"codex","arguments":["--worktree","--prompt-file","--level","--run-id","--output-last-message","--role","--capability-profile","--result-file","--describe-contract"],"structuredResult":"singular.orchestration.runner-result.v0","structuredProviderError":"singular.orchestration.provider-error.v0"}'
+  exit 0
+fi
+level=""; out=""; chdir=""; prompt=""; run_id=""; result_file=""
+role="${SINGULAR_RUNNER_ROLE:-}"; capability="${SINGULAR_RUNNER_CAPABILITY_PROFILE:-fixture}"
 if [[ -n "${SINGULAR_ORIGIN_LOCK_CAPABILITY:-}" \
     && -n "${MOCK_ORIGIN_CAP_LEAK_FILE:-}" ]]; then
   printf '%s\n' "${SINGULAR_RUNNER_ROLE:-unknown}" \
@@ -329,13 +334,33 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --level) level="$2"; shift 2 ;;
-    -C) chdir="$2"; shift 2 ;;
+    -C|--worktree) chdir="$2"; shift 2 ;;
     --output-last-message) out="$2"; shift 2 ;;
     --prompt-file) prompt="$2"; shift 2 ;;
-    --run-id) shift 2 ;;
+    --run-id) run_id="$2"; shift 2 ;;
+    --role) role="$2"; shift 2 ;;
+    --capability-profile) capability="$2"; shift 2 ;;
+    --result-file) result_file="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
+write_result() {
+  local rc=$?
+  [[ "$rc" -eq 0 && -n "$result_file" ]] || return "$rc"
+  python3 - "$result_file" "$run_id" "$role" "$capability" "$out" <<'PY'
+import datetime, json, sys
+path, run_id, role, capability, output = sys.argv[1:]
+json.dump({
+    "schema":"singular.orchestration.runner-result.v0", "contractVersion":1,
+    "provider":"codex", "runId":run_id, "role":role,
+    "capabilityProfile":capability, "exitCode":0, "outcome":"succeeded",
+    "failureClass":"none", "providerErrorRef":None, "outputRef":output,
+    "recordedAt":datetime.datetime.now(datetime.timezone.utc).replace(
+        microsecond=0).isoformat().replace("+00:00", "Z"),
+}, open(path, "w", encoding="utf-8"))
+PY
+}
+trap write_result EXIT
 cdir="${MOCK_COUNTER_DIR:-/tmp}"; mkdir -p "$cdir"
 # Decider call (decide.sh dispatches the decider prompt at --level readonly). Emit
 # a decider-verdict action so the fast-disabled path actually advances.
@@ -385,10 +410,10 @@ if [[ "$n" -le "$prose_tries" ]]; then printf 'prose, no JSON here\n' >"$out"; e
 seq=(${MOCK_AUDIT_VERDICT_SEQ:-accepted})
 vi=$((n - prose_tries - 1)); [[ "$vi" -lt 0 ]] && vi=0
 verdict="${seq[$vi]:-${seq[${#seq[@]}-1]}}"
-python3 - "$out" "$verdict" "${MOCK_AUDIT_FINDINGS:-[]}" <<'PY'
+python3 - "$out" "$verdict" "${MOCK_AUDIT_FINDINGS:-[]}" "$run_id" <<'PY'
 import json, sys
 findings = json.loads(sys.argv[3])
-json.dump({"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-0001","runId":"r","branch":"agent/widget/TASK-0001-generic","verdict":sys.argv[2],"evidenceReviewed":[],"commandsRun":[],"findings":findings,"requiredFixes":findings if sys.argv[2] == "needs-fix" else [],"rationale":"ok"}, open(sys.argv[1],"w"))
+json.dump({"schema":"singular.orchestration.audit-verdict.v0","taskId":"TASK-0001","runId":sys.argv[4],"branch":"agent/widget/TASK-0001-generic","verdict":sys.argv[2],"evidenceReviewed":[],"commandsRun":[],"findings":findings,"requiredFixes":findings if sys.argv[2] == "needs-fix" else [],"rationale":"ok"}, open(sys.argv[1],"w"))
 PY
 exit 0
 STUB
@@ -1578,7 +1603,7 @@ STUB
   assert_contains "$(cat "$SINGULAR_TASKS_DIR/TASK-0001.md")" "Status: blocked" \
     "evidence blocker: task is non-dispatchable"
 
-  local run_dir audit packet head base target_after checkpoint_copy lease_copy
+  local run_dir audit packet head base target_after checkpoint_copy lease_copy task_copy
   run_dir="$(find "$SINGULAR_RUNS_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
   audit="$run_dir/audit.json"
   packet="$run_dir/packet.json"
@@ -1661,8 +1686,10 @@ PY
   manifest_calls_before="$(cat "$MOCK_MANIFEST_COUNTER")"
   checkpoint_copy="$FIXTURE_TMP/accepted-packet.original.json"
   lease_copy="$FIXTURE_TMP/accepted-lease.original.json"
+  task_copy="$FIXTURE_TMP/accepted-task.original.md"
   cp "$packet" "$checkpoint_copy"
   cp "$(singular_lease_path TASK-0001)" "$lease_copy"
+  cp "$SINGULAR_TASKS_DIR/TASK-0001.md" "$task_copy"
 
   checkpoint_state_sha() {
     shasum -a 256 "$packet" "$audit" "$(singular_lease_path TASK-0001)" \
@@ -1683,6 +1710,59 @@ PY
     assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "$manifest_calls_before" \
       "$label: evidence not attempted"
   }
+
+  # Recognition must distinguish malformed retained acceptance from an
+  # ordinary failed worker packet. The accepted audit is sufficient to fence
+  # cleanup, but never sufficient to accept malformed packet bytes.
+  printf '{not-json\n' >"$packet"
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "invalid retained JSON refuses before reset ($out)"
+  assert_contains "$out" "invalid-retained-state" \
+    "invalid retained JSON: explicit preservation refusal"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "invalid retained JSON: accepted evidence remains byte-identical"
+  assert_no_accepted_recovery_work "invalid retained JSON"
+  cp "$checkpoint_copy" "$packet"
+
+  python3 - "$packet" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["blockers"] = None
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "null blockers retained acceptance refuses ($out)"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "null blockers: retained state preserved"
+  assert_no_accepted_recovery_work "null blockers"
+  cp "$checkpoint_copy" "$packet"
+
+  python3 - "$packet" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+del data["ownedFiles"]
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "missing required retained field refuses ($out)"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "missing required field: retained state preserved"
+  assert_no_accepted_recovery_work "missing required field"
+  cp "$checkpoint_copy" "$packet"
 
   # A recognized accepted marker is preservation authority, not payload
   # authority. Packet base B must agree exactly with the original lease base;
@@ -1809,6 +1889,65 @@ PY
     "missing-worktree checkpoint: orphan cleanup never ran"
   mv "$SINGULAR_ROOT/.worktrees/TASK-0001.saved" "$SINGULAR_ROOT/.worktrees/TASK-0001"
 
+  # Exercise the two producer publication boundaries after evidence is durable:
+  # accepted packet before lease transition, then accepted lease before inbox.
+  # Re-entry completes only the missing transitions and preserves packet bytes.
+  "$REAL_EVIDENCE_MANIFEST" --run-dir "$run_dir" --task-id TASK-0001 \
+    --worktree "$SINGULAR_ROOT/.worktrees/TASK-0001" --base-ref "$base" \
+    --head-sha "$head" >/dev/null
+  python3 - "$packet" "$head" <<'PY'
+import json, os, sys
+path, head = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["blockers"] = [
+    item for item in data["blockers"]
+    if not (isinstance(item, dict) and item.get("reason") == "awaiting-evidence"
+            and item.get("headSha") == head)
+]
+data["status"] = "accepted"
+data["nextAction"] = "import into control state and reconcile"
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  local boundary packet_boundary_sha boundary_manifest_before
+  packet_boundary_sha="$(shasum -a 256 "$packet" | awk '{print $1}')"
+  boundary_manifest_before="$(cat "$MOCK_MANIFEST_COUNTER")"
+  for boundary in packet lease; do
+    cp "$lease_copy" "$(singular_lease_path TASK-0001)"
+    cp "$task_copy" "$SINGULAR_TASKS_DIR/TASK-0001.md"
+    if [[ "$boundary" == "lease" ]]; then
+      python3 - "$(singular_lease_path TASK-0001)" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["status"] = "accepted"
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+    fi
+    rc=0
+    out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+    assert_eq "$rc" "0" "$boundary publication boundary completes ($out)"
+    assert_contains "$out" "RESUMED ACCEPTED EVIDENCE" \
+      "$boundary publication boundary: explicit continuation"
+    assert_eq "$(shasum -a 256 "$packet" | awk '{print $1}')" "$packet_boundary_sha" \
+      "$boundary publication boundary: accepted packet bytes preserved"
+    assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "$boundary_manifest_before" \
+      "$boundary publication boundary: evidence not rerun"
+    assert_eq "$(singular_lease_field TASK-0001 status)" "accepted" \
+      "$boundary publication boundary: lease completed"
+    assert_file "$SINGULAR_INBOX_DIR/$(basename "$run_dir").json" \
+      "$boundary publication boundary: exact inbox publication"
+    unlink "$SINGULAR_INBOX_DIR/$(basename "$run_dir").json"
+  done
+  cp "$checkpoint_copy" "$packet"
+  cp "$lease_copy" "$(singular_lease_path TASK-0001)"
+  cp "$task_copy" "$SINGULAR_TASKS_DIR/TASK-0001.md"
+
   # Exhaust the ordinary product-repair allowance after acceptance. Recovery
   # and its subsequent duplicate no-op must still precede that fresh-work guard.
   python3 - "$(singular_lease_path TASK-0001)" <<'PY'
@@ -1913,6 +2052,88 @@ PY
     "duplicate accepted dispatch: candidate branch retained"
   inbox_count="$(find "$SINGULAR_INBOX_DIR" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d '[:space:]')"
   assert_eq "$inbox_count" "1" "duplicate accepted dispatch: exactly one publication"
+
+  # A queued filename is never sufficient proof. Schema, campaign, audit, and
+  # the exact imported run are validated before the duplicate no-op.
+  local accepted_packet_copy accepted_audit_copy inbox_packet imported_dir
+  accepted_packet_copy="$FIXTURE_TMP/accepted-packet.publishable.json"
+  accepted_audit_copy="$FIXTURE_TMP/accepted-audit.publishable.json"
+  inbox_packet="$SINGULAR_INBOX_DIR/$(basename "$run_dir").json"
+  imported_dir="$SINGULAR_ORCH_DIR/packets/imported/TASK-0001"
+  cp "$packet" "$accepted_packet_copy"
+  cp "$audit" "$accepted_audit_copy"
+
+  python3 - "$packet" "$inbox_packet" <<'PY'
+import json, os, sys
+for path in sys.argv[1:]:
+    data = json.load(open(path, encoding="utf-8"))
+    data["schema"] = "singular.orchestration.state-packet.invalid"
+    temporary = path + ".test.tmp"
+    json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+    open(temporary, "a", encoding="utf-8").write("\n")
+    os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "schema-broken queued duplicate refuses ($out)"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "schema-broken duplicate: retained authority preserved"
+  assert_no_accepted_recovery_work "schema-broken duplicate"
+  cp "$accepted_packet_copy" "$packet"
+  cp "$accepted_packet_copy" "$inbox_packet"
+
+  python3 - "$packet" "$inbox_packet" <<'PY'
+import json, os, sys
+for path in sys.argv[1:]:
+    data = json.load(open(path, encoding="utf-8"))
+    for item in data["evidence"]:
+        if item.get("kind") == "campaign-binding":
+            item["ref"] = "campaign:stale-fixture"
+    temporary = path + ".test.tmp"
+    json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+    open(temporary, "a", encoding="utf-8").write("\n")
+    os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "old-campaign queued duplicate refuses ($out)"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "old-campaign duplicate: retained authority preserved"
+  assert_no_accepted_recovery_work "old-campaign duplicate"
+  cp "$accepted_packet_copy" "$packet"
+  cp "$accepted_packet_copy" "$inbox_packet"
+
+  python3 - "$audit" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["runId"] = "RUN-MISMATCHED-AUDIT"
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "mismatched accepted audit duplicate refuses ($out)"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "mismatched audit duplicate: retained authority preserved"
+  assert_no_accepted_recovery_work "mismatched audit duplicate"
+  cp "$accepted_audit_copy" "$audit"
+
+  mkdir -p "$imported_dir"
+  printf '{"unrelated":true}\n' >"$imported_dir/RUN-UNRELATED.json"
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "unrelated imported JSON is not duplicate proof ($out)"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "unrelated import: retained authority preserved"
+  assert_no_accepted_recovery_work "unrelated import"
+  unlink "$imported_dir/RUN-UNRELATED.json"
   unset SINGULAR_MAX_RETRIES MOCK_MANIFEST_COUNTER REAL_EVIDENCE_MANIFEST \
     MOCK_GATE_COUNTER REAL_GATE_CHECK
   echo "ok: accepted B->H checkpoint survives independent T, validates authority, and resumes idempotently"

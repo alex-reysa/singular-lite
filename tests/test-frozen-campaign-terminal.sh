@@ -472,6 +472,8 @@ run_engine() {
       FROZEN_FIXTURE_SOURCE_ROOT="$FIXTURE_ROOT" \
       FROZEN_FIXTURE_DRIFT_TARGET="${FROZEN_FIXTURE_DRIFT_TARGET:-}" \
       FROZEN_CONTINUATION_EXPECTED="${FROZEN_CONTINUATION_EXPECTED:-0}" \
+      FROZEN_EVIDENCE_TARGET_RUNS_DIR="${FROZEN_EVIDENCE_TARGET_RUNS_DIR:-}" \
+      FROZEN_EVIDENCE_TARGET_RUN_ID="${FROZEN_EVIDENCE_TARGET_RUN_ID:-}" \
       CONTINUATION_BOOTSTRAP_MARKER="${CONTINUATION_BOOTSTRAP_MARKER:-}" \
       SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
       SINGULAR_BASH_BIN="$BASH_BIN" \
@@ -921,6 +923,7 @@ test_accepted_recovery_after_independent_target_advance() {
   # wrapper; every production consumer and the Unix evidence broker remain real.
   test_engine="$scratch/$name/test-engine"
   mkdir -p "$test_engine"
+  test_engine="$(cd "$test_engine" && pwd -P)"
   "$PYTHON_BIN" - "$source_engine" "$test_engine" "$scratch/$name" "$scratch" <<'PY'
 import pathlib, sys
 source, copied, owner, scratch = [pathlib.Path(item).resolve(strict=True)
@@ -940,6 +943,35 @@ PY
 #!/usr/bin/env bash
 set -euo pipefail
 counter="${FROZEN_EVIDENCE_COUNTER:?}"
+target_runs="${FROZEN_EVIDENCE_TARGET_RUNS_DIR:?}"
+task_id=""
+run_dir=""
+args=("$@")
+for ((index=0; index<${#args[@]}; index++)); do
+  case "${args[$index]}" in
+    --task-id)
+      [[ $((index + 1)) -lt ${#args[@]} ]] && task_id="${args[$((index + 1))]}"
+      ;;
+    --run-dir)
+      [[ $((index + 1)) -lt ${#args[@]} ]] && run_dir="${args[$((index + 1))]}"
+      ;;
+  esac
+done
+real_driver="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/evidence-manifest.real.sh"
+if [[ "$task_id" != "TASK-0001" || ! -d "$run_dir" || ! -d "$target_runs" ]]; then
+  exec "$real_driver" "$@"
+fi
+run_dir="$(cd "$run_dir" && pwd -P)"
+target_runs="$(cd "$target_runs" && pwd -P)"
+if [[ "$(dirname "$run_dir")" != "$target_runs" ]]; then
+  exec "$real_driver" "$@"
+fi
+run_binding="${counter}.run-dir"
+if [[ -f "$run_binding" ]]; then
+  [[ "$(cat "$run_binding")" == "$run_dir" ]] || exec "$real_driver" "$@"
+else
+  printf '%s\n' "$run_dir" >"$run_binding"
+fi
 count=0
 [[ -f "$counter" ]] && count="$(cat "$counter")"
 count=$((count + 1))
@@ -948,7 +980,7 @@ if [[ "$count" -eq 3 || "$count" -eq 4 ]]; then
   echo "injected bounded post-accept evidence transport failure" >&2
   exit 77
 fi
-exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/evidence-manifest.real.sh" "$@"
+exec "$real_driver" "$@"
 EVIDENCE
   chmod +x "$test_engine/engine/evidence-manifest.sh"
   chmod -R a-w "$test_engine"
@@ -964,8 +996,10 @@ PY
   verify_frozen_engine_bindings || fail "$name engine binding failed before campaign start"
   ENGINE_HOME="$test_engine"
   export FROZEN_EVIDENCE_COUNTER="$FIXTURE_COUNTERS/evidence-calls"
+  export FROZEN_EVIDENCE_TARGET_RUNS_DIR="$FIXTURE_ROOT/.singular-state/runs"
 
   start_campaign success
+  assert_eq "$(calls evidence)" "0" "$name canary did not consume target evidence failures"
   reconcile success "$name-awaiting-evidence"
   lease="$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json"
   run_id="$($PYTHON_BIN - "$lease" <<'PY'
@@ -1020,6 +1054,105 @@ PY
   if git -C "$FIXTURE_ROOT" merge-base --is-ancestor "$target_after" "$head"; then
     fail "$name independent target T unexpectedly precedes H"
   fi
+
+  # Freeze the producer's exact accepted packet and exercise interruptions
+  # after packet publication and after lease publication. The third boundary,
+  # after inbox publication, is the duplicate call below.
+  local boundary boundary_packet boundary_lease boundary_task boundary_packet_sha
+  local boundary_evidence_before
+  boundary_packet="$scratch/$name/boundary-packet.json"
+  boundary_lease="$scratch/$name/boundary-lease.json"
+  boundary_task="$scratch/$name/boundary-task.md"
+  cp "$packet" "$boundary_packet"
+  cp "$lease" "$boundary_lease"
+  cp "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" "$boundary_task"
+  blocked_state_digest() {
+    shasum -a 256 "$packet" "$audit" "$lease" \
+      "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" \
+      | shasum -a 256 | awk '{print $1}'
+  }
+  local malformed_digest
+  printf '{not-json\n' >"$packet"
+  malformed_digest="$(blocked_state_digest)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "$name invalid retained JSON refusal ($out)"
+  assert_eq "$(blocked_state_digest)" "$malformed_digest" \
+    "$name invalid retained JSON preserved"
+  assert_eq "$(calls worker)" "1" "$name invalid retained JSON worker calls"
+  assert_eq "$(calls auditor)" "1" "$name invalid retained JSON auditor calls"
+  assert_eq "$(calls evidence)" "4" "$name invalid retained JSON evidence calls"
+  cp "$boundary_packet" "$packet"
+  "$PYTHON_BIN" - "$packet" <<'PY'
+import json, os, sys
+path=sys.argv[1]; data=json.load(open(path, encoding="utf-8"))
+data["blockers"]=None
+temporary=path+".test.tmp"
+json.dump(data, open(temporary,"w",encoding="utf-8"), indent=2)
+open(temporary,"a",encoding="utf-8").write("\n")
+os.replace(temporary,path)
+PY
+  malformed_digest="$(blocked_state_digest)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "$name null-blockers retained refusal ($out)"
+  assert_eq "$(blocked_state_digest)" "$malformed_digest" \
+    "$name null-blockers retained state preserved"
+  assert_eq "$(calls worker)" "1" "$name null-blockers worker calls"
+  assert_eq "$(calls auditor)" "1" "$name null-blockers auditor calls"
+  assert_eq "$(calls evidence)" "4" "$name null-blockers evidence calls"
+  cp "$boundary_packet" "$packet"
+  "$test_engine/engine/evidence-manifest.real.sh" --run-dir "$run_dir" \
+    --task-id TASK-0001 --worktree "$worktree" --base-ref "$base" \
+    --head-sha "$head" >/dev/null
+  "$PYTHON_BIN" - "$packet" "$head" <<'PY'
+import json, os, sys
+path, head = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["blockers"] = [item for item in data["blockers"]
+                    if not (isinstance(item, dict)
+                            and item.get("reason") == "awaiting-evidence"
+                            and item.get("headSha") == head)]
+data["status"] = "accepted"
+data["nextAction"] = "import into control state and reconcile"
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  boundary_packet_sha="$(shasum -a 256 "$packet" | awk '{print $1}')"
+  boundary_evidence_before="$(calls evidence)"
+  for boundary in packet lease; do
+    cp "$boundary_lease" "$lease"
+    cp "$boundary_task" "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md"
+    if [[ "$boundary" == "lease" ]]; then
+      "$PYTHON_BIN" - "$lease" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["status"] = "accepted"
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+    fi
+    rc=0
+    out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+    assert_eq "$rc" "0" "$name $boundary publication-boundary recovery ($out)"
+    assert_eq "$(shasum -a 256 "$packet" | awk '{print $1}')" "$boundary_packet_sha" \
+      "$name $boundary boundary preserves accepted packet bytes"
+    assert_eq "$(calls worker)" "1" "$name $boundary boundary worker calls"
+    assert_eq "$(calls auditor)" "1" "$name $boundary boundary auditor calls"
+    assert_eq "$(calls evidence)" "$boundary_evidence_before" \
+      "$name $boundary boundary evidence calls"
+    assert_file "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json" \
+      "$name $boundary boundary publication"
+    unlink "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json"
+  done
+  cp "$boundary_packet" "$packet"
+  cp "$boundary_lease" "$lease"
+  cp "$boundary_task" "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md"
 
   # Put the accepted lease at its repair ceiling. Evidence-only recovery is a
   # terminal continuation and must precede this fresh-work budget guard.
@@ -1105,6 +1238,99 @@ assert lease["baseSha"] == sys.argv[2], lease
 assert lease["retryCount"] == int(sys.argv[3]), lease
 PY
 
+  # Duplicate evidence is authoritative only after the canonical packet,
+  # audit, campaign, and exact queued/imported artifact all validate.
+  local publishable_packet publishable_audit retained_digest_before imported_dir
+  publishable_packet="$scratch/$name/publishable-packet.json"
+  publishable_audit="$scratch/$name/publishable-audit.json"
+  imported_dir="$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001"
+  cp "$packet" "$publishable_packet"
+  cp "$audit" "$publishable_audit"
+  accepted_state_digest() {
+    shasum -a 256 "$packet" "$audit" "$lease" \
+      "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" \
+      | shasum -a 256 | awk '{print $1}'
+  }
+  assert_retained_refusal_quiet() {
+    local label="$1"
+    assert_eq "$(calls worker)" "$worker_before" "$label worker calls"
+    assert_eq "$(calls auditor)" "$auditor_before" "$label auditor calls"
+    assert_eq "$(calls gate)" "$gate_before" "$label gate calls"
+    assert_eq "$(calls decider)" "$decider_before" "$label decider calls"
+    assert_eq "$(calls evidence)" "$evidence_before" "$label evidence calls"
+  }
+
+  "$PYTHON_BIN" - "$packet" "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json" <<'PY'
+import json, os, sys
+for path in sys.argv[1:]:
+    data=json.load(open(path, encoding="utf-8"))
+    data["schema"]="singular.orchestration.state-packet.invalid"
+    temporary=path+".test.tmp"
+    json.dump(data, open(temporary,"w",encoding="utf-8"), indent=2)
+    open(temporary,"a",encoding="utf-8").write("\n")
+    os.replace(temporary,path)
+PY
+  retained_digest_before="$(accepted_state_digest)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "$name schema-broken duplicate refusal ($out)"
+  assert_eq "$(accepted_state_digest)" "$retained_digest_before" \
+    "$name schema-broken retained state"
+  assert_retained_refusal_quiet "$name schema-broken"
+  cp "$publishable_packet" "$packet"
+  cp "$publishable_packet" "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json"
+
+  "$PYTHON_BIN" - "$packet" "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json" <<'PY'
+import json, os, sys
+for path in sys.argv[1:]:
+    data=json.load(open(path, encoding="utf-8"))
+    for item in data["evidence"]:
+        if item.get("kind") == "campaign-binding":
+            item["ref"]="campaign:stale-fixture"
+    temporary=path+".test.tmp"
+    json.dump(data, open(temporary,"w",encoding="utf-8"), indent=2)
+    open(temporary,"a",encoding="utf-8").write("\n")
+    os.replace(temporary,path)
+PY
+  retained_digest_before="$(accepted_state_digest)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "$name old-campaign duplicate refusal ($out)"
+  assert_eq "$(accepted_state_digest)" "$retained_digest_before" \
+    "$name old-campaign retained state"
+  assert_retained_refusal_quiet "$name old-campaign"
+  cp "$publishable_packet" "$packet"
+  cp "$publishable_packet" "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json"
+
+  "$PYTHON_BIN" - "$audit" <<'PY'
+import json, os, sys
+path=sys.argv[1]; data=json.load(open(path, encoding="utf-8"))
+data["runId"]="RUN-MISMATCHED-AUDIT"
+temporary=path+".test.tmp"
+json.dump(data, open(temporary,"w",encoding="utf-8"), indent=2)
+open(temporary,"a",encoding="utf-8").write("\n")
+os.replace(temporary,path)
+PY
+  retained_digest_before="$(accepted_state_digest)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "$name mismatched-audit duplicate refusal ($out)"
+  assert_eq "$(accepted_state_digest)" "$retained_digest_before" \
+    "$name mismatched-audit retained state"
+  assert_retained_refusal_quiet "$name mismatched-audit"
+  cp "$publishable_audit" "$audit"
+
+  mkdir -p "$imported_dir"
+  printf '{"unrelated":true}\n' >"$imported_dir/RUN-UNRELATED.json"
+  retained_digest_before="$(accepted_state_digest)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "$name unrelated-import duplicate refusal ($out)"
+  assert_eq "$(accepted_state_digest)" "$retained_digest_before" \
+    "$name unrelated-import retained state"
+  assert_retained_refusal_quiet "$name unrelated-import"
+  unlink "$imported_dir/RUN-UNRELATED.json"
+
   # The initial checkpoint hashes prove this fixture recovered the same durable
   # authority rather than manufacturing a new verdict or candidate. Only the
   # packet's blocked->accepted transition and lease/task statuses may change.
@@ -1116,7 +1342,7 @@ PY
     || fail "$name task did not perform blocked-to-accepted transition"
 
   verify_frozen_engine_bindings || fail "$name engine binding failed at test exit"
-  unset FROZEN_EVIDENCE_COUNTER
+  unset FROZEN_EVIDENCE_COUNTER FROZEN_EVIDENCE_TARGET_RUNS_DIR
   ENGINE_HOME="$source_engine"
   echo "ok: frozen accepted B->H recovers once after independent T and remains idempotent"
 }
@@ -1235,6 +1461,213 @@ assert d["acceptedCandidate"]["state"] == "integrated", d
 assert d["acceptedCandidate"]["mergeCommit"] == sys.argv[2], d
 PY
   echo "ok: frozen native accepted predecessor repairs through scheduler and exact integration"
+}
+
+test_native_repair_accepted_publication() {
+  local name=repair-accepted-publication source_engine test_engine lease run_dir packet audit
+  local base head target_after integration_target_before out rc=0 worker_before auditor_before gate_before
+  local decider_before evidence_before packet_after claim_before claim_after accounting_before
+  source_engine="$ENGINE_HOME"
+  FROZEN_BOUND_SOURCE_ENGINE="$source_engine"
+  FROZEN_BOUND_SOURCE_BINDING="$(tree_bytes_modes_binding "$source_engine")"
+  test_engine="$scratch/$name/test-engine"
+  mkdir -p "$test_engine"
+  test_engine="$(cd "$test_engine" && pwd -P)"
+  FROZEN_OWNED_TEST_ENGINE="$test_engine"
+  cp -R "$source_engine/." "$test_engine/"
+  chmod u+w "$test_engine/engine"
+  mv "$test_engine/engine/evidence-manifest.sh" \
+    "$test_engine/engine/evidence-manifest.real.sh"
+  cat >"$test_engine/engine/evidence-manifest.sh" <<'EVIDENCE'
+#!/usr/bin/env bash
+set -euo pipefail
+counter="${FROZEN_EVIDENCE_COUNTER:?}"
+target_runs="${FROZEN_EVIDENCE_TARGET_RUNS_DIR:?}"
+target_run_id="${FROZEN_EVIDENCE_TARGET_RUN_ID:?}"
+task_id=""
+run_dir=""
+args=("$@")
+for ((index=0; index<${#args[@]}; index++)); do
+  case "${args[$index]}" in
+    --task-id)
+      [[ $((index + 1)) -lt ${#args[@]} ]] && task_id="${args[$((index + 1))]}"
+      ;;
+    --run-dir)
+      [[ $((index + 1)) -lt ${#args[@]} ]] && run_dir="${args[$((index + 1))]}"
+      ;;
+  esac
+done
+real_driver="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/evidence-manifest.real.sh"
+if [[ "$task_id" != "TASK-0001" || ! -d "$run_dir" || ! -d "$target_runs" ]]; then
+  exec "$real_driver" "$@"
+fi
+run_dir="$(cd "$run_dir" && pwd -P)"
+target_runs="$(cd "$target_runs" && pwd -P)"
+if [[ "$(dirname "$run_dir")" != "$target_runs" || "$(basename "$run_dir")" != "$target_run_id" ]]; then
+  exec "$real_driver" "$@"
+fi
+count=0
+[[ -f "$counter" ]] && count="$(cat "$counter")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$counter"
+if [[ "$count" -eq 3 || "$count" -eq 4 ]]; then
+  echo "injected bounded repair-successor evidence transport failure" >&2
+  exit 77
+fi
+exec "$real_driver" "$@"
+EVIDENCE
+  chmod +x "$test_engine/engine/evidence-manifest.sh"
+  chmod -R a-w "$test_engine"
+  FROZEN_BOUND_TEST_ENGINE="$test_engine"
+  FROZEN_BOUND_TEST_BINDING="$(tree_bytes_modes_binding "$test_engine")"
+  verify_frozen_engine_bindings || fail "$name engine binding failed before campaign start"
+  ENGINE_HOME="$test_engine"
+  export FROZEN_EVIDENCE_COUNTER="$scratch/$name/counters/evidence-calls"
+  export FROZEN_EVIDENCE_TARGET_RUNS_DIR="$scratch/$name/repo/.singular-state/runs"
+  export FROZEN_EVIDENCE_TARGET_RUN_ID="RUN-$name-SUCCESSOR"
+
+  prepare_native_repair "$name"
+  assert_eq "$(calls evidence)" "0" \
+    "$name canary and predecessor did not consume successor evidence failures"
+  reconcile success "$name-successor-awaiting-publication"
+  lease="$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json"
+  run_dir="$FIXTURE_ROOT/.singular-state/runs/$REPAIR_RUN"
+  packet="$run_dir/packet.json"
+  audit="$run_dir/audit.json"
+  assert_file "$packet" "$name repair successor packet"
+  assert_file "$audit" "$name repair successor audit"
+  base="$($PYTHON_BIN - "$packet" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["baseRef"])
+PY
+)"
+  head="$($PYTHON_BIN - "$packet" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["headSha"])
+PY
+)"
+  "$PYTHON_BIN" - "$packet" "$audit" "$lease" "$REPAIR_RUN" \
+      "$REPAIR_BRANCH" "$REPAIR_WORKTREE" "$base" "$head" <<'PY'
+import json, os, sys
+packet, audit, lease = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
+run, branch, worktree, base, head = sys.argv[4:]
+authority = lease["recoveryAuthorization"]
+assert packet["status"] == "blocked" and audit["verdict"] == "accepted", (packet, audit)
+assert lease["status"] == "blocked" and authority["state"] == "claimed", lease
+assert packet["runId"] == lease["runId"] == authority["successorRunId"] == run, lease
+assert packet["branch"] == lease["branch"] == authority["successorBranch"] == branch, lease
+assert os.path.realpath(packet["workspace"]) == os.path.realpath(lease["worktree"]) == os.path.realpath(authority["successorWorktree"]) == os.path.realpath(worktree), lease
+assert packet["baseRef"] == lease["baseSha"] == authority["predecessorHeadSha"] == base, lease
+assert packet["headSha"] == head and head != base, packet
+PY
+
+  printf 'independent target after accepted repair\n' >"$FIXTURE_ROOT/repair-target-after.txt"
+  git -C "$FIXTURE_ROOT" add repair-target-after.txt
+  git -C "$FIXTURE_ROOT" commit -qm 'advance target after accepted repair successor'
+  target_after="$(git -C "$FIXTURE_ROOT" rev-parse target)"
+  [[ "$target_after" != "$base" && "$target_after" != "$head" ]] \
+    || fail "$name did not preserve distinct repair B/H/T"
+  if git -C "$FIXTURE_ROOT" merge-base --is-ancestor "$target_after" "$head"; then
+    fail "$name independent repair target unexpectedly precedes successor"
+  fi
+
+  claim_before="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["recoveryAuthorization"]
+print("|".join(str(a.get(k, "")) for k in ("authorizationId", "claimId", "reservationOwner", "reservationGeneration", "reservationRunId", "successorRunId", "successorBranch", "successorWorktree", "predecessorHeadSha")))
+PY
+)"
+  accounting_before="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps({"retryCount":d.get("retryCount"), "failureBudgets":d.get("failureBudgets"), "failureLimits":d.get("failureLimits")}, sort_keys=True, separators=(",", ":")))
+PY
+)"
+  worker_before="$(calls worker)"; auditor_before="$(calls auditor)"
+  gate_before="$(calls gate)"; decider_before="$(calls decider)"
+  evidence_before="$(calls evidence)"
+
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name claimed repair publication recovery ($out)"
+  assert_contains "$out" "RESUMED ACCEPTED EVIDENCE" "$name explicit repair recovery"
+  assert_eq "$(calls worker)" "$worker_before" "$name recovery worker calls"
+  assert_eq "$(calls auditor)" "$auditor_before" "$name recovery auditor calls"
+  assert_eq "$(calls gate)" "$gate_before" "$name recovery gate calls"
+  assert_eq "$(calls decider)" "$decider_before" "$name recovery decider calls"
+  assert_eq "$(calls evidence)" "$((evidence_before + 1))" "$name evidence-only recovery"
+  packet_after="$(shasum -a 256 "$packet" | awk '{print $1}')"
+  claim_after="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["recoveryAuthorization"]
+assert a["state"] == "claimed", a
+print("|".join(str(a.get(k, "")) for k in ("authorizationId", "claimId", "reservationOwner", "reservationGeneration", "reservationRunId", "successorRunId", "successorBranch", "successorWorktree", "predecessorHeadSha")))
+PY
+)"
+  assert_eq "$claim_after" "$claim_before" "$name claim/provenance preserved"
+  assert_eq "$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps({"retryCount":d.get("retryCount"), "failureBudgets":d.get("failureBudgets"), "failureLimits":d.get("failureLimits")}, sort_keys=True, separators=(",", ":")))
+PY
+)" "$accounting_before" "$name accounting preserved"
+  assert_file "$FIXTURE_ROOT/.singular-state/inbox/$REPAIR_RUN.json" "$name repair publication"
+
+  evidence_before="$(calls evidence)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name claimed repair duplicate ($out)"
+  assert_contains "$out" "already queued/imported; dispatch is a no-op" "$name exact duplicate"
+  assert_eq "$(calls worker)" "$worker_before" "$name duplicate worker calls"
+  assert_eq "$(calls auditor)" "$auditor_before" "$name duplicate auditor calls"
+  assert_eq "$(calls gate)" "$gate_before" "$name duplicate gate calls"
+  assert_eq "$(calls decider)" "$decider_before" "$name duplicate decider calls"
+  assert_eq "$(calls evidence)" "$evidence_before" "$name duplicate evidence calls"
+  assert_eq "$(shasum -a 256 "$packet" | awk '{print $1}')" "$packet_after" \
+    "$name duplicate packet bytes"
+
+  reconcile success "$name-successor-import"
+  "$PYTHON_BIN" - "$lease" "$claim_before" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["recoveryAuthorization"]
+assert "acceptedCandidate" not in d, d
+assert a["state"] == "claimed", a
+claim="|".join(str(a.get(k, "")) for k in ("authorizationId", "claimId", "reservationOwner", "reservationGeneration", "reservationRunId", "successorRunId", "successorBranch", "successorWorktree", "predecessorHeadSha"))
+assert claim == sys.argv[2], (claim, sys.argv[2])
+PY
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name imported repair duplicate ($out)"
+  assert_contains "$out" "already queued/imported; dispatch is a no-op" \
+    "$name exact imported duplicate"
+  assert_eq "$(calls worker)" "$worker_before" "$name imported duplicate worker calls"
+  assert_eq "$(calls auditor)" "$auditor_before" "$name imported duplicate auditor calls"
+  assert_eq "$(calls gate)" "$gate_before" "$name imported duplicate gate calls"
+  assert_eq "$(calls decider)" "$decider_before" "$name imported duplicate decider calls"
+  assert_eq "$(calls evidence)" "$evidence_before" "$name imported duplicate evidence calls"
+  integration_target_before="$(git -C "$FIXTURE_ROOT" rev-parse target)"
+  git -C "$FIXTURE_ROOT" merge-base --is-ancestor \
+    "$target_after" "$integration_target_before" \
+    || fail "$name integration target lost the independent target advance"
+  [[ "$integration_target_before" != "$base" && "$integration_target_before" != "$head" ]] \
+    || fail "$name repair product and integration identities collapsed"
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0001 --run-id "$name-integration" \
+    >"$scratch/$name-integration.log" 2>&1 \
+    || fail "$name exact repair integration failed: $(tail -30 "$scratch/$name-integration.log")"
+  "$PYTHON_BIN" - "$lease" "$head" "$integration_target_before" "$REPAIR_WORKTREE" <<'PY'
+import json, os, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); c=d["acceptedCandidate"]; a=d["recoveryAuthorization"]
+assert d["status"] == "integrated" and c["state"] == "integrated", d
+assert c["headSha"] == sys.argv[2] and a["state"] == "published", d
+assert os.path.realpath(d["worktree"]) == os.path.realpath(sys.argv[4]), d
+assert c["integrationProof"]["targetParent"] == sys.argv[3], c
+PY
+  verify_frozen_engine_bindings || fail "$name engine binding failed at test exit"
+  unset FROZEN_EVIDENCE_COUNTER FROZEN_EVIDENCE_TARGET_RUNS_DIR \
+    FROZEN_EVIDENCE_TARGET_RUN_ID
+  ENGINE_HOME="$source_engine"
+  echo "ok: claimed native repair resumes accepted publication once and integrates exact successor"
 }
 
 test_native_repair_started_crash() {
@@ -1494,12 +1927,14 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     ;;
   continuation-bootstrap) test_public_continuation_bootstrap_reissue ;;
   repair) test_native_repair_scheduler ;;
+  repair-accepted-publication) test_native_repair_accepted_publication ;;
   repair-crash) test_native_repair_started_crash ;;
   continuation)
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
     test_public_continuation_bootstrap_reissue
     test_native_repair_scheduler
+    test_native_repair_accepted_publication
     test_native_repair_started_crash
     ;;
   all)
@@ -1515,6 +1950,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     test_public_continuation_budget continuation-budget-exhausted 1
     test_public_continuation_bootstrap_reissue
     test_native_repair_scheduler
+    test_native_repair_accepted_publication
     test_native_repair_started_crash
     ;;
   *) fail "unknown FROZEN_TERMINAL_CASE=${FROZEN_TERMINAL_CASE}" ;;
