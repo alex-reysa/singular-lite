@@ -10,19 +10,35 @@ This campaign file defines the executable scope and completion requirements.
 The approved design replaces the historical context-evolution plan's rule that
 all new logic must be tiny ctx-*.sh wrappers. Prefer a cohesive Python service.
 
-The bootstrap TASK-1001 canary-isolation repair is an explicitly reviewed patch
-to the release baseline; its source revision is recorded in runtime-baseline.json.
-The frozen orchestrator is in `.singular-state/runtime/0.21.0-brain-bootstrap`. Changes to the
-product's engine must not change this runtime during the campaign. The launcher
-is `tools/brain-campaign/run.sh`. Campaign configuration, source snapshots, and
-raw observations stay in `.singular-state/`; do not commit runtime logs.
+Current rescue execution policy (user instructions of 2026-09-12, with the
+2026-09-13 continuation decision): preserve the B1–B5 product requirements below.
+The active immutable runtime and campaign are selected by
+`tools/brain-campaign/run.sh` and recorded in the durable rescue checkpoint.
+The original bootstrap runtime and its baseline evidence remain historical.
+Engine changes become operational only through a verified new immutable runtime
+and campaign; never modify an existing runtime or campaign identity in place.
+
+Implementers use GPT-5.6 Sol at high effort. Planner, final/paired auditor, critic
+and other normal model roles use GPT-6 Astra at medium effort; a fresh
+independent internal-failure investigation uses Astra at xhigh effort. Request
+normal/default speed and record effective metadata; requested speed does not
+prove provider-observed speed. Use at most two disjoint implementation workers.
+The L0 scheduler remains deterministic and final audits remain independent.
+
+The sole Codex supervisor may diagnose and repair internal engine defects
+directly, obtain independent review, verify affected host and real entrypoints,
+and adopt qualified changes at deliberate boundaries. Substantive brain and
+retained-obligation tasks run through the native engine. Preserve all failed
+attempts, cumulative accounting, rollback state and strict policy-drift checks.
+Record interventions separately from uninterrupted native delivery. Internal
+repairs do not require another user-permission round; actions outside existing
+authority still do. No push, production deployment, external messages or purchases.
+
 Workers must not modify the launcher, runner wrapper, frozen runtime, campaign
 policy, active DAG, planner contract, or this campaign scope to pass a task.
-
-Models: GPT-6 Astra high for planner, recovery decider, supervisor; GPT-5.6 Sol
-high for implementer, plan critic, final auditor, and paired auditor. The L0
-scheduler remains deterministic. Use fresh audit sessions and preserve all
-existing audit, exact-tree gate, scope, secret-scan, and campaign-binding rules.
+Campaign configuration, source snapshots and raw observations stay in
+`.singular-state/`; do not commit runtime logs. Preserve audit, exact-tree gate,
+scope, secret-scan and campaign-binding requirements.
 
 The initial rollout remains opt-in for ordinary consumers. Implement complete
 vertical behavior with focused tests and meaningful task widths. Do not create
@@ -138,6 +154,10 @@ built runtime is a replacement campaign with a new frozen identity, never a
 hot patch to this one.
 
 ## Retained setup evidence
+
+The following paragraphs describe the initial baseline, not current model
+routing, runtime behavior or execution authority. Use the current rescue
+checkpoint and verified source/runtime state for continuation.
 
 Use .singular-state/campaign-evidence/operator-observations.ndjson and the
 native runs/events as the raw baseline. Classify operator-induced setup failures,

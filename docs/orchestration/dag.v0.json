@@ -11,7 +11,9 @@
     "context-service",
     "context-invocations",
     "memory-lifecycle",
-    "context-evaluation"
+    "context-evaluation",
+    "reconciliation-discovery",
+    "invocation-envelope"
   ],
   "nodes": [
     {
@@ -66,6 +68,28 @@
         "memory-lifecycle"
       ],
       "requiredCompletion": "Deterministic retrieval evaluation and campaign observation analysis report correct metrics and missing data, adoption and rollback docs exist, actual campaign findings are reported without causal overclaims, and B5 scenarios in docs/brain-build-plan/campaign.md pass."
+    },
+    {
+      "id": "reconciliation-discovery",
+      "stage": "R1015",
+      "area": "brain",
+      "layer": "engine_runtime",
+      "kind": "runtime",
+      "dependsOn": [
+        "context-evaluation"
+      ],
+      "requiredCompletion": "Retained TASK-1015 discovery obligations are complete: event-driven dirty discovery, fair bounded sweep, per-entry dependency invalidation, restart-safe atomic acknowledgement and actual unchanged-cycle zero expensive historical validations; final candidate authority remains uncached."
+    },
+    {
+      "id": "invocation-envelope",
+      "stage": "R1016",
+      "area": "brain",
+      "layer": "engine_runtime",
+      "kind": "runtime",
+      "dependsOn": [
+        "reconciliation-discovery"
+      ],
+      "requiredCompletion": "Retained TASK-1016 obligations are complete: whole managed-envelope accounting and output reserve, deterministic optional admission, supported retrieval/resume interception and revocation-safe sessions; provider controls are pinned and unavailable guarantees explicitly refused, with actual-entrypoint evidence."
     }
   ]
 }
