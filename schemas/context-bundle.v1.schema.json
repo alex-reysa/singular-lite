@@ -72,7 +72,7 @@
       "required": ["ref", "kind", "sourceLocation", "sourceSha256", "excerptSha256", "range", "reasons", "validity", "priority"],
       "properties": {
         "ref": {"type": "string", "minLength": 1},
-        "kind": {"enum": ["task", "brain", "code", "run"]},
+        "kind": {"enum": ["task", "brain", "code", "run", "memory"]},
         "sourceLocation": {"type": "string", "minLength": 1},
         "sourceSha256": {"$ref": "#/$defs/hash"},
         "excerptSha256": {"$ref": "#/$defs/hash"},

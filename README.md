@@ -684,14 +684,33 @@ revalidates retained sources, authored artifact bytes, authority documents, and
 configured code identity before trusted retrieval. Missing or drifted identity
 fails closed. Rejection, supersession, and tombstones are durable record states;
 the trusted index is derived and can be rebuilt without restoring retired
-content. Each lifecycle mutation first persists a write-ahead operation journal
-containing its exact request fingerprint, response, and intended record writes;
-a fresh process deterministically completes a prepared journal before returning
-an idempotent replay. Context snapshots bind the approved artifact, memory
-record, citations, current policy, authority source, and applicable code
-identity, and revalidate them immediately before returning retrieved bytes.
-Operation IDs provide conflict-detecting idempotent replay, and bounded
-checkpoints recover solely from local retained files:
+content. Each lifecycle writer takes the existing store lock and drains
+prepared work before reading lifecycle state. New journals bind the exact
+request and first-captured input hashes, expected record revision/hash,
+resulting revision/hash, operation, and response. Recovery applies a successor
+only to its recorded predecessor, acknowledges an exact result or proven
+descendant, and otherwise fails closed. Legacy prepared journals without that
+ancestry are acknowledged only when their exact result is already present.
+Replay therefore cannot reopen rejected, quarantined, superseded, or tombstoned
+memory. Index refresh is derived repair after the authoritative journal/record
+commit; deleting or failing it does not change lifecycle state.
+
+Context readers never acquire or create the writer lock, store directories,
+indexes, caches, or ledgers. They parse and hash the same captured record bytes,
+require the selected revision's journal to be committed, bind record and
+operation membership plus artifact, citations, current policy, authority, and
+code identity, and retry snapshot acquisition only within a fixed bound. An
+absent store is an empty snapshot. Prepared, malformed, conflicting, or
+changing state yields a recovery-required or changed-snapshot refusal and is
+repaired only by a later writer.
+
+Search, get, bundle build, CLI publication, and host admission revalidate the
+frozen snapshot at their publication/admission boundary. The guarantee is the
+exact immutable bytes selected at that validated point in time; it does not
+claim synchronization with a retirement after validation through an arbitrary
+consumer's read of the final stdout byte. Operation IDs remain
+conflict-detecting and idempotent, and bounded checkpoints recover solely from
+local retained files:
 
 ```bash
 singular memory propose --operation-id capture-1 --task TASK-1234 \

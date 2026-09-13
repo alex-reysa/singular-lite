@@ -158,11 +158,13 @@ def main(argv: list[str] | None = None) -> int:
                 prior_bundle=prior,
             )
             if args.output and service.enabled:
+                service.validate_snapshot()
                 output = Path(args.output)
                 if not output.is_absolute():
                     output = cwd / output
                 publish_bundle(result, output)
             if args.prompt_output and service.enabled:
+                service.validate_snapshot()
                 prompt_output = Path(args.prompt_output)
                 if not prompt_output.is_absolute():
                     prompt_output = cwd / prompt_output
@@ -175,6 +177,11 @@ def main(argv: list[str] | None = None) -> int:
             }
         else:
             result = service.explain(args.bundle)
+        # This validates the frozen response at the actual CLI publication
+        # boundary. It is a point-in-time guarantee; no writer synchronization
+        # is claimed after this check and through an arbitrary stdout consumer.
+        if service.enabled and args.command != "explain":
+            service.validate_snapshot()
         json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         sys.stdout.write("\n")
         return 0

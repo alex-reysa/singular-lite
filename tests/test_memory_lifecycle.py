@@ -25,6 +25,46 @@ PUBLIC_CLI = ROOT / "cli" / "singular"
 CREDENTIAL_KEY = b"fixture-host-held-memory-credential-key"
 
 
+def assert_schema_instance(test: unittest.TestCase, value: object,
+                           schema: dict, root: dict, path: str = "$") -> None:
+    if "$ref" in schema:
+        target = root
+        for part in schema["$ref"].removeprefix("#/").split("/"):
+            target = target[part]
+        assert_schema_instance(test, value, target, root, path)
+        return
+    if "const" in schema:
+        test.assertEqual(value, schema["const"], path)
+    if "enum" in schema:
+        test.assertIn(value, schema["enum"], path)
+    kinds = schema.get("type")
+    if kinds:
+        kinds = [kinds] if isinstance(kinds, str) else kinds
+        matches = {
+            "object": isinstance(value, dict),
+            "array": isinstance(value, list),
+            "string": isinstance(value, str),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
+            "null": value is None,
+        }
+        test.assertTrue(any(matches.get(kind, False) for kind in kinds), (path, kinds, value))
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        test.assertFalse(set(required) - set(value), (path, set(required) - set(value)))
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            test.assertFalse(set(value) - set(properties), (path, set(value) - set(properties)))
+        for key, child in value.items():
+            if key in properties:
+                assert_schema_instance(test, child, properties[key], root, f"{path}.{key}")
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, child in enumerate(value):
+            assert_schema_instance(test, child, schema["items"], root, f"{path}[{index}]")
+    if isinstance(value, str) and "pattern" in schema:
+        test.assertRegex(value, schema["pattern"], path)
+
+
 def digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -214,6 +254,30 @@ class MemoryLifecycleTest(unittest.TestCase):
         if proc.returncode:
             self.fail(proc.stderr)
         return json.loads(proc.stdout)
+
+    def sandbox_context_search(self, *, ok: bool = True) -> subprocess.CompletedProcess[str]:
+        profile = (
+            '(version 1) (allow default) '
+            f'(deny file-write* (subpath "{self.workspace.resolve()}")) '
+            f'(deny file-write* (subpath "{ROOT.resolve()}"))'
+        )
+        environment = {
+            **os.environ,
+            "SINGULAR_ENGINE_HOME": str(ROOT),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        proc = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-p", profile, "bash", str(PUBLIC_CLI),
+             "context", "search", "--config", str(self.config),
+             "--workspace", str(self.workspace), "--role", "implementer",
+             "--query", "transient capacity"],
+            text=True, capture_output=True, cwd=self.workspace, env=environment,
+        )
+        if ok:
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        else:
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        return proc
 
     def test_proposal_requires_verified_independent_approval(self) -> None:
         unauthenticated = self.memory(
@@ -463,6 +527,216 @@ class MemoryLifecycleTest(unittest.TestCase):
             "--reason", "public lifecycle complete", public=True,
         )
         self.assertEqual(retired["memory"]["status"], "tombstoned")
+
+    def test_interrupted_approval_replay_cannot_resurrect_tombstone(self) -> None:
+        candidate = self.propose("proposal-retirement-race")
+        memory_id = candidate["memory"]["memoryId"]
+        interrupted = self.memory(
+            "approve", "--operation-id", "approval-before-retirement",
+            "--memory-id", memory_id, "--authority", "independent-reviewer",
+            extra_env={
+                "SINGULAR_MEMORY_FAIL_AFTER_STATE": "approval-before-retirement",
+            },
+            ok=False,
+        )
+        self.assertIn("injected interruption", interrupted["stderr"])
+        self.memory(
+            "tombstone", "--operation-id", "retire-after-interruption",
+            "--memory-id", memory_id, "--authority", "independent-reviewer",
+            "--reason", "durable retirement",
+        )
+        self.approve(memory_id, "approval-before-retirement")
+        shown = self.memory("show", "--memory-id", memory_id)
+        self.assertEqual(shown["memory"]["status"], "tombstoned")
+        self.assertTrue(self.context_search("transient capacity")["abstained"])
+
+    def test_prepared_intent_recovery_and_descendant_replay_are_revision_safe(self) -> None:
+        candidate = self.propose("proposal-prepared-approval")
+        memory_id = candidate["memory"]["memoryId"]
+        self.memory(
+            "approve", "--operation-id", "prepared-approval",
+            "--memory-id", memory_id, "--authority", "independent-reviewer",
+            extra_env={"SINGULAR_MEMORY_FAIL_AFTER_JOURNAL": "prepared-approval"},
+            ok=False,
+        )
+        rejected = self.memory(
+            "reject", "--operation-id", "conflicting-rejection",
+            "--memory-id", memory_id, "--authority", "independent-reviewer",
+            "--reason", "too late", ok=False,
+        )
+        self.assertIn("requires proposed memory", rejected["stderr"])
+        self.memory(
+            "tombstone", "--operation-id", "retire-prepared-approval",
+            "--memory-id", memory_id, "--authority", "independent-reviewer",
+            "--reason", "retired after recovered approval",
+        )
+        self.approve(memory_id, "prepared-approval")
+        self.assertEqual(
+            self.memory("show", "--memory-id", memory_id)["memory"]["status"],
+            "tombstoned",
+        )
+
+        proposal = self.memory(
+            "propose", "--operation-id", "interrupted-proposal", "--task", "TASK-A",
+            "--actor", "task-a-worker", "--scope", "project", "--policy", "task",
+            "--content-file", "candidate.md", "--source", "source-event.json",
+            "--code", "reviewer-code.py",
+            extra_env={"SINGULAR_MEMORY_FAIL_AFTER_STATE": "interrupted-proposal"},
+            ok=False,
+        )
+        self.assertIn("injected interruption", proposal["stderr"])
+        recovered = self.propose("interrupted-proposal")
+        second_id = recovered["memory"]["memoryId"]
+        self.approve(second_id, "approve-after-proposal-recovery")
+        self.propose("interrupted-proposal")
+        self.assertEqual(
+            self.memory("show", "--memory-id", second_id)["memory"]["status"],
+            "approved",
+        )
+
+    def test_derived_index_failure_does_not_undo_authoritative_commit(self) -> None:
+        candidate = self.propose("proposal-index-failure")
+        memory_id = candidate["memory"]["memoryId"]
+        approved = self.memory(
+            "approve", "--operation-id", "approval-index-failure",
+            "--memory-id", memory_id, "--authority", "independent-reviewer",
+            extra_env={"SINGULAR_MEMORY_FAIL_INDEX_REFRESH": "1"},
+        )
+        self.assertEqual(approved["memory"]["status"], "approved")
+        (self.workspace / ".memory" / "index.json").unlink(missing_ok=True)
+        rebuilt = self.memory("rebuild")
+        self.assertIn(memory_id, rebuilt["trusted"])
+
+    def test_memory_delta_revokes_retired_body_and_both_bundle_schemas_accept_it(self) -> None:
+        candidate = self.propose("proposal-delta")
+        memory_id = candidate["memory"]["memoryId"]
+        self.approve(memory_id, "approval-delta")
+        task = self.workspace / "task.md"
+        base = self.workspace / "base.md"
+        task.write_text("Use transient capacity safely.\n", encoding="utf-8")
+        base.write_text("BASE DRIVER\n", encoding="utf-8")
+        first = ContextService.from_config(
+            self.config, role="implementer", workspace=self.workspace,
+        ).build(
+            task=task, phase="implement", budget_bytes=16000, base_prompt=base,
+            delivery="initial", invocation_id="memory-initial",
+        )
+        body = (self.workspace / "candidate.md").read_text(encoding="utf-8")
+        self.assertIn(body.strip(), first["prompt"])
+        self.assertTrue(any(item.get("kind") == "memory" for item in first["provenance"]))
+        for relative in (
+            "schemas/context-bundle.v1.schema.json",
+            "schemas/orchestration/context-bundle.v1.schema.json",
+        ):
+            schema = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+            assert_schema_instance(self, first, schema, schema)
+
+        self.memory(
+            "tombstone", "--operation-id", "retire-before-delta",
+            "--memory-id", memory_id, "--authority", "independent-reviewer",
+            "--reason", "withdraw before retry",
+        )
+        delta = ContextService.from_config(
+            self.config, role="implementer", workspace=self.workspace,
+        ).build(
+            task=task, phase="implement", budget_bytes=16000, base_prompt=base,
+            delivery="delta", prior_bundle=first, invocation_id="memory-retry",
+        )
+        ref = "memory:" + memory_id
+        self.assertIn(f"Revoked since the prior bundle: {ref}", delta["prompt"])
+        self.assertNotIn(body.strip(), delta["prompt"])
+        self.assertIn({"ref": ref, "reason": "revoked_since_prior_bundle"},
+                      delta["omissions"])
+
+    @unittest.skipUnless(Path("/usr/bin/sandbox-exec").is_file(),
+                         "requires macOS sandbox-exec")
+    def test_public_memory_readers_are_os_enforced_read_only_for_absent_populated_and_pending_store(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
+        victim = self.workspace / "write-policy-victim"
+        rename_target = self.workspace / "write-policy-renamed"
+        victim.write_text("retain", encoding="utf-8")
+        profile = (
+            '(version 1) (allow default) '
+            f'(deny file-write* (subpath "{self.workspace.resolve()}"))'
+        )
+        control = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-p", profile, sys.executable, "-c",
+             "import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); q=pathlib.Path(sys.argv[2]); "
+             "actions=[lambda:(p.parent/'denied-create').write_text('x'), "
+             "lambda:open(p,'r+').close(), lambda:os.rename(p,q), lambda:os.unlink(p)]; "
+             "denied=0\nfor action in actions:\n try: action()\n except PermissionError: denied += 1\n"
+             "raise SystemExit(0 if denied == 4 else 9)",
+             str(victim), str(rename_target)],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertFalse((self.workspace / ".memory").exists())
+        absent = self.sandbox_context_search()
+        self.assertTrue(json.loads(absent.stdout)["abstained"])
+        self.assertFalse((self.workspace / ".memory").exists())
+
+        candidate = self.propose("readonly-populated")
+        self.approve(candidate["memory"]["memoryId"], "readonly-approved")
+        lock = self.workspace / ".memory" / ".lock"
+        self.assertTrue(lock.is_file())
+        before = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
+                  for path in self.workspace.rglob("*") if path.is_file()}
+        populated = self.sandbox_context_search()
+        self.assertFalse(json.loads(populated.stdout)["abstained"])
+        after = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
+                 for path in self.workspace.rglob("*") if path.is_file()}
+        self.assertEqual(before, after)
+
+        self.memory(
+            "propose", "--operation-id", "readonly-pending", "--task", "TASK-A",
+            "--actor", "task-a-worker", "--scope", "project", "--policy", "task",
+            "--content-file", "candidate.md", "--source", "source-event.json",
+            "--code", "reviewer-code.py",
+            extra_env={"SINGULAR_MEMORY_FAIL_AFTER_JOURNAL": "readonly-pending"},
+            ok=False,
+        )
+        before_pending = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
+                          for path in self.workspace.rglob("*") if path.is_file()}
+        pending = self.sandbox_context_search(ok=False)
+        self.assertIn("recovery required", pending.stderr)
+        after_pending = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
+                         for path in self.workspace.rglob("*") if path.is_file()}
+        self.assertEqual(before_pending, after_pending)
+
+    def test_ambiguous_legacy_and_malformed_journals_fail_closed(self) -> None:
+        candidate = self.propose("legacy-journal-candidate")
+        memory_id = candidate["memory"]["memoryId"]
+        record = json.loads(
+            (self.workspace / ".memory" / "records" / f"{memory_id}.json").read_text()
+        )
+        obsolete = json.loads(json.dumps(record))
+        obsolete["status"] = "approved"
+        obsolete["trust"] = "trusted"
+        legacy_id = "candidate-era-unapplied-approval"
+        legacy = {
+            "operationId": legacy_id,
+            "fingerprint": "sha256:" + "0" * 64,
+            "response": {"schema": "singular.memory.operation.v1", "memory": obsolete},
+            "state": "prepared", "recordWrites": [obsolete],
+            "checkpointWrites": [], "refreshIndex": True,
+        }
+        operation_path = self.workspace / ".memory" / "operations" / (
+            hashlib.sha256(legacy_id.encode()).hexdigest() + ".json"
+        )
+        operation_path.write_text(json.dumps(legacy, sort_keys=True), encoding="utf-8")
+        blocked = self.memory("rebuild", ok=False)
+        self.assertIn("ambiguous unapplied record intent", blocked["stderr"])
+        operation_path.unlink()
+
+        malformed = self.workspace / ".memory" / "operations" / "malformed.json"
+        malformed.write_text("{", encoding="utf-8")
+        blocked = self.memory("rebuild", ok=False)
+        self.assertIn("operation journal is invalid", blocked["stderr"])
+        malformed.unlink()
+        self.assertEqual(
+            self.memory("show", "--memory-id", memory_id)["memory"]["status"],
+            "proposed",
+        )
 
 
 if __name__ == "__main__":

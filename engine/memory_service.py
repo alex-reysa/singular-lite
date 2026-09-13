@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import tempfile
+import copy
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping
 
@@ -100,11 +101,16 @@ def _atomic_json(path: Path, value: Any) -> None:
                 pass
 
 
+def _json_bytes(value: Any) -> bytes:
+    return _canonical(value) + b"\n"
+
+
 class MemoryStore:
     """Filesystem-backed lifecycle store with cross-process serialization."""
 
-    def __init__(self, config_path: Path, root: Path) -> None:
-        config, _ = _read_json(config_path, "configuration")
+    def __init__(self, config_path: Path, root: Path, *,
+                 configuration: tuple[dict[str, Any], bytes] | None = None) -> None:
+        config, _ = configuration or _read_json(config_path, "configuration")
         settings = config.get("memoryService", {})
         if not isinstance(settings, dict):
             raise MemoryError("memoryService must be an object")
@@ -145,6 +151,9 @@ class MemoryStore:
         record, _ = _read_json(self._record_path(memory_id), "memory record")
         return record
 
+    def read_record_snapshot(self, memory_id: str) -> tuple[dict[str, Any], bytes]:
+        return _read_json(self._record_path(memory_id), "memory record")
+
     def write_record(self, record: dict[str, Any]) -> None:
         _atomic_json(self._record_path(record["memoryId"]), record)
 
@@ -155,6 +164,49 @@ class MemoryStore:
         records = [_read_json(path, "memory record")[0]
                    for path in sorted(directory.glob("mem-*.json"))]
         return records
+
+    def read_committed_record(self, memory_id: str, attempts: int = 3) -> dict[str, Any]:
+        """Read one committed revision without taking or creating a writer lock."""
+        records_dir = self.store / "records"
+        operations_dir = self.store / "operations"
+        for attempt in range(attempts):
+            before = (_directory_identity(records_dir), _directory_identity(operations_dir))
+            operations: dict[str, tuple[dict[str, Any], bytes]] = {}
+            if operations_dir.is_dir():
+                for path in sorted(operations_dir.glob("*.json")):
+                    operation, raw = _read_json(path, "operation journal")
+                    if operation.get("state") == "prepared":
+                        raise MemoryError(
+                            "memory snapshot recovery required: prepared operation "
+                            + str(operation.get("operationId"))
+                        )
+                    if operation.get("state") != "committed":
+                        raise MemoryError("memory snapshot encountered a malformed operation journal")
+                    operations[str(operation.get("operationId"))] = (operation, raw)
+            record, raw = self.read_record_snapshot(memory_id)
+            after = (_directory_identity(records_dir), _directory_identity(operations_dir))
+            if before != after:
+                if attempt + 1 < attempts:
+                    continue
+                raise MemoryError("memory snapshot changed during bounded acquisition")
+            operation_id = _current_operation_id(record)
+            entry = operations.get(operation_id or "")
+            if entry is None:
+                raise MemoryError(f"memory record is not bound to a committed transaction: {memory_id}")
+            operation = entry[0]
+            result_hashes = {
+                item.get("result", {}).get("sha256")
+                for item in operation.get("recordTransitions", [])
+                if isinstance(item, dict) and item.get("memoryId") == memory_id
+            }
+            result_hashes.update(
+                _sha256(_json_bytes(item)) for item in operation.get("recordWrites", [])
+                if isinstance(item, dict) and item.get("memoryId") == memory_id
+            )
+            if _sha256(raw) not in result_hashes:
+                raise MemoryError(f"memory record revision is not committed: {memory_id}")
+            return record
+        raise MemoryError("memory snapshot changed during bounded acquisition")
 
     def _operation_path(self, operation_id: str) -> Path:
         if not isinstance(operation_id, str) or not operation_id:
@@ -176,30 +228,165 @@ class MemoryStore:
             raise MemoryError(f"operation record is corrupt: {operation_id}")
         return response
 
+    @staticmethod
+    def _record_revision(record: Mapping[str, Any]) -> int:
+        revision = record.get("revision", 0)
+        return revision if isinstance(revision, int) and not isinstance(revision, bool) else -1
+
+    def _advance_record(self, record: dict[str, Any], operation_id: str,
+                        predecessor_raw: bytes | None) -> dict[str, Any]:
+        successor = copy.deepcopy(record)
+        predecessor_hash = _sha256(predecessor_raw) if predecessor_raw is not None else None
+        ancestry = list(successor.get("ancestry", []))
+        if predecessor_hash is not None and predecessor_hash not in ancestry:
+            ancestry.append(predecessor_hash)
+        successor["revision"] = self._record_revision(record) + 1
+        successor["transactionId"] = operation_id
+        successor["ancestry"] = ancestry
+        return successor
+
+    def _drain_unlocked(self) -> None:
+        directory = self.store / "operations"
+        if not directory.is_dir():
+            return
+        for path in sorted(directory.glob("*.json")):
+            operation, _ = _read_json(path, "operation journal")
+            if operation.get("state") == "prepared":
+                self._recover_operation(path, operation)
+            elif operation.get("state") != "committed":
+                raise MemoryError(
+                    f"operation journal is corrupt: {operation.get('operationId')}"
+                )
+
     def _recover_operation(self, path: Path, operation: dict[str, Any]) -> None:
         if operation.get("state") == "committed":
             return
         if operation.get("state") != "prepared":
             raise MemoryError(f"operation journal is corrupt: {operation.get('operationId')}")
-        for record in operation.get("recordWrites", []):
-            if not isinstance(record, dict):
-                raise MemoryError("operation journal contains an invalid memory record")
-            self.write_record(record)
-        for checkpoint in operation.get("checkpointWrites", []):
-            if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("checkpointId"), str):
-                raise MemoryError("operation journal contains an invalid checkpoint")
-            _atomic_json(
-                self.store / "checkpoints" / f"{checkpoint['checkpointId']}.json",
-                checkpoint,
-            )
-        if operation.get("refreshIndex", False):
-            self._write_index_unlocked()
+        transitions = operation.get("recordTransitions")
+        if transitions is None:
+            # Candidate-era journals did not bind a predecessor. They are safe
+            # to acknowledge only when their exact result is already present;
+            # applying any other legacy intent would invent causal ordering.
+            for record in operation.get("recordWrites", []):
+                if not isinstance(record, dict):
+                    raise MemoryError("operation journal contains an invalid memory record")
+                try:
+                    current = self._record_path(record.get("memoryId", "")).read_bytes()
+                except FileNotFoundError:
+                    current = None
+                if current != _json_bytes(record):
+                    raise MemoryError(
+                        "legacy prepared operation has ambiguous unapplied record intent: "
+                        + str(operation.get("operationId"))
+                    )
+        elif not isinstance(transitions, list):
+            raise MemoryError("operation journal recordTransitions must be an array")
+        else:
+            for transition in transitions:
+                if not isinstance(transition, dict):
+                    raise MemoryError("operation journal contains an invalid record transition")
+                memory_id = transition.get("memoryId")
+                expected = transition.get("expected")
+                result = transition.get("result")
+                if (not isinstance(memory_id, str) or not isinstance(expected, dict)
+                        or not isinstance(result, dict)
+                        or not isinstance(result.get("record"), dict)):
+                    raise MemoryError("operation journal contains an invalid record transition")
+                result_record = result["record"]
+                result_raw = _json_bytes(result_record)
+                if (result.get("sha256") != _sha256(result_raw)
+                        or result.get("revision") != self._record_revision(result_record)):
+                    raise MemoryError("operation journal result identity is invalid")
+                record_path = self._record_path(memory_id)
+                try:
+                    current_raw = record_path.read_bytes()
+                    current = json.loads(current_raw.decode("utf-8"))
+                except FileNotFoundError:
+                    current_raw, current = None, None
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise MemoryError(f"current memory record is invalid: {memory_id}: {exc}") from exc
+                current_hash = _sha256(current_raw) if current_raw is not None else None
+                if current_hash == result["sha256"]:
+                    continue
+                if isinstance(current, dict) and result["sha256"] in current.get("ancestry", []):
+                    continue
+                expected_exists = expected.get("exists")
+                expected_hash = expected.get("sha256")
+                matches_predecessor = (
+                    (expected_exists is False and current_raw is None)
+                    or (
+                        expected_exists is True and current_hash == expected_hash
+                        and isinstance(current, dict)
+                        and expected.get("revision") == self._record_revision(current)
+                    )
+                )
+                if not matches_predecessor:
+                    raise MemoryError(
+                        "prepared operation conflicts with current memory revision: "
+                        + str(operation.get("operationId"))
+                    )
+                self.write_record(result_record)
+        checkpoint_transitions = operation.get("checkpointTransitions")
+        if checkpoint_transitions is None:
+            for checkpoint in operation.get("checkpointWrites", []):
+                if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("checkpointId"), str):
+                    raise MemoryError("operation journal contains an invalid checkpoint")
+                checkpoint_path = self.store / "checkpoints" / f"{checkpoint['checkpointId']}.json"
+                try:
+                    current = checkpoint_path.read_bytes()
+                except FileNotFoundError:
+                    current = None
+                if current != _json_bytes(checkpoint):
+                    raise MemoryError(
+                        "legacy prepared operation has ambiguous unapplied checkpoint intent: "
+                        + str(operation.get("operationId"))
+                    )
+        elif not isinstance(checkpoint_transitions, list):
+            raise MemoryError("operation journal checkpointTransitions must be an array")
+        else:
+            for transition in checkpoint_transitions:
+                if (not isinstance(transition, dict)
+                        or not isinstance(transition.get("checkpointId"), str)
+                        or not isinstance(transition.get("result"), dict)):
+                    raise MemoryError("operation journal contains an invalid checkpoint transition")
+                checkpoint = transition["result"].get("checkpoint")
+                expected_hash = transition.get("expectedSha256")
+                if not isinstance(checkpoint, dict):
+                    raise MemoryError("operation journal contains an invalid checkpoint transition")
+                checkpoint_raw = _json_bytes(checkpoint)
+                if transition["result"].get("sha256") != _sha256(checkpoint_raw):
+                    raise MemoryError("operation journal checkpoint result identity is invalid")
+                checkpoint_path = self.store / "checkpoints" / f"{transition['checkpointId']}.json"
+                try:
+                    current = checkpoint_path.read_bytes()
+                except FileNotFoundError:
+                    current = None
+                if current == checkpoint_raw:
+                    continue
+                if expected_hash is not None or current is not None:
+                    raise MemoryError(
+                        "prepared operation conflicts with current checkpoint: "
+                        + str(operation.get("operationId"))
+                    )
+                _atomic_json(checkpoint_path, checkpoint)
         if os.environ.get("SINGULAR_MEMORY_FAIL_AFTER_STATE") == operation.get("operationId"):
             raise MemoryError(
                 f"injected interruption after durable state: {operation.get('operationId')}"
             )
         operation["state"] = "committed"
         _atomic_json(path, operation)
+        if os.environ.get("SINGULAR_MEMORY_FAIL_AFTER_ACK") == operation.get("operationId"):
+            raise MemoryError(
+                f"injected interruption after durable acknowledgement: {operation.get('operationId')}"
+            )
+        if operation.get("refreshIndex", False):
+            try:
+                self._write_index_unlocked()
+            except (OSError, MemoryError):
+                # The index is derived. The committed journal and record remain
+                # authoritative and a later rebuild can repair this projection.
+                pass
 
     def commit_operation(
         self,
@@ -210,6 +397,7 @@ class MemoryStore:
         record_writes: list[dict[str, Any]] | None = None,
         checkpoint_writes: list[dict[str, Any]] | None = None,
         refresh_index: bool = False,
+        expected_records: Mapping[str, bytes | None] | None = None,
     ) -> None:
         path = self._operation_path(operation_id)
         operation = {
@@ -217,8 +405,45 @@ class MemoryStore:
             "fingerprint": _sha256(_canonical(request)),
             "response": response,
             "state": "prepared",
-            "recordWrites": record_writes or [],
-            "checkpointWrites": checkpoint_writes or [],
+            "recordWrites": [],
+            "recordTransitions": [
+                {
+                    "memoryId": record["memoryId"],
+                    "expected": {
+                        "exists": (expected_records or {}).get(record["memoryId"]) is not None,
+                        "sha256": (
+                            _sha256((expected_records or {})[record["memoryId"]])
+                            if (expected_records or {}).get(record["memoryId"]) is not None
+                            else None
+                        ),
+                        "revision": (
+                            self._record_revision(json.loads(
+                                (expected_records or {})[record["memoryId"]].decode("utf-8")
+                            ))
+                            if (expected_records or {}).get(record["memoryId"]) is not None
+                            else 0
+                        ),
+                    },
+                    "result": {
+                        "sha256": _sha256(_json_bytes(record)),
+                        "revision": self._record_revision(record),
+                        "record": record,
+                    },
+                }
+                for record in (record_writes or [])
+            ],
+            "checkpointWrites": [],
+            "checkpointTransitions": [
+                {
+                    "checkpointId": checkpoint["checkpointId"],
+                    "expectedSha256": None,
+                    "result": {
+                        "sha256": _sha256(_json_bytes(checkpoint)),
+                        "checkpoint": checkpoint,
+                    },
+                }
+                for checkpoint in (checkpoint_writes or [])
+            ],
             "refreshIndex": refresh_index,
         }
         _atomic_json(path, operation)
@@ -401,6 +626,8 @@ class MemoryStore:
         return result
 
     def _write_index_unlocked(self) -> dict[str, Any]:
+        if os.environ.get("SINGULAR_MEMORY_FAIL_INDEX_REFRESH") == "1":
+            raise MemoryError("injected derived index refresh failure")
         trusted = [record["memoryId"] for record in self.records()
                    if self.trust(record) == "trusted"]
         index = {"schema": "singular.memory.index.v1", "trusted": trusted,
@@ -430,8 +657,13 @@ class MemoryStore:
             "scope": args.scope, "policyId": args.policy, "content": content_rel,
             "source": source_rel, "code": code,
             "credentialClaims": credential["claimsSha256"],
+            "captured": {
+                "contentSha256": _sha256(content), "sourceSha256": _sha256(source),
+                "code": code,
+            },
         }
         with self.locked():
+            self._drain_unlocked()
             replay = self.replay(args.operation_id, request)
             if replay is not None:
                 return replay
@@ -457,22 +689,25 @@ class MemoryStore:
                 "createdAt": created,
                 "updatedAt": created,
             }
+            record = self._advance_record(record, args.operation_id, None)
             response = {"schema": "singular.memory.operation.v1", "memory": record}
             self.commit_operation(
                 args.operation_id, request, response,
                 record_writes=[record], refresh_index=True,
+                expected_records={memory_id: None},
             )
             return response
 
     def review(self, args: argparse.Namespace) -> dict[str, Any]:
-        record = self.read_record(args.memory_id)
+        record = self.read_committed_record(args.memory_id)
         authority = self.authority(args.authority, "review", record)
         return {"schema": "singular.memory.review.v1", "memoryId": args.memory_id,
                 "eligible": record["status"] == "proposed", "authority": authority}
 
     def decide(self, args: argparse.Namespace, action: str) -> dict[str, Any]:
         with self.locked():
-            record = self.read_record(args.memory_id)
+            self._drain_unlocked()
+            record, predecessor_raw = self.read_record_snapshot(args.memory_id)
             permission = "reject" if action == "quarantine" else action
             authority = self.authority(args.authority, permission, record)
             expected_credential = {
@@ -510,16 +745,19 @@ class MemoryStore:
                 "credential": credential,
             }
             record["updatedAt"] = _now()
+            record = self._advance_record(record, args.operation_id, predecessor_raw)
             response = {"schema": "singular.memory.operation.v1", "memory": self.view(record)}
             self.commit_operation(
                 args.operation_id, request, response,
                 record_writes=[record], refresh_index=True,
+                expected_records={args.memory_id: predecessor_raw},
             )
             return response
 
     def supersede(self, args: argparse.Namespace) -> dict[str, Any]:
         with self.locked():
-            old = self.read_record(args.memory_id)
+            self._drain_unlocked()
+            old, predecessor_raw = self.read_record_snapshot(args.memory_id)
             replacement = self.read_record(args.by)
             authority = self.authority(args.authority, "supersede", old)
             credential = self.verify_credential(args.credential, {
@@ -545,16 +783,19 @@ class MemoryStore:
                                     "byMemoryId": args.by, "decidedAt": _now(),
                                     "credential": credential}
             old["updatedAt"] = _now()
+            old = self._advance_record(old, args.operation_id, predecessor_raw)
             response = {"schema": "singular.memory.operation.v1", "memory": old}
             self.commit_operation(
                 args.operation_id, request, response,
                 record_writes=[old], refresh_index=True,
+                expected_records={args.memory_id: predecessor_raw},
             )
             return response
 
     def tombstone(self, args: argparse.Namespace) -> dict[str, Any]:
         with self.locked():
-            record = self.read_record(args.memory_id)
+            self._drain_unlocked()
+            record, predecessor_raw = self.read_record_snapshot(args.memory_id)
             authority = self.authority(args.authority, "tombstone", record)
             credential = self.verify_credential(args.credential, {
                 "action": "tombstone", "operationId": args.operation_id,
@@ -577,15 +818,18 @@ class MemoryStore:
                                    "reason": args.reason, "decidedAt": _now(),
                                    "credential": credential}
             record["updatedAt"] = _now()
+            record = self._advance_record(record, args.operation_id, predecessor_raw)
             response = {"schema": "singular.memory.operation.v1", "memory": record}
             self.commit_operation(
                 args.operation_id, request, response,
                 record_writes=[record], refresh_index=True,
+                expected_records={args.memory_id: predecessor_raw},
             )
             return response
 
     def rebuild(self) -> dict[str, Any]:
         with self.locked():
+            self._drain_unlocked()
             return self._write_index_unlocked()
 
     def checkpoint_save(self, args: argparse.Namespace) -> dict[str, Any]:
@@ -603,8 +847,11 @@ class MemoryStore:
         source_rel, _, source = self.local_file(args.source, "retained source")
         request = {"kind": "checkpoint-save", "taskId": args.task,
                    "actorId": args.actor, "payload": payload_rel, "source": source_rel,
-                   "credentialClaims": credential["claimsSha256"]}
+                   "credentialClaims": credential["claimsSha256"],
+                   "captured": {"payloadSha256": _sha256(raw),
+                                "sourceSha256": _sha256(source)}}
         with self.locked():
+            self._drain_unlocked()
             replay = self.replay(args.operation_id, request)
             if replay is not None:
                 return replay
@@ -625,6 +872,14 @@ class MemoryStore:
             return result
 
     def checkpoint_recover(self, task: str) -> dict[str, Any]:
+        if (self.store / "operations").is_dir():
+            for path in sorted((self.store / "operations").glob("*.json")):
+                operation, _ = _read_json(path, "operation journal")
+                if operation.get("state") == "prepared":
+                    raise MemoryError(
+                        "memory snapshot recovery required: prepared operation "
+                        + str(operation.get("operationId"))
+                    )
         directory = self.store / "checkpoints"
         candidates: list[dict[str, Any]] = []
         if directory.is_dir():
@@ -648,17 +903,71 @@ class MemoryStore:
         return result
 
 
-def trusted_memories(config_path: Path, root: Path, role: str) -> list[dict[str, Any]]:
-    """Return currently trusted authored artifacts for context retrieval."""
+def _directory_identity(path: Path) -> str | None:
+    if not path.is_dir():
+        return None
+    return _sha256(_canonical(sorted(item.name for item in path.iterdir())))
+
+
+def _current_operation_id(record: Mapping[str, Any]) -> str | None:
+    if isinstance(record.get("transactionId"), str):
+        return str(record["transactionId"])
+    fields = {
+        "proposed": "proposal", "approved": "approval", "rejected": "rejection",
+        "quarantined": "quarantine", "superseded": "supersession",
+        "tombstoned": "tombstone",
+    }
+    value = record.get(fields.get(str(record.get("status")), ""), {})
+    return value.get("operationId") if isinstance(value, dict) else None
+
+
+def trusted_memory_snapshot(
+    config_path: Path, root: Path, role: str, *,
+    configuration: tuple[dict[str, Any], bytes] | None = None,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    """Capture committed memory and dependencies without any filesystem writes."""
     try:
-        store = MemoryStore(config_path, root)
+        store = MemoryStore(config_path, root, configuration=configuration)
     except MemoryError as exc:
         if str(exc) == "memoryService is disabled":
-            return []
+            return {"memories": [], "dependencies": [], "memberships": []}
         raise
-    results: list[dict[str, Any]] = []
-    with store.locked():
-        for record in store.records():
+    records_dir = store.store / "records"
+    operations_dir = store.store / "operations"
+    for attempt in range(attempts):
+        memberships = {
+            records_dir: _directory_identity(records_dir),
+            operations_dir: _directory_identity(operations_dir),
+        }
+        operations: dict[str, tuple[dict[str, Any], bytes, Path]] = {}
+        if operations_dir.is_dir():
+            for operation_path in sorted(operations_dir.glob("*.json")):
+                operation, operation_raw = _read_json(operation_path, "operation journal")
+                operation_id = operation.get("operationId")
+                if not isinstance(operation_id, str) or operation.get("state") not in {
+                    "prepared", "committed",
+                }:
+                    raise MemoryError("memory snapshot encountered a malformed operation journal")
+                if operation.get("state") == "prepared":
+                    raise MemoryError(
+                        f"memory snapshot recovery required: prepared operation {operation_id}"
+                    )
+                operations[operation_id] = (operation, operation_raw, operation_path)
+        captured_records: list[tuple[dict[str, Any], bytes, Path]] = []
+        if records_dir.is_dir():
+            for record_path in sorted(records_dir.glob("mem-*.json")):
+                record, record_raw = _read_json(record_path, "memory record")
+                captured_records.append((record, record_raw, record_path))
+        if any(_directory_identity(path) != digest for path, digest in memberships.items()):
+            if attempt + 1 < attempts:
+                continue
+            raise MemoryError("memory snapshot changed during bounded acquisition")
+
+        results: list[dict[str, Any]] = []
+        all_dependencies: dict[Path, str] = {}
+        retry = False
+        for record, record_raw, record_path in captured_records:
             policy = store.policy(record["policyId"])
             if role not in policy["contextRoles"] or store.trust(record) != "trusted":
                 continue
@@ -672,9 +981,29 @@ def trusted_memories(config_path: Path, root: Path, role: str) -> list[dict[str,
                 dependencies[path] = actual
                 return path, raw
 
-            record_path = store._record_path(record["memoryId"])
-            record_raw = record_path.read_bytes()
             dependencies[record_path] = _sha256(record_raw)
+            operation_id = _current_operation_id(record)
+            operation_entry = operations.get(operation_id or "")
+            if operation_entry is None:
+                raise MemoryError(
+                    f"memory record is not bound to a committed transaction: {record['memoryId']}"
+                )
+            operation, operation_raw, operation_path = operation_entry
+            result_hashes = {
+                item.get("result", {}).get("sha256")
+                for item in operation.get("recordTransitions", [])
+                if isinstance(item, dict) and item.get("memoryId") == record["memoryId"]
+            }
+            result_hashes.update(
+                _sha256(_json_bytes(item))
+                for item in operation.get("recordWrites", [])
+                if isinstance(item, dict) and item.get("memoryId") == record["memoryId"]
+            )
+            if _sha256(record_raw) not in result_hashes:
+                raise MemoryError(
+                    f"memory record revision is not committed: {record['memoryId']}"
+                )
+            dependencies[operation_path] = _sha256(operation_raw)
             content = record["content"]
             path, raw = dependency(content["path"], content["sha256"], "authored artifact")
             for source in record["sources"]:
@@ -707,7 +1036,39 @@ def trusted_memories(config_path: Path, root: Path, role: str) -> list[dict[str,
                     "policyId": record["policyId"],
                 },
             })
-    return sorted(results, key=lambda item: item["ref"])
+            all_dependencies.update(dependencies)
+        for path, expected in all_dependencies.items():
+            try:
+                current = path.read_bytes()
+            except OSError:
+                retry = True
+                break
+            if _sha256(current) != expected:
+                retry = True
+                break
+        if retry or any(
+            _directory_identity(path) != digest for path, digest in memberships.items()
+        ):
+            if attempt + 1 < attempts:
+                continue
+            raise MemoryError("memory snapshot changed during bounded acquisition")
+        return {
+            "memories": sorted(results, key=lambda item: item["ref"]),
+            "dependencies": [
+                {"path": path, "sha256": digest}
+                for path, digest in sorted(all_dependencies.items(), key=lambda item: str(item[0]))
+            ],
+            "memberships": [
+                {"path": path, "sha256": digest}
+                for path, digest in sorted(memberships.items(), key=lambda item: str(item[0]))
+            ],
+        }
+    raise MemoryError("memory snapshot changed during bounded acquisition")
+
+
+def trusted_memories(config_path: Path, root: Path, role: str) -> list[dict[str, Any]]:
+    """Compatibility wrapper returning a read-only committed memory snapshot."""
+    return trusted_memory_snapshot(config_path, root, role)["memories"]
 
 
 def _leaf(subparsers: argparse._SubParsersAction, name: str, help_text: str,
@@ -803,7 +1164,7 @@ def main(argv: list[str] | None = None) -> int:
             result = store.tombstone(args)
         elif args.command == "show":
             result = {"schema": "singular.memory.operation.v1",
-                      "memory": store.view(store.read_record(args.memory_id))}
+                      "memory": store.view(store.read_committed_record(args.memory_id))}
         elif args.command == "rebuild":
             result = store.rebuild()
         elif args.checkpoint_command == "save":

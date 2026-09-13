@@ -523,6 +523,11 @@ def run(args):
         raise AdmissionDenied(
             'campaign-mismatch', 'campaign identity changed during invocation preparation'
         )
+    if context_enabled:
+        # Validate the exact composed bytes at admission. Publication below is
+        # immutable, but this is deliberately a point-in-time snapshot promise,
+        # not synchronization with future lifecycle writers.
+        context.validate_snapshot()
 
     publication_dir = evidence.path.parent if evidence else Path(args.context_bundle).resolve().parent
     prompt_path = publish_bytes(

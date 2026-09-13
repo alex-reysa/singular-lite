@@ -32,6 +32,13 @@
     },
     "scope": { "type": "string", "minLength": 1 },
     "policyId": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "transactionId": { "type": "string", "minLength": 1 },
+    "ancestry": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sha256" },
+      "uniqueItems": true
+    },
     "proposal": {
       "type": "object",
       "required": ["operationId", "taskId", "createdAt"],

@@ -196,6 +196,7 @@ class ContextService:
         budget_source: str = "contextService.budgetBytes",
         eligibility_inputs: tuple[tuple[Path, str], ...] = (),
         memory_eligibility_inputs: tuple[tuple[Path, str], ...] = (),
+        memory_membership_inputs: tuple[tuple[Path, str | None], ...] = (),
     ) -> None:
         self.enabled = enabled
         self.root = root
@@ -211,6 +212,7 @@ class ContextService:
         self.budget_source = budget_source
         self.eligibility_inputs = eligibility_inputs
         self.memory_eligibility_inputs = memory_eligibility_inputs
+        self.memory_membership_inputs = memory_membership_inputs
         self.policy_identity = {
             "version": POLICY_BINDING_VERSION,
             "configPath": str(config_path),
@@ -232,6 +234,10 @@ class ContextService:
             "eligibilityInputs": [
                 {"path": str(path), "sha256": digest}
                 for path, digest in eligibility_inputs
+            ],
+            "memoryMembershipInputs": [
+                {"path": str(path), "sha256": digest}
+                for path, digest in memory_membership_inputs
             ],
         }
         self.identity = {
@@ -330,11 +336,21 @@ class ContextService:
         sources: list[Source] = []
         eligibility_inputs: dict[Path, str] = {}
         memory_eligibility_inputs: dict[Path, str] = {}
+        memory_membership_inputs: dict[Path, str | None] = {}
         if "memory" in allowed:
             try:
-                memories = memory_service.trusted_memories(config_path, root, role)
+                memory_snapshot = memory_service.trusted_memory_snapshot(
+                    config_path, root, role, configuration=(value, config_raw)
+                )
             except memory_service.MemoryError as exc:
                 raise ContextError(f"memory source is invalid: {exc}") from exc
+            memories = memory_snapshot["memories"]
+            for dependency in memory_snapshot["dependencies"]:
+                path = Path(dependency["path"]).resolve()
+                memory_eligibility_inputs[path] = dependency["sha256"]
+                eligibility_inputs[path] = dependency["sha256"]
+            for membership in memory_snapshot["memberships"]:
+                memory_membership_inputs[Path(membership["path"]).resolve()] = membership["sha256"]
             for item in memories:
                 for dependency in item["eligibilityInputs"]:
                     path = Path(dependency["path"]).resolve()
@@ -439,6 +455,9 @@ class ContextService:
             memory_eligibility_inputs=tuple(sorted(
                 memory_eligibility_inputs.items(), key=lambda item: str(item[0])
             )),
+            memory_membership_inputs=tuple(sorted(
+                memory_membership_inputs.items(), key=lambda item: str(item[0])
+            )),
         )
 
     def describe(self) -> dict[str, Any]:
@@ -502,10 +521,15 @@ class ContextService:
                 raise ContextError(
                     f"configured source changed during invocation: {source.ref}"
                 )
+        for path, expected_hash in self.memory_membership_inputs:
+            if memory_service._directory_identity(path) != expected_hash:
+                raise ContextError(
+                    f"memory transaction membership changed during invocation: {path}"
+                )
 
     def validate_memory_snapshot(self) -> None:
         """Refuse retirement or dependency drift of snapshotted memory."""
-        if not self.memory_eligibility_inputs:
+        if not self.memory_eligibility_inputs and not self.memory_membership_inputs:
             return
         try:
             current_config = self.config_path.read_bytes()
@@ -527,6 +551,17 @@ class ContextService:
             if _sha256(current) != expected_hash:
                 raise ContextError(
                     f"context eligibility metadata changed during invocation: {path}"
+                )
+        for path, expected_hash in self.memory_membership_inputs:
+            try:
+                current_hash = memory_service._directory_identity(path)
+            except OSError as exc:
+                raise ContextError(
+                    f"memory transaction membership changed during invocation: {path}: {exc}"
+                ) from exc
+            if current_hash != expected_hash:
+                raise ContextError(
+                    f"memory transaction membership changed during invocation: {path}"
                 )
 
     def _disabled(self, schema: str) -> dict[str, Any]:
@@ -1134,7 +1169,7 @@ class ContextService:
         previous = {
             item.get("ref"): item.get("sourceSha256")
             for item in prior.get("provenance", [])
-            if isinstance(item, dict) and item.get("kind") in {"brain", "code", "run"}
+            if isinstance(item, dict) and item.get("kind") in {"brain", "code", "run", "memory"}
         }
         current_refs = {source.ref for source in self.sources}
         revoked = sorted(ref for ref in previous if ref not in current_refs)
