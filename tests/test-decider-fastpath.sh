@@ -340,6 +340,7 @@ cdir="${MOCK_COUNTER_DIR:-/tmp}"; mkdir -p "$cdir"
 # Decider call (decide.sh dispatches the decider prompt at --level readonly). Emit
 # a decider-verdict action so the fast-disabled path actually advances.
 if [[ "$prompt" == *decider-prompt-* ]]; then
+  dc_file="$cdir/decider-calls"; n=0; [[ -f "$dc_file" ]] && n="$(cat "$dc_file")"; n=$((n+1)); printf '%s' "$n" >"$dc_file"
   fc="${prompt##*decider-prompt-}"
   fc="${fc%.md}"
   python3 - "$out" "${MOCK_DECIDER_ACTION:-retry}" "$fc" <<'PY'
@@ -1515,6 +1516,8 @@ PY
 test_driver_accepted_audit_awaits_evidence() {
   with_fixture
   write_generic_task
+  git -C "$SINGULAR_ROOT" add docs/orchestration/tasks/TASK-0001.md
+  git -C "$SINGULAR_ROOT" commit -qm 'accepted recovery fixture admission base'
   local stub="$FIXTURE_TMP/mock-runner.sh"; make_seq_runner "$stub"
   export SINGULAR_RUNNER="$stub"
   export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-evidence-authority"
@@ -1545,8 +1548,21 @@ fi
 exec "${REAL_EVIDENCE_MANIFEST:?}" "$@"
 STUB
   chmod +x "$engine_view/evidence-manifest.sh"
+  rm "$engine_view/gate-check.sh"
+  cat >"$engine_view/gate-check.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+counter="${MOCK_GATE_COUNTER:?}"
+count=0
+[[ -f "$counter" ]] && count="$(cat "$counter")"
+printf '%s\n' "$((count + 1))" >"$counter"
+exec "${REAL_GATE_CHECK:?}" "$@"
+STUB
+  chmod +x "$engine_view/gate-check.sh"
   export MOCK_MANIFEST_COUNTER="$FIXTURE_TMP/manifest-calls"
   export REAL_EVIDENCE_MANIFEST="$ENGINE_HOME/engine/evidence-manifest.sh"
+  export MOCK_GATE_COUNTER="$MOCK_COUNTER_DIR/gate-calls"
+  export REAL_GATE_CHECK="$ENGINE_HOME/engine/gate-check.sh"
 
   local out rc=0
   out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
@@ -1562,7 +1578,7 @@ STUB
   assert_contains "$(cat "$SINGULAR_TASKS_DIR/TASK-0001.md")" "Status: blocked" \
     "evidence blocker: task is non-dispatchable"
 
-  local run_dir audit packet head
+  local run_dir audit packet head base target_after checkpoint_copy lease_copy
   run_dir="$(find "$SINGULAR_RUNS_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
   audit="$run_dir/audit.json"
   packet="$run_dir/packet.json"
@@ -1573,6 +1589,7 @@ STUB
   assert_eq "$(singular_json_field "$packet" status)" "blocked" \
     "evidence blocker: packet is not publishable"
   head="$(git -C "$SINGULAR_ROOT/.worktrees/TASK-0001" rev-parse HEAD)"
+  base="$(singular_json_field "$packet" baseRef)"
   python3 - "$packet" "$head" <<'PY'
 import json, sys
 
@@ -1613,14 +1630,160 @@ PY
   assert_contains "$(cat "$idx")" '"deciderAction": "awaiting-evidence"' \
     "evidence blocker: archive preserves publication action"
 
+  # The accepted B->H product is independent of later target movement B->T.
+  # Recovery must select the original admitted B from host-written packet/lease
+  # evidence, never relabel it with the now-current T.
+  printf 'independent target advancement\n' >"$SINGULAR_ROOT/target-after-acceptance.txt"
+  git -C "$SINGULAR_ROOT" add target-after-acceptance.txt
+  git -C "$SINGULAR_ROOT" commit -qm 'advance target independently after accepted checkpoint'
+  target_after="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  [[ "$target_after" != "$base" && "$target_after" != "$head" ]] \
+    || fail "accepted recovery fixture did not keep B, H, and T distinct"
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$base" "$head" \
+    || fail "accepted recovery fixture lost B->H ancestry"
+  if git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$target_after" "$head"; then
+    fail "accepted recovery fixture target T unexpectedly precedes candidate H"
+  fi
+
   # Re-entry must recognize the durable accepted checkpoint before orphan or
   # --reset cleanup. Only the failed evidence phase runs again; the immutable
   # audit/head and product counters remain byte-for-byte authoritative.
-  local audit_sha_before worker_calls_before audit_calls_before retries_before
+  local audit_sha_before worker_calls_before audit_calls_before gate_calls_before
+  local decider_calls_before retries_before manifest_calls_before state_sha_before
   audit_sha_before="$(shasum -a 256 "$audit" | awk '{print $1}')"
   worker_calls_before="$(cat "$MOCK_COUNTER_DIR/worker-calls")"
   audit_calls_before="$(cat "$MOCK_COUNTER_DIR/audit-calls")"
+  gate_calls_before="$(cat "$MOCK_COUNTER_DIR/gate-calls")"
+  decider_calls_before="0"
+  [[ -f "$MOCK_COUNTER_DIR/decider-calls" ]] \
+    && decider_calls_before="$(cat "$MOCK_COUNTER_DIR/decider-calls")"
   retries_before="$(singular_lease_field TASK-0001 retryCount)"
+  manifest_calls_before="$(cat "$MOCK_MANIFEST_COUNTER")"
+  checkpoint_copy="$FIXTURE_TMP/accepted-packet.original.json"
+  lease_copy="$FIXTURE_TMP/accepted-lease.original.json"
+  cp "$packet" "$checkpoint_copy"
+  cp "$(singular_lease_path TASK-0001)" "$lease_copy"
+
+  checkpoint_state_sha() {
+    shasum -a 256 "$packet" "$audit" "$(singular_lease_path TASK-0001)" \
+      "$SINGULAR_TASKS_DIR/TASK-0001.md" | shasum -a 256 | awk '{print $1}'
+  }
+  assert_no_accepted_recovery_work() {
+    local label="$1"
+    assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "$worker_calls_before" \
+      "$label: worker not rerun"
+    assert_eq "$(cat "$MOCK_COUNTER_DIR/audit-calls")" "$audit_calls_before" \
+      "$label: auditor not rerun"
+    assert_eq "$(cat "$MOCK_COUNTER_DIR/gate-calls")" "$gate_calls_before" \
+      "$label: gate not rerun"
+    local decider_calls=0
+    [[ -f "$MOCK_COUNTER_DIR/decider-calls" ]] \
+      && decider_calls="$(cat "$MOCK_COUNTER_DIR/decider-calls")"
+    assert_eq "$decider_calls" "$decider_calls_before" "$label: decider not invoked"
+    assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "$manifest_calls_before" \
+      "$label: evidence not attempted"
+  }
+
+  # A recognized accepted marker is preservation authority, not payload
+  # authority. Packet base B must agree exactly with the original lease base;
+  # another ancestor (including H itself) cannot relabel the admitted product.
+  python3 - "$packet" "$head" <<'PY'
+import json, os, sys
+path, wrong = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["baseRef"] = wrong
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "accepted packet wrong base refuses before paid work ($out)"
+  assert_contains "$out" "accepted checkpoint preserved" \
+    "wrong-base checkpoint: preservation outcome"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "wrong-base checkpoint: all checkpoint/task/lease history preserved"
+  assert_no_accepted_recovery_work "wrong-base checkpoint"
+  cp "$checkpoint_copy" "$packet"
+
+  # A malformed selected base is likewise a recognized checkpoint refusal and
+  # --reset may not turn it into orphan cleanup.
+  python3 - "$packet" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["baseRef"] = "malformed accepted base"
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "malformed accepted base refuses before reset/paid work ($out)"
+  assert_contains "$out" "accepted checkpoint preserved" \
+    "malformed-base checkpoint: preservation outcome"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "malformed-base checkpoint: all checkpoint/task/lease history preserved"
+  assert_no_accepted_recovery_work "malformed-base checkpoint"
+  cp "$checkpoint_copy" "$packet"
+
+  # Changed accepted H and changed original lease B are independent conflicts;
+  # neither may fall through to fresh admission or cleanup.
+  python3 - "$packet" "$target_after" <<'PY'
+import json, os, sys
+path, changed = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["headSha"] = changed
+for blocker in data.get("blockers", []):
+    if blocker.get("reason") == "awaiting-evidence":
+        blocker["headSha"] = changed
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "changed accepted head refuses before paid work ($out)"
+  assert_contains "$out" "accepted checkpoint preserved" \
+    "changed-head checkpoint: preservation outcome"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "changed-head checkpoint: all checkpoint/task/lease history preserved"
+  assert_no_accepted_recovery_work "changed-head checkpoint"
+  cp "$checkpoint_copy" "$packet"
+
+  python3 - "$(singular_lease_path TASK-0001)" "$head" <<'PY'
+import json, os, sys
+path, changed = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["baseSha"] = changed
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  state_sha_before="$(checkpoint_state_sha)"
+  rc=0
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "accepted packet/lease base disagreement refuses ($out)"
+  assert_contains "$out" "accepted checkpoint preserved" \
+    "lease-base disagreement: preservation outcome"
+  assert_eq "$(checkpoint_state_sha)" "$state_sha_before" \
+    "lease-base disagreement: all checkpoint/task/lease history preserved"
+  assert_no_accepted_recovery_work "lease-base disagreement"
+  cp "$lease_copy" "$(singular_lease_path TASK-0001)"
+
+  rc=0
+  out="$(SINGULAR_DISPATCH_BASE_SHA="$head" $engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "accepted checkpoint conflicting base override refuses ($out)"
+  assert_contains "$out" "accepted checkpoint preserved" \
+    "conflicting override: preservation outcome"
+  assert_no_accepted_recovery_work "conflicting override"
 
   # Once the marker is recognized, even a missing worktree must fail closed
   # before --reset can erase the surviving accepted branch/audit checkpoint.
@@ -1634,7 +1797,7 @@ PY
     "missing-worktree checkpoint: worker not rerun"
   assert_eq "$(cat "$MOCK_COUNTER_DIR/audit-calls")" "$audit_calls_before" \
     "missing-worktree checkpoint: auditor not rerun"
-  assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "4" \
+  assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "$manifest_calls_before" \
     "missing-worktree checkpoint: evidence not attempted without exact head"
   assert_eq "$(git -C "$SINGULAR_ROOT" rev-parse agent/widget/TASK-0001-generic)" "$head" \
     "missing-worktree checkpoint: accepted branch preserved"
@@ -1646,12 +1809,26 @@ PY
     "missing-worktree checkpoint: orphan cleanup never ran"
   mv "$SINGULAR_ROOT/.worktrees/TASK-0001.saved" "$SINGULAR_ROOT/.worktrees/TASK-0001"
 
+  # Exhaust the ordinary product-repair allowance after acceptance. Recovery
+  # and its subsequent duplicate no-op must still precede that fresh-work guard.
+  python3 - "$(singular_lease_path TASK-0001)" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["retryCount"] = data["maxRetries"]
+data["productPassStarted"] = True
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  retries_before="$(singular_lease_field TASK-0001 retryCount)"
   rc=0
-  out="$($engine_view/l1-drive.sh --reset TASK-0001 2>&1)" || rc=$?
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
   assert_eq "$rc" "0" "accepted evidence checkpoint resumes without product work ($out)"
   assert_contains "$out" "RESUMED ACCEPTED EVIDENCE" \
     "evidence resume: explicit success outcome"
-  assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "5" \
+  assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "$((manifest_calls_before + 1))" \
     "evidence resume: only evidence finalization reruns"
   assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "$worker_calls_before" \
     "evidence resume: worker not rerun"
@@ -1690,8 +1867,55 @@ PY
     "evidence resume: machine-readable worker non-rerun"
   assert_contains "$events" '"auditorRerun":false' \
     "evidence resume: machine-readable auditor non-rerun"
-  unset SINGULAR_MAX_RETRIES MOCK_MANIFEST_COUNTER REAL_EVIDENCE_MANIFEST
-  echo "ok: accepted exact-head audit resumes evidence-only publication without product retry"
+
+  local packet_sha_after_resume inbox_count
+  packet_sha_after_resume="$(shasum -a 256 "$packet" | awk '{print $1}')"
+  worker_calls_before="$(cat "$MOCK_COUNTER_DIR/worker-calls")"
+  audit_calls_before="$(cat "$MOCK_COUNTER_DIR/audit-calls")"
+  gate_calls_before="$(cat "$MOCK_COUNTER_DIR/gate-calls")"
+  decider_calls_before="0"
+  [[ -f "$MOCK_COUNTER_DIR/decider-calls" ]] \
+    && decider_calls_before="$(cat "$MOCK_COUNTER_DIR/decider-calls")"
+  manifest_calls_before="$(cat "$MOCK_MANIFEST_COUNTER")"
+  rc=0
+  out="$($engine_view/l1-drive.sh TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "duplicate accepted dispatch is an idempotent no-op ($out)"
+  assert_contains "$out" "already queued/imported; dispatch is a no-op" \
+    "duplicate accepted dispatch reaches existing no-op"
+  assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "$worker_calls_before" \
+    "duplicate accepted dispatch: zero worker calls"
+  assert_eq "$(cat "$MOCK_COUNTER_DIR/audit-calls")" "$audit_calls_before" \
+    "duplicate accepted dispatch: zero auditor calls"
+  assert_eq "$(cat "$MOCK_COUNTER_DIR/gate-calls")" "$gate_calls_before" \
+    "duplicate accepted dispatch: zero gate calls"
+  local duplicate_decider_calls=0
+  [[ -f "$MOCK_COUNTER_DIR/decider-calls" ]] \
+    && duplicate_decider_calls="$(cat "$MOCK_COUNTER_DIR/decider-calls")"
+  assert_eq "$duplicate_decider_calls" "$decider_calls_before" \
+    "duplicate accepted dispatch: zero decider calls"
+  assert_eq "$(cat "$MOCK_MANIFEST_COUNTER")" "$manifest_calls_before" \
+    "duplicate accepted dispatch: zero evidence calls"
+  assert_eq "$(singular_lease_field TASK-0001 retryCount)" "$retries_before" \
+    "duplicate accepted dispatch: exhausted budget not debited"
+  assert_eq "$(singular_lease_field TASK-0001 baseSha)" "$base" \
+    "duplicate accepted dispatch: recorded admitted base B remains"
+  assert_eq "$(singular_json_field "$packet" baseRef)" "$base" \
+    "duplicate accepted dispatch: packet base B remains"
+  assert_eq "$(singular_json_field "$packet" headSha)" "$head" \
+    "duplicate accepted dispatch: packet head H remains"
+  assert_eq "$(shasum -a 256 "$packet" | awk '{print $1}')" "$packet_sha_after_resume" \
+    "duplicate accepted dispatch: accepted packet bytes unchanged"
+  assert_eq "$(shasum -a 256 "$audit" | awk '{print $1}')" "$audit_sha_before" \
+    "duplicate accepted dispatch: accepted audit bytes unchanged"
+  assert_eq "$(git -C "$SINGULAR_ROOT/.worktrees/TASK-0001" rev-parse HEAD)" "$head" \
+    "duplicate accepted dispatch: candidate worktree retained"
+  assert_eq "$(git -C "$SINGULAR_ROOT" rev-parse agent/widget/TASK-0001-generic)" "$head" \
+    "duplicate accepted dispatch: candidate branch retained"
+  inbox_count="$(find "$SINGULAR_INBOX_DIR" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d '[:space:]')"
+  assert_eq "$inbox_count" "1" "duplicate accepted dispatch: exactly one publication"
+  unset SINGULAR_MAX_RETRIES MOCK_MANIFEST_COUNTER REAL_EVIDENCE_MANIFEST \
+    MOCK_GATE_COUNTER REAL_GATE_CHECK
+  echo "ok: accepted B->H checkpoint survives independent T, validates authority, and resumes idempotently"
 }
 
 run_case() {

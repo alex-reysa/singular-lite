@@ -221,6 +221,137 @@ PY
   fi
 fi
 
+# Classify a retained accepted checkpoint before selecting a fresh admission
+# base. Recognition is deliberately read-only and narrow: the packet marker is
+# enough to preserve the checkpoint, but never enough to authorize identities.
+# The packet's B/H must still agree exactly with the original host-written lease
+# and the retained Git objects before current target ancestry is considered.
+accepted_checkpoint_mode=""
+accepted_checkpoint_run=""
+accepted_checkpoint_packet=""
+accepted_checkpoint_base=""
+accepted_checkpoint_head=""
+accepted_checkpoint_workspace=""
+l1_refuse_recognized_accepted_checkpoint() {
+  local reason="$1"
+  echo "AWAITING EVIDENCE: $task_id — accepted checkpoint preserved; resume refused ($reason)." >&2
+  exit 3
+}
+if [[ -f "$lease_path" ]]; then
+  retained_lease_status="$(singular_lease_status "$task_id" 2>/dev/null || true)"
+  retained_lease_run="$(singular_lease_field "$task_id" runId 2>/dev/null || true)"
+  if [[ -n "$retained_lease_run" \
+      && "$retained_lease_run" != */* \
+      && "$retained_lease_run" != *..* ]]; then
+    retained_packet="$SINGULAR_RUNS_DIR/$retained_lease_run/packet.json"
+    if [[ -f "$retained_packet" ]]; then
+      mapfile -d '' -t _accepted_checkpoint_fields < <(
+        python3 - "$retained_packet" "$retained_lease_status" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+path, lease_status = sys.argv[1:]
+packet = json.load(open(path, encoding="utf-8"))
+blockers = packet.get("blockers", [])
+awaiting = (
+    packet.get("status") == "blocked"
+    and any(
+        isinstance(item, dict)
+        and item.get("class") == "blocked-external"
+        and item.get("reason") == "awaiting-evidence"
+        and item.get("productAuditVerdict") == "accepted"
+        and item.get("consumesProductRepairBudget") is False
+        for item in blockers
+    )
+)
+accepted = lease_status == "accepted" and packet.get("status") == "accepted"
+if awaiting:
+    mode = "awaiting-evidence"
+elif accepted:
+    mode = "accepted-existing"
+else:
+    raise SystemExit(0)
+values = (
+    mode,
+    packet.get("runId", ""),
+    packet.get("taskId", ""),
+    packet.get("branch", ""),
+    packet.get("workspace", ""),
+    packet.get("baseRef", ""),
+    packet.get("headSha", ""),
+)
+encoded = [
+    value if isinstance(value, str) else "__invalid_accepted_checkpoint_field__"
+    for value in values
+]
+sys.stdout.buffer.write(b"\0".join(value.encode() for value in encoded) + b"\0")
+PY
+      )
+      if [[ "${#_accepted_checkpoint_fields[@]}" -eq 7 ]]; then
+        accepted_checkpoint_mode="${_accepted_checkpoint_fields[0]}"
+        accepted_checkpoint_run="${_accepted_checkpoint_fields[1]}"
+        accepted_checkpoint_task="${_accepted_checkpoint_fields[2]}"
+        accepted_checkpoint_branch="${_accepted_checkpoint_fields[3]}"
+        accepted_checkpoint_workspace="${_accepted_checkpoint_fields[4]}"
+        accepted_checkpoint_base="${_accepted_checkpoint_fields[5]}"
+        accepted_checkpoint_head="${_accepted_checkpoint_fields[6]}"
+        accepted_checkpoint_packet="$retained_packet"
+      fi
+    fi
+  fi
+fi
+if [[ -n "$accepted_checkpoint_mode" ]]; then
+  [[ "${#authorized_repair[@]}" -ne 7 \
+      && "${#authorized_continuation[@]}" -ne 10 ]] \
+    || l1_refuse_recognized_accepted_checkpoint \
+      "accepted-checkpoint-recovery-authority-conflict"
+  retained_lease_base="$(singular_lease_field "$task_id" baseSha 2>/dev/null || true)"
+  retained_lease_branch="$(singular_lease_field "$task_id" branch 2>/dev/null || true)"
+  retained_lease_worktree="$(singular_lease_field "$task_id" worktree 2>/dev/null || true)"
+  [[ "$accepted_checkpoint_run" == "$retained_lease_run" \
+      && "$accepted_checkpoint_task" == "$task_id" \
+      && "$accepted_checkpoint_branch" == "$worker_branch" \
+      && "$retained_lease_branch" == "$worker_branch" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "checkpoint-admission-identity-mismatch"
+  [[ -n "$accepted_checkpoint_workspace" \
+      && -n "$retained_lease_worktree" \
+      && "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' \
+          "$accepted_checkpoint_workspace")" \
+        == "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' \
+          "$retained_lease_worktree")" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "checkpoint-workspace-identity-mismatch"
+  [[ -n "$accepted_checkpoint_base" \
+      && "$accepted_checkpoint_base" == "$retained_lease_base" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-admission-mismatch"
+  [[ -z "$dispatch_base_sha" || "$dispatch_base_sha" == "$accepted_checkpoint_base" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-override-conflict"
+  accepted_checkpoint_resolved_base="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_checkpoint_base^{commit}" 2>/dev/null || true)"
+  accepted_checkpoint_resolved_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_checkpoint_head^{commit}" 2>/dev/null || true)"
+  [[ -n "$accepted_checkpoint_resolved_base" \
+      && "$accepted_checkpoint_resolved_base" == "$accepted_checkpoint_base" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-invalid"
+  [[ -n "$accepted_checkpoint_resolved_head" \
+      && "$accepted_checkpoint_resolved_head" == "$accepted_checkpoint_head" ]] \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-head-invalid"
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor \
+    "$accepted_checkpoint_base" "$accepted_checkpoint_head" >/dev/null 2>&1 \
+    || l1_refuse_recognized_accepted_checkpoint "accepted-base-head-lineage-invalid"
+  retained_accepted_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$worker_branch^{commit}" 2>/dev/null || true)"
+  if [[ -n "$retained_accepted_branch_head" \
+      && "$retained_accepted_branch_head" != "$accepted_checkpoint_head" ]]; then
+    l1_refuse_recognized_accepted_checkpoint "accepted-head-mismatch"
+  fi
+  if [[ -d "$accepted_checkpoint_workspace" ]]; then
+    retained_accepted_workspace_head="$(git -C "$accepted_checkpoint_workspace" \
+      rev-parse HEAD 2>/dev/null || true)"
+    [[ "$retained_accepted_workspace_head" == "$accepted_checkpoint_head" ]] \
+      || l1_refuse_recognized_accepted_checkpoint "accepted-head-mismatch"
+  fi
+fi
+
 # Resolve the product base exactly once, before run publication, cleanup, pass
 # accounting, or provider work. Scheduler reservation and integration targets
 # remain separate lifecycle identities; neither may replace the candidate base.
@@ -237,6 +368,8 @@ elif [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
     echo "l1-drive: continuation authority has no candidate base" >&2
     exit 2
   }
+elif [[ -n "$accepted_checkpoint_mode" ]]; then
+  requested_candidate_base="$accepted_checkpoint_base"
 fi
 [[ -n "$requested_candidate_base" ]] || requested_candidate_base="$target_branch"
 packet_base_ref="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
@@ -261,7 +394,7 @@ if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
       echo "l1-drive: continuation candidate-base or integration-target lineage is invalid" >&2
       exit 2
     }
-elif [[ "${#authorized_repair[@]}" -ne 7 ]]; then
+elif [[ "${#authorized_repair[@]}" -ne 7 && -z "$accepted_checkpoint_mode" ]]; then
   retained_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
     "$worker_branch^{commit}" 2>/dev/null || true)"
   if [[ -n "$retained_branch_head" ]]; then
@@ -885,7 +1018,8 @@ PY
 l1_try_resume_accepted_awaiting_evidence() {
   [[ "${SINGULAR_RESUME_ACCEPTED_EVIDENCE:-1}" == "1" ]] || return 1
   local lease_status accepted_run accepted_run_dir accepted_packet accepted_audit
-  local accepted_head actual_branch_head actual_workspace_head audit_schema
+  local accepted_base accepted_head actual_branch_head actual_workspace_head audit_schema
+  local accepted_lease_base accepted_resolved_base accepted_resolved_head
   local checkpoint_binding audit_binding lease_binding
   local -a _checkpoint_bindings=()
   lease_status="$(singular_lease_status "$task_id" 2>/dev/null || true)"
@@ -1048,7 +1182,23 @@ PY
     || l1_campaign_mismatch_exit \
       "campaign identity changed before evidence resume"
 
+  accepted_base="$(singular_json_field "$accepted_packet" baseRef 2>/dev/null || true)"
   accepted_head="$(singular_json_field "$accepted_packet" headSha 2>/dev/null || true)"
+  accepted_lease_base="$(singular_lease_field "$task_id" baseSha 2>/dev/null || true)"
+  [[ -n "$accepted_base" && "$accepted_base" == "$accepted_lease_base" \
+      && "$accepted_base" == "$packet_base_ref" \
+      && "$accepted_head" == "$accepted_checkpoint_head" ]] \
+    || l1_evidence_resume_refuse "accepted-admission-identity-mismatch"
+  accepted_resolved_base="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_base^{commit}" 2>/dev/null || true)"
+  accepted_resolved_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
+    "$accepted_head^{commit}" 2>/dev/null || true)"
+  [[ "$accepted_resolved_base" == "$accepted_base" \
+      && "$accepted_resolved_head" == "$accepted_head" ]] \
+    || l1_evidence_resume_refuse "accepted-base-head-invalid"
+  git -C "$SINGULAR_ROOT" merge-base --is-ancestor \
+    "$accepted_base" "$accepted_head" >/dev/null 2>&1 \
+    || l1_evidence_resume_refuse "accepted-base-head-lineage-invalid"
   actual_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse "$worker_branch" 2>/dev/null || true)"
   actual_workspace_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   [[ -n "$accepted_head" && "$actual_branch_head" == "$accepted_head" \
@@ -1176,33 +1326,6 @@ PY
   exit 0
 }
 
-# Evidence recovery takes precedence over destructive reset and orphan cleanup.
-l1_try_resume_accepted_awaiting_evidence || true
-
-# A prior started pass owns its counters and candidate regardless of checkout
-# status or --reset. Refuse before any orphan/reset mutation.
-if [[ "$prior_product_lease" == "yes" && "$product_passes_remaining" -le 0 ]]; then
-  if ! l1_campaign_publication_begin \
-      "$l1_campaign_binding" pre-exhausted-reentry-state; then
-    l1_campaign_mismatch_exit \
-      "campaign identity changed before exhausted re-entry publication"
-  fi
-  _l1_outcome="terminal"
-  singular_lease_set_status "$task_id" "blocked" 2>/dev/null || true
-  singular_task_set_status "$task_file" "blocked" 2>/dev/null || true
-  l1_status terminal failed "Durable product repair ceiling already exhausted" true \
-    "Change task authority or explicitly unpark with a reset budget" "repair-budget-exhausted"
-  singular_append_event "l1.product_repair_budget_exhausted" \
-    "re-entry suppressed because durable product pass ceiling was already exhausted" \
-    "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"riskTier\":\"$risk_tier\",\"riskSource\":\"$risk_source\",\"budgetDomain\":\"product-repair\",\"used\":$product_repairs_used,\"max\":$max_retries,\"priorLease\":true,\"productPassesRemaining\":0}" \
-    || true
-  "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "escalate-parked" \
-    --rationale "durable product repair ceiling exhausted before re-entry; refusing a fresh pass" \
-    --run "$run_id" --branch "$worker_branch" --authority l1 >/dev/null 2>&1 || true
-  echo "NOT ACCEPTED (escalate-parked): $task_id — durable product repair ceiling already exhausted."
-  exit 3
-fi
-
 # A deterministic refusal that repeats forever starves the loop (0.4.0: a
 # task-id collision re-dispatched into a preserved worktree every cycle until
 # the breaker halted the run). Count refusals per task; at the threshold,
@@ -1298,6 +1421,42 @@ PY
   fi
   return 1
 }
+
+# Accepted recovery and the established accepted-packet no-op are authoritative
+# terminal continuations, not fresh product work. They must run before the
+# exhausted product-repair guard and before reset/orphan cleanup.
+l1_try_resume_accepted_awaiting_evidence || true
+if [[ "$accepted_checkpoint_mode" == "accepted-existing" ]]; then
+  l1_try_auto_accept_existing || true
+fi
+if [[ -n "$accepted_checkpoint_mode" ]]; then
+  l1_refuse_recognized_accepted_checkpoint "accepted-checkpoint-recovery-refused"
+fi
+
+# A prior started pass owns its counters and candidate regardless of checkout
+# status or --reset. Refuse before any orphan/reset mutation, but only after the
+# accepted terminal continuations above have had their idempotent opportunity.
+if [[ "$prior_product_lease" == "yes" && "$product_passes_remaining" -le 0 ]]; then
+  if ! l1_campaign_publication_begin \
+      "$l1_campaign_binding" pre-exhausted-reentry-state; then
+    l1_campaign_mismatch_exit \
+      "campaign identity changed before exhausted re-entry publication"
+  fi
+  _l1_outcome="terminal"
+  singular_lease_set_status "$task_id" "blocked" 2>/dev/null || true
+  singular_task_set_status "$task_file" "blocked" 2>/dev/null || true
+  l1_status terminal failed "Durable product repair ceiling already exhausted" true \
+    "Change task authority or explicitly unpark with a reset budget" "repair-budget-exhausted"
+  singular_append_event "l1.product_repair_budget_exhausted" \
+    "re-entry suppressed because durable product pass ceiling was already exhausted" \
+    "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"riskTier\":\"$risk_tier\",\"riskSource\":\"$risk_source\",\"budgetDomain\":\"product-repair\",\"used\":$product_repairs_used,\"max\":$max_retries,\"priorLease\":true,\"productPassesRemaining\":0}" \
+    || true
+  "$SCRIPT_DIR/record-decision.sh" --task "$task_id" --decision "escalate-parked" \
+    --rationale "durable product repair ceiling exhausted before re-entry; refusing a fresh pass" \
+    --run "$run_id" --branch "$worker_branch" --authority l1 >/dev/null 2>&1 || true
+  echo "NOT ACCEPTED (escalate-parked): $task_id — durable product repair ceiling already exhausted."
+  exit 3
+fi
 
 if [[ "${#authorized_continuation[@]}" -eq 10 ]]; then
   [[ -d "$worktree" && "$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)" == "${authorized_continuation[2]}" \

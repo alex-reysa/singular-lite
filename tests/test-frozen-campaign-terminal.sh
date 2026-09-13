@@ -252,6 +252,10 @@ json.dump({
 PY
     write_result
     ;;
+  decider)
+    bump decider
+    exit 97
+    ;;
   *) exit 97 ;;
 esac
 RUNNER
@@ -315,6 +319,12 @@ TASK
 cat >"$FIXTURE_ROOT/strict-gate.sh" <<'GATE'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${FROZEN_FIXTURE_COUNTER_DIR:-}" ]]; then
+  counter="$FROZEN_FIXTURE_COUNTER_DIR/gate-calls"
+  count=0
+  [[ -f "$counter" ]] && count="$(cat "$counter")"
+  printf '%s\n' "$((count + 1))" >"$counter"
+fi
 if [[ -n "${SINGULAR_TEST_TASK_CONTRACT:-}" ]]; then
   [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]]
   [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
@@ -823,6 +833,196 @@ test_context_infra_exhaustion() {
   echo "ok: enabled frozen context preserves bounded infra terminal handling"
 }
 
+test_accepted_recovery_after_independent_target_advance() {
+  local name=accepted-recovery source_engine test_engine entry
+  local run_id run_dir packet audit lease worktree base head target_after
+  local packet_before audit_before lease_before task_before
+  local worker_before auditor_before gate_before decider_before evidence_before retry_before
+  local out rc=0 inbox_count
+  make_fixture "$name"
+
+  # This test engine is complete, immutable, and selected before campaign
+  # creation. Only its evidence driver is a deterministic transport-failure
+  # wrapper; every production consumer and the Unix evidence broker remain real.
+  source_engine="$ENGINE_HOME"
+  test_engine="$scratch/$name/test-engine"
+  mkdir -p "$test_engine"
+  cp -R "$source_engine/." "$test_engine/"
+  mv "$test_engine/engine/evidence-manifest.sh" \
+    "$test_engine/engine/evidence-manifest.real.sh"
+  cat >"$test_engine/engine/evidence-manifest.sh" <<'EVIDENCE'
+#!/usr/bin/env bash
+set -euo pipefail
+counter="${FROZEN_EVIDENCE_COUNTER:?}"
+count=0
+[[ -f "$counter" ]] && count="$(cat "$counter")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$counter"
+if [[ "$count" -eq 3 || "$count" -eq 4 ]]; then
+  echo "injected bounded post-accept evidence transport failure" >&2
+  exit 77
+fi
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/evidence-manifest.real.sh" "$@"
+EVIDENCE
+  chmod +x "$test_engine/engine/evidence-manifest.sh"
+  ENGINE_HOME="$test_engine"
+  export FROZEN_EVIDENCE_COUNTER="$FIXTURE_COUNTERS/evidence-calls"
+
+  start_campaign success
+  reconcile success "$name-awaiting-evidence"
+  lease="$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json"
+  run_id="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["runId"])
+PY
+)"
+  run_dir="$FIXTURE_ROOT/.singular-state/runs/$run_id"
+  packet="$run_dir/packet.json"
+  audit="$run_dir/audit.json"
+  worktree="$FIXTURE_ROOT/.worktrees/TASK-0001"
+  assert_file "$packet" "$name accepted checkpoint packet"
+  assert_file "$audit" "$name accepted audit"
+  base="$($PYTHON_BIN - "$packet" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["baseRef"])
+PY
+)"
+  head="$($PYTHON_BIN - "$packet" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["headSha"])
+PY
+)"
+  "$PYTHON_BIN" - "$packet" "$audit" "$lease" "$base" "$head" <<'PY'
+import json, sys
+packet, audit, lease = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
+base, head = sys.argv[4:]
+assert packet["status"] == "blocked", packet
+assert audit["verdict"] == "accepted", audit
+assert lease["status"] == "blocked", lease
+assert packet["baseRef"] == lease["baseSha"] == base, (packet, lease)
+assert packet["headSha"] == head, packet
+assert any(item.get("reason") == "awaiting-evidence" and
+           item.get("productAuditVerdict") == "accepted"
+           for item in packet["blockers"]), packet
+PY
+  assert_eq "$(calls worker)" "1" "$name initial worker calls"
+  assert_eq "$(calls auditor)" "1" "$name initial auditor calls"
+  assert_eq "$(calls decider)" "0" "$name initial decider calls"
+  assert_eq "$(calls evidence)" "4" "$name bounded evidence failure calls"
+
+  # Advance only the consumer's target from B to independent T. The accepted
+  # branch/worktree stay at H and the task's dirty blocked status is not added.
+  printf 'independent target T\n' >"$FIXTURE_ROOT/independent-target.txt"
+  git -C "$FIXTURE_ROOT" add independent-target.txt
+  git -C "$FIXTURE_ROOT" commit -qm 'advance target independently after accepted H'
+  target_after="$(git -C "$FIXTURE_ROOT" rev-parse target)"
+  [[ "$base" != "$head" && "$base" != "$target_after" && "$head" != "$target_after" ]] \
+    || fail "$name did not keep B, H, and T distinct"
+  git -C "$FIXTURE_ROOT" merge-base --is-ancestor "$base" "$head" \
+    || fail "$name accepted candidate lost B->H ancestry"
+  if git -C "$FIXTURE_ROOT" merge-base --is-ancestor "$target_after" "$head"; then
+    fail "$name independent target T unexpectedly precedes H"
+  fi
+
+  # Put the accepted lease at its repair ceiling. Evidence-only recovery is a
+  # terminal continuation and must precede this fresh-work budget guard.
+  "$PYTHON_BIN" - "$lease" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["retryCount"] = data["maxRetries"]
+data["productPassStarted"] = True
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+  packet_before="$(shasum -a 256 "$packet" | awk '{print $1}')"
+  audit_before="$(shasum -a 256 "$audit" | awk '{print $1}')"
+  lease_before="$(shasum -a 256 "$lease" | awk '{print $1}')"
+  task_before="$(shasum -a 256 "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" | awk '{print $1}')"
+  worker_before="$(calls worker)"
+  auditor_before="$(calls auditor)"
+  gate_before="$(calls gate)"
+  decider_before="$(calls decider)"
+  evidence_before="$(calls evidence)"
+  retry_before="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["retryCount"])
+PY
+)"
+
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name public L1 recovery after target advance ($out)"
+  assert_contains "$out" "RESUMED ACCEPTED EVIDENCE" "$name explicit recovery outcome"
+  assert_eq "$(calls worker)" "$worker_before" "$name recovery worker debit"
+  assert_eq "$(calls auditor)" "$auditor_before" "$name recovery auditor debit"
+  assert_eq "$(calls gate)" "$gate_before" "$name recovery gate call"
+  assert_eq "$(calls decider)" "$decider_before" "$name recovery decider call"
+  assert_eq "$(calls evidence)" "$((evidence_before + 1))" "$name evidence-only recovery call"
+  assert_eq "$(shasum -a 256 "$audit" | awk '{print $1}')" "$audit_before" \
+    "$name accepted audit remains byte-identical"
+  assert_eq "$(git -C "$worktree" rev-parse HEAD)" "$head" "$name worktree H preserved"
+  assert_eq "$(git -C "$FIXTURE_ROOT" rev-parse agent/widget/TASK-0001-frozen)" "$head" \
+    "$name branch H preserved"
+  "$PYTHON_BIN" - "$packet" "$lease" "$base" "$head" "$retry_before" <<'PY'
+import json, sys
+packet = json.load(open(sys.argv[1], encoding="utf-8"))
+lease = json.load(open(sys.argv[2], encoding="utf-8"))
+base, head, retry = sys.argv[3:]
+assert packet["status"] == "accepted", packet
+assert packet["baseRef"] == lease["baseSha"] == base, (packet, lease)
+assert packet["headSha"] == head, packet
+assert lease["retryCount"] == int(retry), lease
+PY
+  assert_file "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json" "$name one accepted publication"
+
+  # With the repair ceiling still exhausted, a duplicate public call must reach
+  # the established queued/imported no-op before any gate, decider, or provider.
+  local packet_after_resume
+  packet_after_resume="$(shasum -a 256 "$packet" | awk '{print $1}')"
+  evidence_before="$(calls evidence)"
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name duplicate public L1 call ($out)"
+  assert_contains "$out" "already queued/imported; dispatch is a no-op" \
+    "$name duplicate reaches existing no-op"
+  assert_eq "$(calls worker)" "$worker_before" "$name duplicate worker calls"
+  assert_eq "$(calls auditor)" "$auditor_before" "$name duplicate auditor calls"
+  assert_eq "$(calls gate)" "$gate_before" "$name duplicate gate calls"
+  assert_eq "$(calls decider)" "$decider_before" "$name duplicate decider calls"
+  assert_eq "$(calls evidence)" "$evidence_before" "$name duplicate evidence calls"
+  assert_eq "$(shasum -a 256 "$packet" | awk '{print $1}')" "$packet_after_resume" \
+    "$name duplicate packet bytes"
+  assert_eq "$(shasum -a 256 "$audit" | awk '{print $1}')" "$audit_before" \
+    "$name duplicate audit bytes"
+  assert_eq "$(git -C "$worktree" rev-parse HEAD)" "$head" "$name duplicate worktree H"
+  inbox_count="$(find "$FIXTURE_ROOT/.singular-state/inbox" -maxdepth 1 \
+    -name '*.json' -type f | wc -l | tr -d '[:space:]')"
+  assert_eq "$inbox_count" "1" "$name exactly one queued publication"
+  "$PYTHON_BIN" - "$lease" "$base" "$retry_before" <<'PY'
+import json, sys
+lease = json.load(open(sys.argv[1], encoding="utf-8"))
+assert lease["baseSha"] == sys.argv[2], lease
+assert lease["retryCount"] == int(sys.argv[3]), lease
+PY
+
+  # The initial checkpoint hashes prove this fixture recovered the same durable
+  # authority rather than manufacturing a new verdict or candidate. Only the
+  # packet's blocked->accepted transition and lease/task statuses may change.
+  [[ "$packet_before" != "$packet_after_resume" ]] \
+    || fail "$name packet did not perform blocked-to-accepted transition"
+  [[ "$lease_before" != "$(shasum -a 256 "$lease" | awk '{print $1}')" ]] \
+    || fail "$name lease did not perform blocked-to-accepted transition"
+  [[ "$task_before" != "$(shasum -a 256 "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" | awk '{print $1}')" ]] \
+    || fail "$name task did not perform blocked-to-accepted transition"
+
+  unset FROZEN_EVIDENCE_COUNTER
+  ENGINE_HOME="$source_engine"
+  echo "ok: frozen accepted B->H recovers once after independent T and remains idempotent"
+}
+
 prepare_native_repair() {
   local name="$1"
   make_fixture "$name"
@@ -1187,6 +1387,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
   context-missing) test_missing_context_policy_refuses_campaign_start ;;
   infra) test_infra_exhaustion ;;
   context-infra) test_context_infra_exhaustion ;;
+  accepted-recovery) test_accepted_recovery_after_independent_target_advance ;;
   drift) test_policy_drift ;;
   drift-injection-failure) test_policy_drift_injection_failure_is_fail_closed ;;
   continuation-budget)
@@ -1209,6 +1410,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     test_missing_context_policy_refuses_campaign_start
     test_infra_exhaustion
     test_context_infra_exhaustion
+    test_accepted_recovery_after_independent_target_advance
     test_policy_drift_injection_failure_is_fail_closed
     test_policy_drift
     test_public_continuation_budget continuation-budget-available 0
