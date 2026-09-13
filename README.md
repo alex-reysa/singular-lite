@@ -58,6 +58,14 @@ two questions the engine would use if it could, so a gate may optionally write a
   that as `inconclusive-infrastructure` instead of spending a task's retry
   budget asking a model to fix code that was never broken.
 
+Review rounds are independently bounded. `reviewPolicy` in
+`singular.config.json` (defaults: two rounds, P0/P1 blocking, classification
+required) plus `SINGULAR_REVIEW_*` env overrides decide when a `needs-fix`
+verdict is still blocking, when P2/P3 findings become backlog, and when the
+drive must park instead of spending another product repair. See
+[`docs/review-policy.md`](docs/review-policy.md) and
+`singular review-policy --help`.
+
 `singular init` scaffolds `docs/orchestration/gates/gate.sh` as a starting point.
 The sidecar is never required — including on `schemaVersion: v2`. Without one
 the engine falls back to the exit code plus a deliberately narrow set of log

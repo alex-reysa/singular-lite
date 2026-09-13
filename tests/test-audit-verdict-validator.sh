@@ -21,6 +21,7 @@ run_lib() {
   SINGULAR_ROOT="$tmp" \
   SINGULAR_STATE_DIR="$tmp/state" \
   SINGULAR_LEGACY_SCHEMA_MODE="${MODE:-warn}" \
+  SINGULAR_AUDIT_SCHEMA="${AUDIT_SCHEMA:-}" \
   bash -c "source '$ENGINE_HOME/engine/lib.sh'; $1"
 }
 
@@ -97,5 +98,61 @@ cat >"$tmp/decider.json" <<'EOF'
 EOF
 run_lib "SINGULAR_DECIDER_SCHEMA='$ENGINE_HOME/schemas/decider-verdict.v0.schema.json'; singular_validate_decider_verdict '$tmp/decider.json' gate-red TASK-0001" 2>/dev/null \
   || fail "decider validator should tolerate legacy id in warn mode"
+
+# 8. audit-verdict.v1 optional classifiedFindings + reviewPolicy members validate;
+#    a legacy v1 document without them still validates.
+cat >"$tmp/v1.json" <<'EOF'
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-0001",
+  "runId": "RUN-1",
+  "branch": "agent/x/TASK-0001",
+  "verdict": "accepted",
+  "evidenceReviewed": ["red.log"],
+  "verificationResults": [
+    {
+      "status": "passed",
+      "command": "true",
+      "evidenceRefs": ["red.log"],
+      "rationale": "clean"
+    }
+  ],
+  "commandsRun": ["true"],
+  "findings": [],
+  "requiredFixes": [],
+  "rationale": "clean"
+}
+EOF
+AUDIT_SCHEMA="$ENGINE_HOME/schemas/audit-verdict.v1.schema.json" \
+  run_lib "singular_validate_audit_verdict '$tmp/v1.json' TASK-0001 RUN-1" \
+  || fail "v1 verdict without optional members should pass"
+
+python3 - "$tmp/v1.json" "$tmp/v1-classified.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+data["classifiedFindings"] = [{
+    "id": "f-1",
+    "severity": "P2",
+    "summary": "nit",
+    "location": "src/x.py",
+}]
+data["reviewPolicy"] = {
+    "version": 1,
+    "logicalChange": "TASK-0001",
+    "round": 1,
+    "maxRounds": 2,
+    "originalVerdict": "needs-fix",
+    "effectiveVerdict": "accepted",
+    "blocking": [],
+    "backlog": ["f-1"],
+    "downgraded": [],
+    "unclassifiedCount": 0,
+    "appliedAt": "2026-09-14T00:00:00Z",
+}
+json.dump(data, open(sys.argv[2], "w", encoding="utf-8"))
+PY
+AUDIT_SCHEMA="$ENGINE_HOME/schemas/audit-verdict.v1.schema.json" \
+  run_lib "singular_validate_audit_verdict '$tmp/v1-classified.json' TASK-0001 RUN-1" \
+  || fail "v1 verdict with classifiedFindings and reviewPolicy should pass"
 
 echo "PASS: test-audit-verdict-validator"

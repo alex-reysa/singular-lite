@@ -8480,15 +8480,17 @@ singular_render_fix_prompt() {
   local scope_log="$run_dir/scope-check.log"
   local capsule="$run_dir/implementer-capsule.json"
   local ledger="$run_dir/findings-status.json"
+  local policy_file="$run_dir/review-policy-attempt-$((n - 1)).json"
   python3 - "$out_path" "$base_prompt" "$ledger" "$capsule" "$n" "$failure_class" \
     "$attempt_ctx" "$gate_log" "$scope_log" "$owned_json" "$forbidden_json" \
-    "$SINGULAR_CONTEXT_SECTION_MAX_CHARS" <<'PY'
+    "$SINGULAR_CONTEXT_SECTION_MAX_CHARS" "$policy_file" <<'PY'
 import json
 import os
 import sys
 
 (out_path, base_prompt, ledger_path, capsule_path, n_raw, failure_class,
- attempt_ctx, gate_log, scope_log, owned_raw, forbidden_raw, cap_raw) = sys.argv[1:13]
+ attempt_ctx, gate_log, scope_log, owned_raw, forbidden_raw, cap_raw,
+ policy_path) = sys.argv[1:14]
 n = int(n_raw)
 cap = int(cap_raw)
 prev = n - 1
@@ -8577,16 +8579,71 @@ parts.append("Forbidden: " + (", ".join(forbidden) if forbidden else "(none)"))
 parts.append("")
 
 # --- Authoritative findings ---------------------------------------------------
-parts.append("### Authoritative findings — fix ALL of these (open items from the findings ledger)")
-if open_findings:
-    lines = []
-    for e in open_findings:
-        text = str(e.get("text", ""))[:500]
-        lines.append(f"- [from attempt {e.get('firstSeenAttempt')}] ({e.get('id')}) {text}")
-    parts.append(section_cap("\n".join(lines)))
+policy = None
+try:
+    with open(policy_path, "r", encoding="utf-8") as f:
+        loaded_policy = json.load(f)
+    if isinstance(loaded_policy, dict):
+        policy = loaded_policy
+except Exception:
+    policy = None
+
+if policy is not None:
+    parts.append("### Authoritative findings")
+    blocking_ids = [str(x) for x in policy.get("blocking") or [] if str(x)]
+    items_by_id = {}
+    for item in policy.get("items") or []:
+        if isinstance(item, dict) and item.get("id"):
+            items_by_id[str(item["id"])] = item
+    ledger_by_id = {str(e.get("id")): e for e in open_findings if e.get("id")}
+    if blocking_ids:
+        lines = []
+        for ident in blocking_ids:
+            item = items_by_id.get(ident) or {}
+            summary = str(item.get("summary") or "")
+            matched = None
+            if ident in ledger_by_id:
+                matched = ledger_by_id[ident]
+            elif summary:
+                needle = summary.lower()
+                for e in open_findings:
+                    if needle and needle in str(e.get("text", "")).lower():
+                        matched = e
+                        break
+            if matched:
+                text = str(matched.get("text", ""))[:500] or summary
+                lines.append(
+                    f"- [from attempt {matched.get('firstSeenAttempt')}] ({ident}) {text}"
+                )
+            else:
+                lines.append(f"- ({ident}) {summary[:500]}")
+        parts.append(section_cap("\n".join(lines)))
+    else:
+        parts.append("(no open blocking findings recorded)")
+    parts.append("")
+    parts.append("### Non-blocking backlog (do not spend the repair on these unless trivial)")
+    backlog_ids = [str(x) for x in policy.get("backlog") or [] if str(x)]
+    if backlog_ids:
+        lines = []
+        for ident in backlog_ids:
+            item = items_by_id.get(ident) or {}
+            summary = str(item.get("summary") or ident)
+            lines.append(f"- ({ident}) {summary[:500]}")
+        parts.append(section_cap("\n".join(lines)))
+    else:
+        parts.append("(none)")
+    parts.append("")
 else:
-    parts.append("(no open ledger findings recorded)")
-parts.append("")
+    parts.append("### Authoritative findings — fix ALL of these (open items from the findings ledger)")
+    if open_findings:
+        lines = []
+        for e in open_findings:
+            text = str(e.get("text", ""))[:500]
+            lines.append(f"- [from attempt {e.get('firstSeenAttempt')}] ({e.get('id')}) {text}")
+        parts.append(section_cap("\n".join(lines)))
+    else:
+        parts.append("(no open ledger findings recorded)")
+    parts.append("")
 
 # --- Evidence (class-scoped) --------------------------------------------------
 parts.append("### Evidence (host logs, informational)")
@@ -8646,6 +8703,12 @@ singular_render_reaudit_prompt() {
   local ledger="$run_dir/findings-status.json"
   if [[ "$n" -lt 2 || ! -f "$capsule" || -z "$prior_head" ]]; then
     cp "$base_prompt" "$out_path"
+    if [[ -n "${SINGULAR_REVIEW_ROUND_LABEL:-}" ]]; then
+      {
+        printf '\n### Review round policy\n\n%s\n\n' "$SINGULAR_REVIEW_ROUND_LABEL"
+        printf '%s\n' "Verify closure of the listed open blocking findings and any regression introduced by the fix diff. Do not re-review unchanged code unless you can state a reproducible P0/P1 trigger. Classify every finding."
+      } >>"$out_path"
+    fi
     return 0
   fi
 
@@ -8732,6 +8795,12 @@ parts.append(
 with open(out_path, "w", encoding="utf-8") as f:
     f.write("\n".join(parts) + "\n")
 PY
+  if [[ -n "${SINGULAR_REVIEW_ROUND_LABEL:-}" ]]; then
+    {
+      printf '\n### Review round policy\n\n%s\n\n' "$SINGULAR_REVIEW_ROUND_LABEL"
+      printf '%s\n' "Verify closure of the listed open blocking findings and any regression introduced by the fix diff. Do not re-review unchanged code unless you can state a reproducible P0/P1 trigger. Classify every finding."
+    } >>"$out_path"
+  fi
 }
 
 # --- Kill switch + circuit breaker ---
