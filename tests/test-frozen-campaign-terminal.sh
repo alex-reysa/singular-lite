@@ -30,14 +30,86 @@ import os, stat, sys
 print(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode))
 PY
 }
+tree_bytes_modes_binding() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import hashlib, json, os, stat, sys
+
+records = []
+
+def record(path, relative):
+    mode = os.lstat(path).st_mode
+    if stat.S_ISDIR(mode):
+        kind, payload = "directory", None
+    elif stat.S_ISREG(mode):
+        kind = "file"
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        payload = digest.hexdigest()
+    elif stat.S_ISLNK(mode):
+        kind, payload = "symlink", os.readlink(path)
+    else:
+        kind, payload = "other", None
+    records.append([relative, kind, stat.S_IMODE(mode), payload])
+    if kind == "directory":
+        for entry in sorted(os.scandir(path), key=lambda item: item.name):
+            child = entry.name if not relative else relative + "/" + entry.name
+            record(entry.path, child)
+
+record(os.path.abspath(sys.argv[1]), "")
+encoded = json.dumps(records, ensure_ascii=True, separators=(",", ":")).encode()
+print(hashlib.sha256(encoded).hexdigest())
+PY
+}
+
+FROZEN_BOUND_SOURCE_ENGINE=
+FROZEN_BOUND_SOURCE_BINDING=
+FROZEN_BOUND_TEST_ENGINE=
+FROZEN_BOUND_TEST_BINDING=
+FROZEN_OWNED_TEST_ENGINE=
+
+verify_frozen_engine_bindings() {
+  local actual failed=0
+  if [[ -n "$FROZEN_BOUND_SOURCE_ENGINE" ]]; then
+    if ! actual="$(tree_bytes_modes_binding "$FROZEN_BOUND_SOURCE_ENGINE")"; then
+      echo "FAIL: accepted-recovery source engine binding could not be read" >&2
+      failed=1
+    elif [[ "$actual" != "$FROZEN_BOUND_SOURCE_BINDING" ]]; then
+      echo "FAIL: accepted-recovery source engine bytes or modes changed" >&2
+      failed=1
+    fi
+  fi
+  if [[ -n "$FROZEN_BOUND_TEST_ENGINE" ]]; then
+    if ! actual="$(tree_bytes_modes_binding "$FROZEN_BOUND_TEST_ENGINE")"; then
+      echo "FAIL: accepted-recovery prepared test engine binding could not be read" >&2
+      failed=1
+    elif [[ "$actual" != "$FROZEN_BOUND_TEST_BINDING" ]]; then
+      echo "FAIL: accepted-recovery prepared test engine bytes or modes changed" >&2
+      failed=1
+    fi
+  fi
+  return "$failed"
+}
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/singular-frozen-terminal.XXXXXX")"
 cleanup() {
+  local exit_status=$? cleanup_failed=0
+  trap - EXIT
+  verify_frozen_engine_bindings || cleanup_failed=1
   if [[ "${FROZEN_KEEP_TMP:-0}" == "1" ]]; then
     echo "frozen terminal fixture retained: $scratch" >&2
   else
-    rm -rf "$scratch"
+    if [[ -n "$FROZEN_OWNED_TEST_ENGINE" \
+        && "$FROZEN_OWNED_TEST_ENGINE" == "$scratch/"* ]]; then
+      chmod -R u+w "$FROZEN_OWNED_TEST_ENGINE" 2>/dev/null || cleanup_failed=1
+    fi
+    rm -rf "$scratch" || cleanup_failed=1
   fi
+  if [[ "$exit_status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+    exit_status=1
+  fi
+  exit "$exit_status"
 }
 trap cleanup EXIT
 
@@ -839,15 +911,29 @@ test_accepted_recovery_after_independent_target_advance() {
   local packet_before audit_before lease_before task_before
   local worker_before auditor_before gate_before decider_before evidence_before retry_before
   local out rc=0 inbox_count
+  source_engine="$ENGINE_HOME"
+  FROZEN_BOUND_SOURCE_ENGINE="$source_engine"
+  FROZEN_BOUND_SOURCE_BINDING="$(tree_bytes_modes_binding "$source_engine")"
   make_fixture "$name"
 
   # This test engine is complete, immutable, and selected before campaign
   # creation. Only its evidence driver is a deterministic transport-failure
   # wrapper; every production consumer and the Unix evidence broker remain real.
-  source_engine="$ENGINE_HOME"
   test_engine="$scratch/$name/test-engine"
   mkdir -p "$test_engine"
+  "$PYTHON_BIN" - "$source_engine" "$test_engine" "$scratch/$name" "$scratch" <<'PY'
+import pathlib, sys
+source, copied, owner, scratch = [pathlib.Path(item).resolve(strict=True)
+                                  for item in sys.argv[1:]]
+assert source != copied, (source, copied)
+assert not copied.is_relative_to(source), (source, copied)
+assert not source.is_relative_to(copied), (source, copied)
+assert copied.parent == owner, (copied, owner)
+assert copied.is_relative_to(scratch), (copied, scratch)
+PY
+  FROZEN_OWNED_TEST_ENGINE="$test_engine"
   cp -R "$source_engine/." "$test_engine/"
+  chmod u+w "$test_engine/engine"
   mv "$test_engine/engine/evidence-manifest.sh" \
     "$test_engine/engine/evidence-manifest.real.sh"
   cat >"$test_engine/engine/evidence-manifest.sh" <<'EVIDENCE'
@@ -865,6 +951,17 @@ fi
 exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/evidence-manifest.real.sh" "$@"
 EVIDENCE
   chmod +x "$test_engine/engine/evidence-manifest.sh"
+  chmod -R a-w "$test_engine"
+  "$PYTHON_BIN" - "$test_engine" <<'PY'
+import os, stat, sys
+for current, directories, files in os.walk(sys.argv[1], followlinks=False):
+    for path in [current, *(os.path.join(current, item)
+                            for item in directories + files)]:
+        assert not stat.S_IMODE(os.lstat(path).st_mode) & 0o222, path
+PY
+  FROZEN_BOUND_TEST_ENGINE="$test_engine"
+  FROZEN_BOUND_TEST_BINDING="$(tree_bytes_modes_binding "$test_engine")"
+  verify_frozen_engine_bindings || fail "$name engine binding failed before campaign start"
   ENGINE_HOME="$test_engine"
   export FROZEN_EVIDENCE_COUNTER="$FIXTURE_COUNTERS/evidence-calls"
 
@@ -1018,6 +1115,7 @@ PY
   [[ "$task_before" != "$(shasum -a 256 "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" | awk '{print $1}')" ]] \
     || fail "$name task did not perform blocked-to-accepted transition"
 
+  verify_frozen_engine_bindings || fail "$name engine binding failed at test exit"
   unset FROZEN_EVIDENCE_COUNTER
   ENGINE_HOME="$source_engine"
   echo "ok: frozen accepted B->H recovers once after independent T and remains idempotent"
