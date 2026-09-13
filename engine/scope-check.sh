@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${BASH_VERSINFO[0]:-0}" -lt 4 && -x /opt/homebrew/bin/bash ]]; then
+  exec /opt/homebrew/bin/bash "$0" "$@"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
@@ -78,21 +82,16 @@ _path_matches() {
 }
 
 declare -a files=()
-if [[ -n "$base" ]]; then
-  while IFS= read -r path; do
-    [[ -n "$path" ]] && files+=("$path")
-  done < <(git -C "$worktree" diff --name-only "$base"...HEAD)
+changes_file="$(mktemp "${TMPDIR:-/tmp}/singular-scope-changes.XXXXXX")"
+trap 'rm -f "$changes_file"' EXIT
+change_args=(--worktree "$worktree" --base "${base:-HEAD}" --head HEAD --include-working --format nul)
+if ! python3 "$SCRIPT_DIR/git_changes.py" "${change_args[@]}" >"$changes_file"; then
+  echo "scope check failed: Git change discovery failed" >&2
+  exit 2
 fi
-
-while IFS= read -r line; do
-  [[ -z "$line" ]] && continue
-  path="${line:3}"
-  # Rename entries appear as "old -> new"; validate the destination path.
-  if [[ "$path" == *" -> "* ]]; then
-    path="${path##* -> }"
-  fi
+while IFS= read -r -d '' path; do
   files+=("$path")
-done < <(git -C "$worktree" status --porcelain --untracked-files=all)
+done <"$changes_file"
 
 if [[ ${#files[@]} -eq 0 ]]; then
   echo "scope check: no changed files"

@@ -566,6 +566,7 @@ PY
     --predecessor-campaign "$CONTINUATION_CAMPAIGN" \
     --predecessor-reservation-base "$CONTINUATION_RESERVATION_BASE" \
     --candidate-source "$CONTINUATION_CANDIDATE" \
+    --candidate-base "$CONTINUATION_CANDIDATE" \
     --integration-target "$CONTINUATION_RESERVATION_BASE" \
     --worktree "$CONTINUATION_WORKTREE" >"$scratch/$name-continuation-recovery.log"
 
@@ -594,6 +595,7 @@ lease = json.load(open(lease_path, encoding="utf-8"))
 dispatch = json.load(open(dispatch_path, encoding="utf-8"))
 authority = lease["continuationAuthorization"]
 assert authority["candidateSourceSha"] == candidate, lease
+assert authority["candidateBaseSha"] == candidate, lease
 assert authority["integrationTargetSha"] == reservation_base, lease
 assert lease["reservationBaseSha"] == current_target, lease
 assert authority["engineSourceFingerprint"] == runtime_fingerprint, lease
@@ -609,6 +611,16 @@ assert lease["terminalDispositionHistory"][0]["kind"] == "orphan-reservation", l
 assert dispatch["reservationGeneration"] == int(generation), dispatch
 assert dispatch["attemptLifecycle"]["state"] == "terminal", dispatch
 assert dispatch["attemptLifecycle"]["continuationAuthorizationId"] == authority["authorizationId"], dispatch
+PY
+  "$PYTHON_BIN" - "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" \
+    "$CONTINUATION_CANDIDATE" <<'PY'
+import json, pathlib, sys
+packets = [path for path in pathlib.Path(sys.argv[1]).glob("*.json")
+           if not path.name.endswith(".audit.json")]
+assert len(packets) == 1, packets
+packet = json.load(open(packets[0], encoding="utf-8"))
+assert packet["baseRef"] == sys.argv[2], packet
+assert packet["changedFiles"] == ["internal/widget/note.txt", "internal/widget/parser.go"], packet
 PY
   assert_eq "$(calls worker)" "1" "$name exactly one continuation worker"
   assert_eq "$(calls auditor)" "1" "$name exactly one continuation auditor"

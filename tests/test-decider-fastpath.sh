@@ -355,12 +355,24 @@ if [[ "$level" == "l2" ]]; then
   # Clean run (rc 0) but no packet (prose/empty output): must classify as
   # worker-no-packet via the main retry loop, NOT worker-infra.
   if [[ "${MOCK_WORKER_EMPTY:-0}" == "1" ]]; then : >"$out"; exit 0; fi
+  if [[ "${MOCK_ADVANCE_TARGET:-0}" == "1" ]]; then
+    printf 'target moved after admission\n' >"$SINGULAR_ROOT/target-moved.txt"
+    git -C "$SINGULAR_ROOT" add target-moved.txt
+    git -C "$SINGULAR_ROOT" -c user.name=test -c user.email=test@example.local \
+      commit -qm 'move target after admission'
+  fi
   mkdir -p "$chdir/internal/widget" "$chdir/.singular-evidence"
-  printf 'package widget\n// v%s\n' "$n" >"$chdir/internal/widget/parser.go"
+  if [[ "${MOCK_WORKER_DELETE:-0}" == "1" ]]; then
+    rm -f "$chdir/internal/widget/parser.go"
+  elif [[ "${MOCK_WORKER_NO_WRITE:-0}" != "1" ]]; then
+    printf 'package widget\n// v%s\n' "$n" >"$chdir/internal/widget/parser.go"
+  fi
   printf 'red\n' >"$chdir/.singular-evidence/red.log"; printf 'green\n' >"$chdir/.singular-evidence/green.log"; printf 'reg\n' >"$chdir/.singular-evidence/regression.log"
   python3 - "$out" <<'PY'
 import json, sys
-json.dump({"schema":"singular.orchestration.state-packet.v0","packetId":"p","runId":"r","taskId":"TASK-0001","area":"widget","role":"l2-developer","status":"needs-review","baseRef":"target","branch":"agent/widget/TASK-0001-generic","headSha":"uncommitted","workspace":"/tmp","ownedFiles":["internal/widget/parser.go"],"changedFiles":["internal/widget/parser.go"],"commands":[{"cmd":"true","exitCode":0,"logRef":""}],"tests":[{"name":"t","phase":"red","status":"fail","logRef":""},{"name":"t","phase":"green","status":"pass","logRef":""}],"evidence":[{"kind":"red","ref":".singular-evidence/red.log"}],"blockers":[],"nextAction":"audit","createdAt":"2026-01-01T00:00:00Z"}, open(sys.argv[1],"w"))
+import os
+claim = [os.environ.get("MOCK_WORKER_CHANGED_CLAIM", "internal/widget/parser.go")]
+json.dump({"schema":"singular.orchestration.state-packet.v0","packetId":"p","runId":"r","taskId":"TASK-0001","area":"widget","role":"l2-developer","status":"needs-review","baseRef":"target","branch":"agent/widget/TASK-0001-generic","headSha":"uncommitted","workspace":"/tmp","ownedFiles":["internal/widget/parser.go"],"changedFiles":claim,"commands":[{"cmd":"true","exitCode":0,"logRef":""}],"tests":[{"name":"t","phase":"red","status":"fail","logRef":""},{"name":"t","phase":"green","status":"pass","logRef":""}],"evidence":[{"kind":"red","ref":".singular-evidence/red.log"}],"blockers":[],"nextAction":"audit","createdAt":"2026-01-01T00:00:00Z"}, open(sys.argv[1],"w"))
 PY
   exit 0
 fi
@@ -491,6 +503,8 @@ test_driver_risk_bounded_product_repairs() {
 
   # A reset/re-entry without the explicit unpark budget reset must not mint a
   # second initial pass after the durable lease already consumed its ceiling.
+  printf 'preserve untracked\n' >"$SINGULAR_WORKTREES_DIR/TASK-0001/untracked-preserve.txt"
+  printf 'preserve ignored\n' >"$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence/ignored-preserve.log"
   singular_task_set_status "$SINGULAR_TASKS_DIR/TASK-0001.md" ready
   calls_before="$(cat "$MOCK_COUNTER_DIR/worker-calls")"
   rc=0
@@ -498,6 +512,10 @@ test_driver_risk_bounded_product_repairs() {
   assert_eq "$rc" "3" "ordinary re-entry is refused after durable ceiling ($out)"
   assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "$calls_before" \
     "ordinary re-entry: no additional product pass"
+  assert_eq "$(cat "$SINGULAR_WORKTREES_DIR/TASK-0001/untracked-preserve.txt")" \
+    "preserve untracked" "ordinary exhausted re-entry preserves untracked candidate"
+  assert_eq "$(cat "$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence/ignored-preserve.log")" \
+    "preserve ignored" "ordinary exhausted re-entry preserves ignored evidence"
   assert_contains "$(cat "$SINGULAR_EVENTS_FILE")" '"priorLease":true' \
     "ordinary re-entry: durable lease provenance is observable"
   )
@@ -967,6 +985,529 @@ PY
   echo "ok: campaign transition invalidates L1 publication without consuming product budget"
 }
 
+test_driver_deterministic_manifest_rejection_is_single_attempt() {
+  with_fixture
+  write_generic_task
+  local stub="$FIXTURE_TMP/mock-runner.sh" out rc=0 run_dir events
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-evidence-input"
+  out="$(SINGULAR_EVIDENCE_CONFIG_JSON='{"maxComposedBytes":1}' \
+    "$SCRIPT_DIR/l1-drive.sh" --no-audit TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "deterministic evidence input parks ($out)"
+  assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "1" \
+    "deterministic evidence input: one worker pass"
+  assert_eq "$(singular_lease_field TASK-0001 retryCount)" "0" \
+    "deterministic evidence input: no product repair consumed"
+  run_dir="$(find "$SINGULAR_RUNS_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  assert_file "$run_dir/evidence-manifest-build-try-0.log" \
+    "deterministic evidence input first attempt"
+  assert_no_file "$run_dir/evidence-manifest-build-try-1.log" \
+    "deterministic evidence input unchanged retry"
+  events="$(cat "$SINGULAR_EVENTS_FILE")"
+  assert_contains "$events" '"type":"evidence.input_rejected"' \
+    "deterministic evidence input event"
+  assert_not_contains "$events" '"type":"evidence.infra_retry"' \
+    "deterministic evidence input is not transient infrastructure"
+  assert_not_contains "$events" 'decider-prompt' \
+    "deterministic evidence input does not consult a model decider"
+  echo "ok: deterministic manifest rejection is one attempt with no product repair debit"
+}
+
+test_driver_transient_manifest_failure_gets_one_retry() {
+  with_fixture
+  write_generic_task
+  local stub="$FIXTURE_TMP/mock-runner.sh" engine_view entry counter out rc=0 events
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-evidence-transient"
+  engine_view="$FIXTURE_TMP/engine-view"
+  mkdir -p "$engine_view"
+  for entry in "$ENGINE_HOME"/engine/*; do
+    ln -s "$entry" "$engine_view/$(basename "$entry")"
+  done
+  rm "$engine_view/evidence-manifest.sh"
+  cat >"$engine_view/evidence-manifest.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+counter="${MOCK_MANIFEST_COUNTER:?}"
+count=0
+[[ -f "$counter" ]] && count="$(cat "$counter")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$counter"
+if [[ "$count" -eq 1 ]]; then exit 75; fi
+exec "${REAL_EVIDENCE_MANIFEST:?}" "$@"
+STUB
+  chmod +x "$engine_view/evidence-manifest.sh"
+  counter="$FIXTURE_TMP/manifest-calls"
+  export MOCK_MANIFEST_COUNTER="$counter"
+  export REAL_EVIDENCE_MANIFEST="$ENGINE_HOME/engine/evidence-manifest.sh"
+  out="$(SINGULAR_EVIDENCE_CONFIG_JSON='{"maxComposedBytes":1}' \
+    "$engine_view/l1-drive.sh" --no-audit TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "transient evidence retry reaches deterministic stop ($out)"
+  assert_eq "$(cat "$counter")" "2" "transient evidence gets exactly one extra attempt"
+  assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "1" \
+    "transient evidence retry does not rerun worker"
+  assert_eq "$(singular_lease_field TASK-0001 retryCount)" "0" \
+    "transient evidence retry does not consume product repair"
+  events="$(cat "$SINGULAR_EVENTS_FILE")"
+  assert_contains "$events" '"type":"evidence.infra_retry"' \
+    "transient evidence retry event"
+  assert_contains "$events" '"type":"evidence.input_rejected"' \
+    "second deterministic rejection event"
+  unset MOCK_MANIFEST_COUNTER REAL_EVIDENCE_MANIFEST
+  echo "ok: transient manifest failure receives one bounded infrastructure retry"
+}
+
+test_driver_invalid_bases_refuse_before_worker_or_debit() {
+  local kind base tmp stub out rc calls
+  for kind in missing nonancestor; do
+    tmp="$(mktemp -d)"
+    (
+      with_fixture "$tmp"
+      write_generic_task
+      stub="$FIXTURE_TMP/mock-runner.sh"
+      make_seq_runner "$stub"
+      export SINGULAR_RUNNER="$stub"
+      export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-invalid-base"
+      if [[ "$kind" == missing ]]; then
+        base=does-not-exist
+      else
+        tree="$(git -C "$SINGULAR_ROOT" rev-parse 'target^{tree}')"
+        base="$(printf 'unrelated base\n' | git -C "$SINGULAR_ROOT" \
+          -c user.name=test -c user.email=test@example.local commit-tree "$tree")"
+      fi
+      rc=0
+      out="$(SINGULAR_DISPATCH_BASE_SHA="$base" \
+        "$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+      assert_eq "$rc" "2" "$kind base deterministic refusal ($out)"
+      calls=0
+      [[ -f "$MOCK_COUNTER_DIR/worker-calls" ]] && calls="$(cat "$MOCK_COUNTER_DIR/worker-calls")"
+      assert_eq "$calls" "0" "$kind base worker launch"
+      assert_no_file "$SINGULAR_LEASES_DIR/TASK-0001.json" "$kind base lease/debit"
+    )
+  done
+  echo "ok: missing and nonancestor bases refuse before worker launch or product debit"
+}
+
+test_driver_continuation_keeps_candidate_and_reservation_bases_distinct() {
+  with_fixture
+  write_generic_task
+  local candidate_base candidate_source reservation_base worktree fingerprint stub out rc=0 lease
+  candidate_base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  git -C "$SINGULAR_ROOT" branch agent/widget/TASK-0001-generic "$candidate_base"
+  mkdir -p "$SINGULAR_WORKTREES_DIR"
+  worktree="$SINGULAR_WORKTREES_DIR/TASK-0001"
+  git -C "$SINGULAR_ROOT" worktree add -q "$worktree" agent/widget/TASK-0001-generic
+  printf 'out of scope candidate\n' >"$worktree/outside.txt"
+  git -C "$worktree" add outside.txt
+  git -C "$worktree" -c user.name=test -c user.email=test@example.local \
+    commit -qm 'preserved continuation candidate'
+  candidate_source="$(git -C "$worktree" rev-parse HEAD)"
+  printf 'scheduler target advanced\n' >"$SINGULAR_ROOT/reservation.txt"
+  git -C "$SINGULAR_ROOT" add reservation.txt
+  git -C "$SINGULAR_ROOT" commit -qm 'scheduler reservation base'
+  reservation_base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  fingerprint="$(singular_campaign_engine_source_fingerprint 2>/dev/null || true)"
+  singular_lease_write TASK-0001 agent/widget/TASK-0001-generic widget l2-developer \
+    "internal/widget/parser.go" planned RESERVATION-RUN "$worktree" "$reservation_base" \
+    RESERVATION-BATCH '["internal/widget/parser.go"]' '[]'
+  lease="$SINGULAR_LEASES_DIR/TASK-0001.json"
+  python3 - "$lease" "$candidate_base" "$candidate_source" "$reservation_base" \
+    "$worktree" "$fingerprint" <<'PY'
+import json, os, sys
+path, candidate_base, candidate, reservation, worktree, fingerprint = sys.argv[1:]
+lease = json.load(open(path, encoding="utf-8"))
+lease.update({"reservationOwner": "owner", "reservationGeneration": 1,
+              "reservationRunId": "RESERVATION-RUN", "reservationBaseSha": reservation})
+lease["continuationAuthorization"] = {
+    "authorizationId": "AUTH-CONTINUATION", "state": "reserved",
+    "campaignBinding": "legacy", "candidateSourceSha": candidate,
+    "candidateBaseSha": candidate_base, "integrationTargetSha": candidate_base,
+    "engineSourceFingerprint": fingerprint, "branch": "agent/widget/TASK-0001-generic",
+    "worktree": worktree, "reservationOwner": "owner", "reservationGeneration": 1,
+    "reservationRunId": "RESERVATION-RUN",
+}
+with open(path + ".tmp", "w", encoding="utf-8") as stream:
+    json.dump(lease, stream); stream.write("\n")
+os.replace(path + ".tmp", path)
+PY
+  stub="$FIXTURE_TMP/mock-runner.sh"
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-continuation-bases"
+  out="$(SINGULAR_DISPATCH_BASE_SHA="$reservation_base" \
+    SINGULAR_RESERVATION_OWNER=owner SINGULAR_RESERVATION_GENERATION=1 \
+    "$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "continuation admission result ($out)"
+  assert_contains "$out" "failed candidate admission" \
+    "continuation passed distinct-base lineage checks"
+  [[ ! -f "$MOCK_COUNTER_DIR/worker-calls" ]] || fail "continuation rejection launched worker"
+  assert_eq "$(singular_json_field "$lease" retryCount)" "0" \
+    "continuation rejection did not consume repair"
+  assert_eq "$(git -C "$worktree" rev-parse HEAD)" "$candidate_source" \
+    "continuation rejection preserved candidate head"
+  echo "ok: continuation candidate base remains distinct from scheduler reservation base"
+}
+
+test_driver_retains_precommitted_rejected_candidate_before_provider() {
+  local variant
+  for variant in scope-and-secret secret-only; do
+    (
+      with_fixture
+      write_generic_task
+      local synthetic_prefix='sk-' synthetic_body='AAAAAAAAAAAAAAAAAAAA' synthetic
+      synthetic="${synthetic_prefix}${synthetic_body}"
+      local base head stub out rc=0 retained lease candidate_path run_dir scope_log secret_log expected
+      if [[ "$variant" == "secret-only" ]]; then
+        candidate_path="internal/widget/parser.go"
+      else
+        candidate_path="outside-secret.txt"
+      fi
+      expected="$FIXTURE_TMP/expected-secret"
+      printf '%s\n' "$synthetic" >"$expected"
+      base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+      git -C "$SINGULAR_ROOT" branch agent/widget/TASK-0001-generic "$base"
+      mkdir -p "$SINGULAR_WORKTREES_DIR"
+      git -C "$SINGULAR_ROOT" worktree add -q "$SINGULAR_WORKTREES_DIR/TASK-0001" \
+        agent/widget/TASK-0001-generic
+      mkdir -p "$(dirname "$SINGULAR_WORKTREES_DIR/TASK-0001/$candidate_path")"
+      printf '%s\n' "$synthetic" >"$SINGULAR_WORKTREES_DIR/TASK-0001/$candidate_path"
+      git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" add "$candidate_path"
+      git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" -c user.name=test -c user.email=test@example.local \
+        commit -qm 'precommitted rejected candidate'
+      head="$(git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" rev-parse HEAD)"
+      singular_lease_write TASK-0001 agent/widget/TASK-0001-generic widget l2-developer \
+        "internal/widget/parser.go" blocked RUN-OLD "$SINGULAR_WORKTREES_DIR/TASK-0001" \
+        "$base" BATCH-OLD '["internal/widget/parser.go"]' '[]'
+      stub="$FIXTURE_TMP/mock-runner.sh"
+      make_seq_runner "$stub"
+      export SINGULAR_RUNNER="$stub"
+      export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-rejected-candidate"
+      out="$("$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+      assert_eq "$rc" "3" "$variant retained candidate result"
+      [[ "$out" != *"$synthetic"* ]] \
+        || fail "$variant retained candidate disclosed synthetic credential bytes"
+      [[ ! -e "$SINGULAR_WORKTREES_DIR/TASK-0001" ]] \
+        || fail "$variant retained candidate still occupies canonical worktree"
+      retained="$(find "$SINGULAR_STATE_DIR/retained-worktrees" -mindepth 1 -maxdepth 1 \
+        -type d -print -quit)"
+      [[ -n "$retained" ]] || fail "$variant rejected candidate was not retained"
+      assert_eq "$(git -C "$retained" rev-parse HEAD)" "$head" \
+        "$variant rejected candidate retained head"
+      cmp -s "$expected" "$retained/$candidate_path" \
+        || fail "$variant rejected candidate did not retain exact committed bytes"
+      lease="$SINGULAR_LEASES_DIR/TASK-0001.json"
+      assert_eq "$(singular_json_field "$lease" retryCount)" "0" \
+        "$variant rejected candidate retry counter"
+      assert_eq "$(singular_json_field "$lease" productPassStarted)" "False" \
+        "$variant rejected candidate product marker"
+      [[ ! -f "$MOCK_COUNTER_DIR/worker-calls" ]] \
+        || fail "$variant rejected candidate launched a worker"
+      run_dir="$(find "$SINGULAR_RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+      scope_log="$run_dir/admission-scope-check.log"
+      secret_log="$run_dir/admission-secret-scan.log"
+      assert_file "$scope_log" "$variant retained candidate scope admission log"
+      assert_file "$secret_log" "$variant retained candidate secret admission log"
+      grep -Fq "OpenAI key match in added content" "$secret_log" \
+        || fail "$variant retained candidate secret rule missing"
+      ! grep -Fq "$synthetic" "$secret_log" \
+        || fail "$variant retained candidate secret log disclosed credential bytes"
+      if [[ "$variant" == "secret-only" ]]; then
+        assert_contains "$(cat "$scope_log")" "all allowed" \
+          "in-scope retained candidate scope admission"
+      else
+        assert_contains "$(cat "$scope_log")" "disallowed paths" \
+          "out-of-scope retained candidate scope admission"
+      fi
+    )
+  done
+  echo "ok: precommitted scope and in-scope secret rejections preserve candidates before provider work"
+}
+
+test_driver_rejects_retained_branch_before_provider() {
+  local variant
+  for variant in scope-and-secret secret-only; do
+    (
+      with_fixture
+      write_generic_task
+      local synthetic_prefix='sk-' synthetic_body='AAAAAAAAAAAAAAAAAAAA' synthetic
+      synthetic="${synthetic_prefix}${synthetic_body}"
+      local base head stub out rc=0 lease candidate_path run_dir scope_log secret_log expected
+      if [[ "$variant" == "secret-only" ]]; then
+        candidate_path="internal/widget/parser.go"
+      else
+        candidate_path="outside-secret.txt"
+      fi
+      expected="$FIXTURE_TMP/expected-secret"
+      printf '%s\n' "$synthetic" >"$expected"
+      base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+      git -C "$SINGULAR_ROOT" checkout -q -b agent/widget/TASK-0001-generic
+      mkdir -p "$(dirname "$SINGULAR_ROOT/$candidate_path")"
+      printf '%s\n' "$synthetic" >"$SINGULAR_ROOT/$candidate_path"
+      git -C "$SINGULAR_ROOT" add "$candidate_path"
+      git -C "$SINGULAR_ROOT" -c user.name=test -c user.email=test@example.local \
+        commit -qm 'retained branch rejected candidate'
+      head="$(git -C "$SINGULAR_ROOT" rev-parse HEAD)"
+      git -C "$SINGULAR_ROOT" checkout -q target
+      stub="$FIXTURE_TMP/mock-runner.sh"
+      make_seq_runner "$stub"
+      export SINGULAR_RUNNER="$stub"
+      export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-rejected-branch"
+      out="$("$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+      assert_eq "$rc" "3" "$variant retained branch admission result"
+      [[ "$out" != *"$synthetic"* ]] \
+        || fail "$variant retained branch disclosed synthetic credential bytes"
+      [[ ! -f "$MOCK_COUNTER_DIR/worker-calls" ]] \
+        || fail "$variant retained branch launched a worker"
+      assert_eq "$(git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" rev-parse HEAD)" "$head" \
+        "$variant retained branch candidate head preserved"
+      cmp -s "$expected" "$SINGULAR_WORKTREES_DIR/TASK-0001/$candidate_path" \
+        || fail "$variant retained branch did not preserve exact candidate bytes"
+      lease="$SINGULAR_LEASES_DIR/TASK-0001.json"
+      assert_eq "$(singular_json_field "$lease" retryCount)" "0" \
+        "$variant retained branch retry counter"
+      assert_eq "$(singular_json_field "$lease" productPassStarted)" "False" \
+        "$variant retained branch product marker"
+      run_dir="$(find "$SINGULAR_RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+      scope_log="$run_dir/admission-scope-check.log"
+      secret_log="$run_dir/admission-secret-scan.log"
+      assert_file "$scope_log" "$variant retained branch scope admission log"
+      assert_file "$secret_log" "$variant retained branch secret admission log"
+      grep -Fq "OpenAI key match in added content" "$secret_log" \
+        || fail "$variant retained branch secret rule missing"
+      ! grep -Fq "$synthetic" "$secret_log" \
+        || fail "$variant retained branch secret log disclosed credential bytes"
+      if [[ "$variant" == "secret-only" ]]; then
+        assert_contains "$(cat "$scope_log")" "all allowed" \
+          "in-scope retained branch scope admission"
+      else
+        assert_contains "$(cat "$scope_log")" "disallowed paths" \
+          "out-of-scope retained branch scope admission"
+      fi
+    )
+  done
+  echo "ok: retained branch scope and in-scope secret checks refuse before provider launch"
+}
+
+test_driver_exhausted_preserves_partial_checkout_before_reset() {
+  with_fixture
+  write_generic_task
+  local base stub out rc=0 lease
+  base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  git -C "$SINGULAR_ROOT" branch agent/widget/TASK-0001-generic "$base"
+  mkdir -p "$SINGULAR_WORKTREES_DIR"
+  git -C "$SINGULAR_ROOT" worktree add -q "$SINGULAR_WORKTREES_DIR/TASK-0001" \
+    agent/widget/TASK-0001-generic
+  printf 'partial candidate\n' >"$SINGULAR_WORKTREES_DIR/TASK-0001/partial.txt"
+  mkdir -p "$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence"
+  printf 'ignored evidence\n' \
+    >"$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence/preserved.log"
+  singular_lease_write TASK-0001 agent/widget/TASK-0001-generic widget l2-developer \
+    "internal/widget/parser.go" failed RUN-EXHAUSTED "$SINGULAR_WORKTREES_DIR/TASK-0001" \
+    "$base" BATCH-EXHAUSTED '["internal/widget/parser.go"]' '[]'
+  lease="$SINGULAR_LEASES_DIR/TASK-0001.json"
+  python3 - "$lease" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value.update({"status": "failed", "retryCount": 1, "maxRetries": 1,
+              "productPassStarted": True, "productPassStartedRunId": "RUN-EXHAUSTED"})
+with open(path + ".tmp", "w", encoding="utf-8") as stream:
+    json.dump(value, stream); stream.write("\n")
+os.replace(path + ".tmp", path)
+PY
+  stub="$FIXTURE_TMP/mock-runner.sh"
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-exhausted-preserve"
+  out="$("$SCRIPT_DIR/l1-drive.sh" --reset TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "exhausted partial candidate result ($out)"
+  assert_eq "$(cat "$SINGULAR_WORKTREES_DIR/TASK-0001/partial.txt")" \
+    "partial candidate" "exhausted untracked candidate preserved in place"
+  assert_eq "$(cat "$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence/preserved.log")" \
+    "ignored evidence" "exhausted ignored evidence preserved in place"
+  assert_eq "$(singular_json_field "$lease" retryCount)" "1" \
+    "exhausted retry identity preserved"
+  [[ ! -f "$MOCK_COUNTER_DIR/worker-calls" ]] || fail "exhausted candidate launched a worker"
+  echo "ok: exhausted reset re-entry preserves partial and ignored candidate evidence"
+}
+
+test_driver_preserves_staged_untracked_and_ignored_partial_candidate() {
+  with_fixture
+  write_generic_task
+  python3 - "$SINGULAR_TASKS_DIR/TASK-0001.md" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = text.replace("- `internal/widget/parser.go`", "- `internal/widget/parser.go`\n- `internal/widget/note.txt`")
+open(path, "w", encoding="utf-8").write(text)
+PY
+  local base stub out rc=0 retained
+  base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  git -C "$SINGULAR_ROOT" branch agent/widget/TASK-0001-generic "$base"
+  mkdir -p "$SINGULAR_WORKTREES_DIR"
+  git -C "$SINGULAR_ROOT" worktree add -q "$SINGULAR_WORKTREES_DIR/TASK-0001" \
+    agent/widget/TASK-0001-generic
+  mkdir -p "$SINGULAR_WORKTREES_DIR/TASK-0001/internal/widget" \
+    "$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence"
+  printf 'staged candidate\n' >"$SINGULAR_WORKTREES_DIR/TASK-0001/internal/widget/parser.go"
+  git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" add internal/widget/parser.go
+  printf 'untracked candidate\n' >"$SINGULAR_WORKTREES_DIR/TASK-0001/internal/widget/note.txt"
+  printf 'ignored evidence\n' >"$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence/partial.log"
+  singular_lease_write TASK-0001 agent/widget/TASK-0001-generic widget l2-developer \
+    "internal/widget/parser.go internal/widget/note.txt" blocked RUN-PARTIAL \
+    "$SINGULAR_WORKTREES_DIR/TASK-0001" "$base" BATCH-PARTIAL \
+    '["internal/widget/parser.go","internal/widget/note.txt"]' '[]'
+  stub="$FIXTURE_TMP/mock-runner.sh"
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-partial-preserve"
+  out="$("$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "partial candidate requires continuation ($out)"
+  retained="$(find "$SINGULAR_STATE_DIR/retained-worktrees" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)"
+  [[ -n "$retained" ]] || fail "partial candidate was not retained"
+  assert_eq "$(git -C "$retained" diff --cached --name-only)" \
+    "internal/widget/parser.go" "partial candidate staged identity"
+  assert_eq "$(cat "$retained/internal/widget/note.txt")" \
+    "untracked candidate" "partial candidate untracked bytes"
+  assert_eq "$(cat "$retained/.singular-evidence/partial.log")" \
+    "ignored evidence" "partial candidate ignored evidence"
+  [[ ! -e "$SINGULAR_WORKTREES_DIR/TASK-0001" ]] \
+    || fail "partial candidate still occupies canonical worktree"
+  [[ ! -f "$MOCK_COUNTER_DIR/worker-calls" ]] || fail "partial candidate launched a worker"
+  echo "ok: staged, untracked, and ignored partial candidate state is retained intact"
+}
+
+test_driver_clean_same_task_candidate_reprovisions() {
+  with_fixture
+  write_generic_task
+  local base head stub out rc=0 retained
+  base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  git -C "$SINGULAR_ROOT" branch agent/widget/TASK-0001-generic "$base"
+  mkdir -p "$SINGULAR_WORKTREES_DIR"
+  git -C "$SINGULAR_ROOT" worktree add -q "$SINGULAR_WORKTREES_DIR/TASK-0001" \
+    agent/widget/TASK-0001-generic
+  mkdir -p "$SINGULAR_WORKTREES_DIR/TASK-0001/internal/widget"
+  printf 'valid retained correction\n' \
+    >"$SINGULAR_WORKTREES_DIR/TASK-0001/internal/widget/parser.go"
+  git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" add internal/widget/parser.go
+  git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" -c user.name=test -c user.email=test@example.local \
+    commit -qm 'valid retained correction'
+  mkdir -p "$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence"
+  printf 'prior retained evidence\n' \
+    >"$SINGULAR_WORKTREES_DIR/TASK-0001/.singular-evidence/prior.log"
+  head="$(git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" rev-parse HEAD)"
+  singular_lease_write TASK-0001 agent/widget/TASK-0001-generic widget l2-developer \
+    "internal/widget/parser.go" blocked RUN-PRIOR "$SINGULAR_WORKTREES_DIR/TASK-0001" \
+    "$base" BATCH-PRIOR '["internal/widget/parser.go"]' '[]'
+  python3 - "$SINGULAR_LEASES_DIR/TASK-0001.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+lease = json.load(open(path, encoding="utf-8"))
+lease.update({"productPassStarted": True, "productPassStartedRunId": "RUN-PRIOR",
+              "retryCount": 0, "maxRetries": 1})
+with open(path + ".tmp", "w", encoding="utf-8") as stream:
+    json.dump(lease, stream); stream.write("\n")
+os.replace(path + ".tmp", path)
+PY
+  stub="$FIXTURE_TMP/mock-runner.sh"
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-same-task"
+  out="$(MOCK_WORKER_NO_WRITE=1 SINGULAR_EVIDENCE_CONFIG_JSON='{"maxComposedBytes":1}' \
+    "$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "same-task retained correction reaches deterministic stop ($out)"
+  assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "1" \
+    "same-task retained correction dispatches one worker"
+  assert_eq "$(git -C "$SINGULAR_WORKTREES_DIR/TASK-0001" rev-parse HEAD)" "$head" \
+    "same-task correction reprovisioned exact candidate"
+  retained="$(find "$SINGULAR_STATE_DIR/retained-worktrees" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)"
+  [[ -n "$retained" ]] || fail "same-task prior checkout was not retained"
+  assert_eq "$(git -C "$retained" rev-parse HEAD)" "$head" \
+    "same-task prior checkout retained exact head"
+  assert_eq "$(cat "$retained/.singular-evidence/prior.log")" \
+    "prior retained evidence" "same-task ignored evidence retained"
+  assert_eq "$(singular_lease_field TASK-0001 retryCount)" "1" \
+    "same-task correction consumes exactly one durable repair"
+  assert_eq "$(singular_lease_field TASK-0001 productPassStartedRunId)" "RUN-PRIOR" \
+    "same-task correction preserves started-pass identity"
+  echo "ok: clean same-task correction is retained and coherently reprovisioned"
+}
+
+test_driver_pins_base_across_target_movement_and_replaces_worker_delta() {
+  with_fixture
+  write_generic_task
+  local admitted target_after stub out rc=0 run_dir packet
+  admitted="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  git -C "$SINGULAR_ROOT" checkout -q -b agent/widget/TASK-0001-generic
+  mkdir -p "$SINGULAR_ROOT/internal/widget"
+  printf 'precommitted candidate\n' >"$SINGULAR_ROOT/internal/widget/parser.go"
+  git -C "$SINGULAR_ROOT" add internal/widget/parser.go
+  git -C "$SINGULAR_ROOT" -c user.name=test -c user.email=test@example.local \
+    commit -qm 'precommitted candidate'
+  git -C "$SINGULAR_ROOT" checkout -q target
+  stub="$FIXTURE_TMP/mock-runner.sh"
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-moving-target"
+  out="$(MOCK_ADVANCE_TARGET=1 MOCK_WORKER_NO_WRITE=1 \
+    MOCK_WORKER_CHANGED_CLAIM=worker-invented.txt \
+    SINGULAR_EVIDENCE_CONFIG_JSON='{"maxComposedBytes":1}' \
+    "$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "moving target fixture reaches deterministic manifest stop ($out)"
+  target_after="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  [[ "$target_after" != "$admitted" ]] || fail "worker did not move target after admission"
+  run_dir="$(find "$SINGULAR_RUNS_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  packet="$run_dir/packet.json"
+  assert_file "$packet" "moving target host packet"
+  python3 - "$packet" "$admitted" <<'PY'
+import json, sys
+packet = json.load(open(sys.argv[1], encoding="utf-8"))
+assert packet["baseRef"] == sys.argv[2], packet
+assert packet["changedFiles"] == ["internal/widget/parser.go"], packet
+assert "worker-invented.txt" not in packet["changedFiles"], packet
+PY
+  assert_eq "$(singular_lease_field TASK-0001 baseSha)" "$admitted" \
+    "moving target immutable lease base"
+  echo "ok: moving target cannot change admitted base or host-derived packet delta"
+}
+
+test_driver_stages_owned_deletion_and_reports_exact_delta() {
+  with_fixture
+  write_generic_task
+  mkdir -p "$SINGULAR_ROOT/internal/widget"
+  printf 'delete me\n' >"$SINGULAR_ROOT/internal/widget/parser.go"
+  git -C "$SINGULAR_ROOT" add internal/widget/parser.go
+  git -C "$SINGULAR_ROOT" commit -qm 'tracked owned file'
+  local base stub out rc=0 run_dir packet head
+  base="$(git -C "$SINGULAR_ROOT" rev-parse target)"
+  stub="$FIXTURE_TMP/mock-runner.sh"
+  make_seq_runner "$stub"
+  export SINGULAR_RUNNER="$stub"
+  export MOCK_COUNTER_DIR="$FIXTURE_TMP/counters-owned-deletion"
+  out="$(MOCK_WORKER_DELETE=1 SINGULAR_EVIDENCE_CONFIG_JSON='{"maxComposedBytes":1}' \
+    "$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "3" "owned deletion reaches deterministic manifest stop ($out)"
+  run_dir="$(find "$SINGULAR_RUNS_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  packet="$run_dir/packet.json"
+  assert_file "$packet" "owned deletion packet"
+  head="$(singular_json_field "$packet" headSha)"
+  [[ ! -e "$SINGULAR_WORKTREES_DIR/TASK-0001/internal/widget/parser.go" ]] \
+    || fail "owned deletion was not committed"
+  git -C "$SINGULAR_ROOT" diff --quiet "$base"..."$head" -- internal/widget/parser.go \
+    && fail "owned deletion produced no committed delta"
+  python3 - "$packet" "$base" <<'PY'
+import json, sys
+packet = json.load(open(sys.argv[1], encoding="utf-8"))
+assert packet["baseRef"] == sys.argv[2], packet
+assert packet["changedFiles"] == ["internal/widget/parser.go"], packet
+PY
+  echo "ok: owned deletion is staged, committed, and host-reported exactly"
+}
+
 # An accepted auditor verdict is product authority for its exact immutable head.
 # If the post-verdict evidence refresh fails, publication must park as an
 # external evidence blocker without re-running the worker/auditor, consulting a
@@ -1153,22 +1694,40 @@ PY
   echo "ok: accepted exact-head audit resumes evidence-only publication without product retry"
 }
 
-( test_fixture_configuration_context_isolated )
-( test_fast_action_table )
-( test_fast_action_repeat_and_disabled )
-( test_candidate_signature_ignores_empty_commit_identity )
-( test_driver_scrubs_origin_capability_from_provider_runner )
-( test_driver_fastpath_provenance )
-( test_driver_decider_when_fast_disabled )
-( test_driver_risk_bounded_product_repairs )
-( test_driver_detached_planned_lease_preserves_product_budget )
-( test_driver_crash_reentry_budget_is_monotonic )
-( test_driver_identical_findings_park_before_third_pass )
-( test_driver_audit_infra_retry )
-( test_driver_worker_infra_parks )
-( test_driver_integrity_violation_parks )
-( test_driver_empty_output_is_no_packet_not_infra )
-( test_driver_campaign_transition_refuses_publication )
-( test_driver_accepted_audit_awaits_evidence )
+run_case() {
+  local name="$1" filter=",${SINGULAR_TEST_CASES:-},"
+  if [[ "$filter" == ",," || "$filter" == *",$name,"* ]]; then
+    ( "$name" )
+  fi
+}
+
+run_case test_fixture_configuration_context_isolated
+run_case test_fast_action_table
+run_case test_fast_action_repeat_and_disabled
+run_case test_candidate_signature_ignores_empty_commit_identity
+run_case test_driver_scrubs_origin_capability_from_provider_runner
+run_case test_driver_fastpath_provenance
+run_case test_driver_decider_when_fast_disabled
+run_case test_driver_risk_bounded_product_repairs
+run_case test_driver_detached_planned_lease_preserves_product_budget
+run_case test_driver_crash_reentry_budget_is_monotonic
+run_case test_driver_identical_findings_park_before_third_pass
+run_case test_driver_audit_infra_retry
+run_case test_driver_worker_infra_parks
+run_case test_driver_integrity_violation_parks
+run_case test_driver_empty_output_is_no_packet_not_infra
+run_case test_driver_campaign_transition_refuses_publication
+run_case test_driver_deterministic_manifest_rejection_is_single_attempt
+run_case test_driver_transient_manifest_failure_gets_one_retry
+run_case test_driver_invalid_bases_refuse_before_worker_or_debit
+run_case test_driver_continuation_keeps_candidate_and_reservation_bases_distinct
+run_case test_driver_retains_precommitted_rejected_candidate_before_provider
+run_case test_driver_rejects_retained_branch_before_provider
+run_case test_driver_exhausted_preserves_partial_checkout_before_reset
+run_case test_driver_preserves_staged_untracked_and_ignored_partial_candidate
+run_case test_driver_clean_same_task_candidate_reprovisions
+run_case test_driver_pins_base_across_target_movement_and_replaces_worker_delta
+run_case test_driver_stages_owned_deletion_and_reports_exact_delta
+run_case test_driver_accepted_audit_awaits_evidence
 
 echo "decider-fastpath tests passed"

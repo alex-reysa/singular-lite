@@ -217,7 +217,7 @@ ops_reconcile_orphan_reservation() {
 ops_authorize_continuation() {
   local task_id="" predecessor_owner="" predecessor_generation="" predecessor_run=""
   local predecessor_campaign="" predecessor_reservation_base="" candidate_source=""
-  local integration_target="" worktree=""
+  local candidate_base="" integration_target="" worktree=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       TASK-*) task_id="$1"; shift ;;
@@ -227,9 +227,10 @@ ops_authorize_continuation() {
       --predecessor-campaign) predecessor_campaign="${2:-}"; shift 2 ;;
       --predecessor-reservation-base) predecessor_reservation_base="${2:-}"; shift 2 ;;
       --candidate-source) candidate_source="${2:-}"; shift 2 ;;
+      --candidate-base) candidate_base="${2:-}"; shift 2 ;;
       --integration-target) integration_target="${2:-}"; shift 2 ;;
       --worktree) worktree="${2:-}"; shift 2 ;;
-      *) echo "usage: singular recover continuation TASK-XXXX --predecessor-owner OWNER --predecessor-generation N --predecessor-run RUN --predecessor-campaign BINDING --predecessor-reservation-base SHA --candidate-source SHA --integration-target SHA --worktree PATH" >&2; return 2 ;;
+      *) echo "usage: singular recover continuation TASK-XXXX --predecessor-owner OWNER --predecessor-generation N --predecessor-run RUN --predecessor-campaign BINDING --predecessor-reservation-base SHA --candidate-source SHA [--candidate-base SHA] --integration-target SHA --worktree PATH" >&2; return 2 ;;
     esac
   done
   [[ -n "$task_id" && -n "$predecessor_owner" \
@@ -297,6 +298,20 @@ PY
     echo "authorize-continuation: predecessor, candidate, or integration target is not a local commit" >&2
     return 2
   }
+  if [[ -z "$candidate_base" ]]; then
+    candidate_base="$(git -C "$SINGULAR_ROOT" merge-base "$candidate_source" \
+      "$integration_target" 2>/dev/null)" || {
+      echo "authorize-continuation: candidate base could not be derived" >&2
+      return 2
+    }
+  fi
+  [[ "$candidate_base" =~ ^[0-9a-f]{40,64}$ ]] \
+    && git -C "$SINGULAR_ROOT" rev-parse --verify "$candidate_base^{commit}" >/dev/null 2>&1 \
+    && git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$candidate_base" "$candidate_source" >/dev/null 2>&1 \
+    && git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$candidate_base" "$integration_target" >/dev/null 2>&1 || {
+      echo "authorize-continuation: candidate base is not a common ancestor of candidate and integration target" >&2
+      return 2
+    }
   target_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify "$target_branch^{commit}" 2>/dev/null)" || {
     echo "authorize-continuation: task target branch is not a local commit" >&2
     return 2
@@ -317,14 +332,14 @@ PY
   }
   if ! python3 - "$authority_file" "$task_file" "$task_id" "$predecessor_owner" \
       "$predecessor_generation" "$predecessor_run" "$predecessor_campaign" \
-      "$predecessor_reservation_base" "$candidate_source" "$integration_target" \
+      "$predecessor_reservation_base" "$candidate_source" "$candidate_base" "$integration_target" \
       "$target_branch" "$target_head" "$engine_source_fingerprint" \
       "$current_campaign" "$branch" "$worktree" <<'PY'
 import hashlib, json, os, pathlib, sys
 (output, task_contract, task_id, owner, generation, predecessor_run,
  predecessor_campaign, predecessor_reservation_base, candidate_source,
- integration_target, integration_target_branch, target_head_at_authorization,
- engine_source_fingerprint, campaign, branch, worktree) = sys.argv[1:17]
+ candidate_base, integration_target, integration_target_branch, target_head_at_authorization,
+ engine_source_fingerprint, campaign, branch, worktree) = sys.argv[1:18]
 task_sha = hashlib.sha256(pathlib.Path(task_contract).read_bytes()).hexdigest()
 record = {
     "schema": "singular.orchestration.continuation-authority.v0",
@@ -335,6 +350,7 @@ record = {
     "predecessorCampaignBinding": predecessor_campaign,
     "predecessorReservationBaseSha": predecessor_reservation_base,
     "candidateSourceSha": candidate_source,
+    "candidateBaseSha": candidate_base,
     "integrationTargetSha": integration_target,
     "integrationTargetBranch": integration_target_branch,
     "targetHeadAtAuthorization": target_head_at_authorization,
@@ -363,7 +379,8 @@ PY
       --predecessor-generation "$predecessor_generation" \
       --predecessor-run "$predecessor_run" --predecessor-campaign "$predecessor_campaign" \
       --predecessor-reservation-base "$predecessor_reservation_base" \
-      --candidate-source "$candidate_source" --integration-target "$integration_target" \
+      --candidate-source "$candidate_source" --candidate-base "$candidate_base" \
+      --integration-target "$integration_target" \
       --integration-target-branch "$target_branch" \
       --target-head-at-authorization "$target_head" \
       --engine-source-fingerprint "$engine_source_fingerprint" \
@@ -376,7 +393,7 @@ PY
     --run "$op_run" --branch "$branch" --authority origin >/dev/null 2>&1 || true
   singular_append_event "recovery.continuation_authorized" \
     "host authorized one exact preserved-worktree continuation" \
-    "{\"taskId\":\"$task_id\",\"authorizationId\":\"$authorization_id\",\"predecessorRunId\":\"$predecessor_run\",\"predecessorCampaignBinding\":\"$predecessor_campaign\",\"predecessorReservationBaseSha\":\"$predecessor_reservation_base\",\"campaignBinding\":\"$current_campaign\",\"engineSourceFingerprint\":\"$engine_source_fingerprint\",\"candidateSourceSha\":\"$candidate_source\",\"integrationTargetSha\":\"$integration_target\",\"integrationTargetBranch\":\"$target_branch\",\"targetHeadAtAuthorization\":\"$target_head\",\"additionalWorkerAttemptsAuthorized\":1,\"predecessorInfrastructureUsage\":\"retained-in-run-artifacts-usage-unknown\"}" || true
+    "{\"taskId\":\"$task_id\",\"authorizationId\":\"$authorization_id\",\"predecessorRunId\":\"$predecessor_run\",\"predecessorCampaignBinding\":\"$predecessor_campaign\",\"predecessorReservationBaseSha\":\"$predecessor_reservation_base\",\"campaignBinding\":\"$current_campaign\",\"engineSourceFingerprint\":\"$engine_source_fingerprint\",\"candidateSourceSha\":\"$candidate_source\",\"candidateBaseSha\":\"$candidate_base\",\"integrationTargetSha\":\"$integration_target\",\"integrationTargetBranch\":\"$target_branch\",\"targetHeadAtAuthorization\":\"$target_head\",\"additionalWorkerAttemptsAuthorized\":1,\"predecessorInfrastructureUsage\":\"retained-in-run-artifacts-usage-unknown\"}" || true
   echo "authorizationId=$authorization_id"
   echo "nextAction=run native reconcile once under campaign $current_campaign; the target may advance only as a descendant of $integration_target while candidate $candidate_source remains preserved"
 }

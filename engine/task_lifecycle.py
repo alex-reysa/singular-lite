@@ -839,6 +839,7 @@ def authorize_continuation(args: argparse.Namespace) -> None:
         "predecessorCampaignBinding": args.predecessor_campaign,
         "predecessorReservationBaseSha": args.predecessor_reservation_base,
         "candidateSourceSha": args.candidate_source,
+        "candidateBaseSha": args.candidate_base,
         "integrationTargetSha": args.integration_target,
         "integrationTargetBranch": args.integration_target_branch,
         "targetHeadAtAuthorization": args.target_head_at_authorization,
@@ -860,6 +861,11 @@ def authorize_continuation(args: argparse.Namespace) -> None:
     top = Path(git_output(worktree, "rev-parse", "--show-toplevel")).resolve()
     if top != worktree.resolve():
         raise LifecycleError("continuation worktree identity mismatch")
+    repo = Path(git_output(worktree, "rev-parse", "--show-toplevel")).resolve()
+    if not git_is_ancestor(repo, args.candidate_base, args.candidate_source):
+        raise LifecycleError("continuation candidate base is not an ancestor of candidate source")
+    if not git_is_ancestor(repo, args.candidate_base, args.integration_target):
+        raise LifecycleError("continuation candidate base is not an ancestor of integration target")
 
     with locked(lease_path) as lease:
         if isinstance(lease.get("continuationAuthorization"), dict):
@@ -957,6 +963,7 @@ def claim_continuation(args: argparse.Namespace) -> None:
                 and authority.get("reservationRunId") == args.reservation_run
                 and authority.get("campaignBinding") == args.campaign
                 and authority.get("candidateSourceSha") == args.candidate_source
+                and authority.get("candidateBaseSha") == args.candidate_base
                 and authority.get("integrationTargetSha") == args.integration_target
                 and authority.get("engineSourceFingerprint")
                 == args.engine_source_fingerprint
@@ -970,6 +977,8 @@ def claim_continuation(args: argparse.Namespace) -> None:
             worktree = Path(args.worktree)
             if git_output(worktree, "rev-parse", "HEAD") != args.candidate_source:
                 raise LifecycleError("continuation candidate source changed before claim")
+            if not git_is_ancestor(Path(args.repo_root), args.candidate_base, args.candidate_source):
+                raise LifecycleError("continuation candidate base is not an ancestor of candidate source")
             if not git_is_ancestor(
                 Path(args.repo_root),
                 str(authority.get("targetHeadAtAuthorization", "")),
@@ -1927,7 +1936,7 @@ def parser() -> argparse.ArgumentParser:
     for flag in (
         "lease", "authority", "task_contract", "expected_task", "expected_campaign",
         "predecessor_owner", "predecessor_run", "predecessor_campaign",
-        "predecessor_reservation_base", "candidate_source", "integration_target",
+        "predecessor_reservation_base", "candidate_source", "candidate_base", "integration_target",
         "integration_target_branch", "target_head_at_authorization",
         "engine_source_fingerprint", "worktree",
     ):
@@ -1938,8 +1947,8 @@ def parser() -> argparse.ArgumentParser:
     claim_cont = commands.add_parser("claim-continuation")
     for flag in (
         "lease", "record", "task", "task_contract", "authorization_id", "owner", "reservation_run",
-        "campaign", "candidate_source", "integration_target", "engine_source_fingerprint",
-        "repo_root", "reservation_base", "worktree", "run",
+        "campaign", "candidate_source", "candidate_base", "integration_target",
+        "engine_source_fingerprint", "repo_root", "reservation_base", "worktree", "run",
     ):
         claim_cont.add_argument("--" + flag.replace("_", "-"), required=True)
     claim_cont.add_argument("--generation", type=int, required=True)

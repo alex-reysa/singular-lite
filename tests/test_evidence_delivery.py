@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -11,6 +12,26 @@ root = Path(sys.argv[1])
 host = [sys.executable, str(root / 'engine/evidence_delivery.py'), 'run']
 with tempfile.TemporaryDirectory() as tmp:
     t = Path(tmp)
+    consumer = t / 'consumer'
+    consumer.mkdir()
+    subprocess.run(['git', '-C', str(consumer), 'init', '-q'], check=True)
+    fixture_env = os.environ.copy()
+    for key in tuple(fixture_env):
+        if key.startswith('SINGULAR_'):
+            fixture_env.pop(key)
+    fixture_env.update({
+        'SINGULAR_ROOT': str(consumer),
+        'SINGULAR_STATE_DIR': str(consumer / '.singular-state'),
+        'SINGULAR_ENGINE_HOME': str(root),
+        'SINGULAR_CONFIG_FILE': '/dev/null',
+        'SINGULAR_LOCAL_CONFIG_FILE': '/dev/null',
+        'SINGULAR_BASH_BIN': '/opt/homebrew/bin/bash',
+        'PYTHONDONTWRITEBYTECODE': '1',
+    })
+    def fixture_run(command, **kwargs):
+        kwargs.setdefault('env', fixture_env)
+        kwargs.setdefault('cwd', consumer)
+        return subprocess.run(command, **kwargs)
     run = t / 'run'
     run.mkdir()
     data = b'a' * 4096 + b'final required fact'
@@ -49,7 +70,7 @@ assert any(p.returncode for p in results)
 assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
 '''.replace('4115-1', str(len(data))))
     base = host + ['--manifest', str(manifest), '--ledger', str(ledger), '--']
-    result = subprocess.run(base + [sys.executable, str(child), str(root / 'engine/evidence_delivery.py'), str(manifest)], capture_output=True)
+    result = fixture_run(base + [sys.executable, str(child), str(root / 'engine/evidence_delivery.py'), str(manifest)], capture_output=True)
     assert result.returncode == 0, result.stderr.decode()
     with sqlite3.connect(ledger) as db:
         assert db.execute('select sum(bytes) from deliveries').fetchone()[0] == len(data) * 2
@@ -60,14 +81,14 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
     (moved / manifest.name).write_text(json.dumps(doc))
     probe = host + ['--manifest', str(moved / manifest.name), '--ledger', str(ledger), '--',
                     sys.executable, str(root / 'engine/evidence_delivery.py'), 'get', str(moved / manifest.name), 'packet.json']
-    result = subprocess.run(probe, capture_output=True)
+    result = fixture_run(probe, capture_output=True)
     assert result.returncode and b'budget exhausted' in result.stderr
     # Required source invalidity stops before launching child or charging it.
     (run / 'packet.json').write_bytes(b'tampered')
-    result = subprocess.run(host + ['--manifest', str(manifest), '--ledger', str(ledger), '--required', 'packet.json', '--', '/usr/bin/true'], capture_output=True)
+    result = fixture_run(host + ['--manifest', str(manifest), '--ledger', str(ledger), '--required', 'packet.json', '--', '/usr/bin/true'], capture_output=True)
     assert result.returncode and b'identity changed' in result.stderr
     # No broker means fail closed, without creating writable counters.
-    result = subprocess.run([str(root / 'engine/evidence-show.sh'), str(manifest), 'packet.json'], capture_output=True)
+    result = fixture_run([str(root / 'engine/evidence-show.sh'), str(manifest), 'packet.json'], capture_output=True)
     assert result.returncode and b'host evidence delivery unavailable' in result.stderr
     # Successful mandatory delivery uses exactly one snapshotted prompt and charges it.
     packet = {'schema': 'singular.orchestration.state-packet.v0', 'taskId': 'TASK-9000',
@@ -93,7 +114,7 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
     launch = host + ['--manifest', str(manifest), '--ledger', str(ledger), '--required', 'packet.json',
                      '--required', 'audit-verification.json', '--', sys.executable, str(provider),
                      '--prompt-file', str(prompt), str(marker_file)]
-    result = subprocess.run(launch, capture_output=True)
+    result = fixture_run(launch, capture_output=True)
     assert result.returncode == 0 and marker_file.exists(), result.stderr
     delivered_prompt = Path(marker_file.read_text())
     delivered = delivered_prompt.read_bytes()
@@ -114,14 +135,14 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
         original = report[field]
         report[field] = invalid
         publish_required()
-        result = subprocess.run(launch, capture_output=True)
+        result = fixture_run(launch, capture_output=True)
         assert result.returncode and not marker_file.exists(), (field, result.stderr)
         with sqlite3.connect(ledger) as db:
             rows = [json.loads(row[0]) for row in db.execute('select detail from deliveries')]
         assert len([row for row in rows if row.get('kind') == 'required-prompt']) == 1
         report[field] = original
     publish_required()
-    result = subprocess.run(host + ['--manifest', str(manifest), '--ledger', str(ledger), '--',
-                                   '/does-not-exist/claude-run.sh'], capture_output=True)
+    result = fixture_run(host + ['--manifest', str(manifest), '--ledger', str(ledger), '--',
+                                '/does-not-exist/claude-run.sh'], capture_output=True)
     assert result.returncode and b'OS-enforced' in result.stderr
 print('PASS: OS-enforced read-only pagination, concurrent budget, replay/relocation, source tamper and unavailable host')
