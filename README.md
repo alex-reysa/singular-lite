@@ -625,6 +625,82 @@ doctor --json` projects the effective service policy and recent bundle details.
 Search, get, effective-config, and explain never write accounting or retrieval
 state.
 
+### Reviewed persistent memory
+
+Persistent memory is opt-in and project-local. Model-authored content always
+enters as an untrusted `proposed` record with a retained source hash. It becomes
+eligible for context retrieval only after a separately identified authority is
+verified against a pinned authority document and, where configured, pinned code
+identity. The authority's subject must differ from the proposer. A consumer
+policy selects allowed scopes, approver roles, retrieval roles, and whether a
+human (rather than an authorized internal reviewer role) is required:
+
+```json
+{
+  "memoryService": {
+    "enabled": true,
+    "storePath": ".singular-memory",
+    "maxContentBytes": 16384,
+    "maxCheckpointBytes": 32768,
+    "authorities": {
+      "independent-reviewer": {
+        "source": "policy/memory-reviewer.json",
+        "sha256": "sha256:...",
+        "codeIdentity": [
+          {"path": "policy/reviewer.py", "sha256": "sha256:..."}
+        ]
+      }
+    },
+    "consumerPolicies": {
+      "task": {
+        "scopes": ["project"],
+        "approverRoles": ["memory-reviewer"],
+        "humanReviewRequired": false,
+        "contextRoles": ["planner", "implementer"]
+      }
+    }
+  },
+  "contextService": {
+    "enabled": true,
+    "rolePolicy": {"implementer": ["brain", "code", "run", "memory"]}
+  }
+}
+```
+
+Routine policy-authorized internal approval does not interrupt the user.
+Set `humanReviewRequired` only for consumers that require it. The service
+revalidates retained sources, authored artifact bytes, authority documents, and
+configured code identity before trusted retrieval. Missing or drifted identity
+fails closed. Rejection, supersession, and tombstones are durable record states;
+the trusted index is derived and can be rebuilt without restoring retired
+content. Operation IDs provide conflict-detecting idempotent replay, and bounded
+checkpoints recover solely from local retained files:
+
+```bash
+singular memory propose --operation-id capture-1 --task TASK-1234 \
+  --actor implementer-1 --scope project --policy task \
+  --content-file findings/retry.md --source events/task-complete.json
+singular memory review --memory-id mem-... --authority independent-reviewer
+singular memory approve --operation-id approve-1 --memory-id mem-... \
+  --authority independent-reviewer
+singular memory reject --operation-id reject-1 --memory-id mem-... \
+  --authority independent-reviewer --reason "not reusable"
+singular memory quarantine --operation-id quarantine-1 --memory-id mem-... \
+  --authority independent-reviewer --reason "citation requires investigation"
+singular memory supersede --operation-id supersede-1 --memory-id mem-old \
+  --by mem-new --authority independent-reviewer
+singular memory tombstone --operation-id retire-1 --memory-id mem-... \
+  --authority independent-reviewer --reason "policy retirement"
+singular memory checkpoint save --operation-id cp-1 --task TASK-1234 \
+  --actor implementer-1 --payload-file checkpoints/task.json \
+  --source events/task-progress.json
+singular memory checkpoint recover --task TASK-1234
+singular memory rebuild
+```
+
+The record contract is `singular.orchestration.memory-record.v1`; schema copies
+are published in `schemas/` and `schemas/orchestration/`.
+
 **Note on overrides.** `singular.config.json`’s `env{}` block is applied over the
 process environment, so in a repo that pins a knob there, `VAR=0 singular …` will
 *not* override it — edit the config (or `.singular-state/config.local.sh`) instead.

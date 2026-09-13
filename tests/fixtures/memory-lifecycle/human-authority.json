@@ -1,0 +1,8 @@
+{
+  "schema": "singular.memory.authority.v1",
+  "authorityId": "human-reviewer",
+  "subjectId": "human-operator",
+  "subjectType": "human",
+  "roles": ["memory-reviewer"],
+  "permissions": ["review", "approve", "reject", "supersede", "tombstone"]
+}

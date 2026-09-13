@@ -20,9 +20,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 try:  # Import works both as engine.context_service and as an installed script.
-    from engine import brain_documents
+    from engine import brain_documents, memory_service
 except ImportError:  # pragma: no cover - exercised by the installed CLI
     import brain_documents  # type: ignore
+    import memory_service  # type: ignore
 
 
 BUNDLE_SCHEMA = "singular.context.bundle.v1"
@@ -286,10 +287,12 @@ class ContextService:
         else:
             raw_kinds = policy.get(role, policy.get("*", []))
         if not isinstance(raw_kinds, list) or not all(
-            isinstance(item, str) and item in {"brain", "code", "run"}
+            isinstance(item, str) and item in {"brain", "code", "run", "memory"}
             for item in raw_kinds
         ):
-            raise ContextError(f"contextService.rolePolicy.{role} must list brain/code/run")
+            raise ContextError(
+                f"contextService.rolePolicy.{role} must list brain/code/run/memory"
+            )
         allowed = frozenset(raw_kinds)
         # Audits evaluate the review target, never model-authored run history.
         # This is a hard trust boundary in addition to the configured role
@@ -320,6 +323,24 @@ class ContextService:
 
         sources: list[Source] = []
         eligibility_inputs: dict[Path, str] = {}
+        if "memory" in allowed:
+            try:
+                memories = memory_service.trusted_memories(config_path, root, role)
+            except memory_service.MemoryError as exc:
+                raise ContextError(f"memory source is invalid: {exc}") from exc
+            for item in memories:
+                sources.append(Source(
+                    ref=item["ref"],
+                    kind="memory",
+                    path=item["path"],
+                    relative_path=item["relativePath"],
+                    title=item["title"],
+                    description="Policy-approved authored memory",
+                    raw=item["raw"],
+                    source_hash=item["sha256"],
+                    validity="current-reviewed",
+                    provenance=item["provenance"],
+                ))
         if "brain" in allowed and "contextManifest" in value:
             try:
                 normalized, bodies = brain_documents.normalize(config_path)

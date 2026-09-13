@@ -118,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     repo_root = Path.cwd().resolve()
     cwd = Path.cwd().resolve()
-    if raw and raw[0].startswith("--engine-home"):
+    if raw and any(raw[0] == name or raw[0].startswith(name + "=")
+                   for name in ("--engine-home", "--repo-root", "--cwd")):
         outer = _parser().parse_args(raw)
         repo_root = Path(outer.repo_root or repo_root).resolve()
         cwd = Path(outer.cwd or cwd).resolve()
