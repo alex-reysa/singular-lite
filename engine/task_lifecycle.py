@@ -26,6 +26,12 @@ from typing import Any, Iterator
 
 
 ACTIVE = {"planned", "running", "needs-review"}
+RECOVERY_AUTHORITY_FIELDS = {
+    "schema", "taskId", "predecessorRunId", "predecessorHeadSha",
+    "predecessorTreeSha", "campaignBinding", "policyIdentity", "failureId",
+    "action", "successorRunId", "successorBranch", "successorWorktree",
+    "authorizedBy",
+}
 
 
 class LifecycleError(RuntimeError):
@@ -235,6 +241,12 @@ def validate_recovery_authorization(
     authority_path = Path(str(authority.get("authorityPath", "")))
     if not authority_path.is_file() or sha256(authority_path) != authority.get("authoritySha256"):
         raise LifecycleError("recovery authority evidence is missing or changed")
+    recorded = read_object(authority_path)
+    if set(recorded) != RECOVERY_AUTHORITY_FIELDS or any(
+        authority.get(field) != recorded.get(field)
+        for field in RECOVERY_AUTHORITY_FIELDS
+    ):
+        raise LifecycleError("recorded recovery authorization changed")
     if authority.get("policyIdentity") != authority.get("campaignBinding"):
         raise LifecycleError("recovery policy identity is stale")
     predecessor = recovery_predecessor(lease, authority)
@@ -258,6 +270,128 @@ def validate_recovery_authorization(
     if authority.get("predecessorAuditSha256") != predecessor.get("auditSha256"):
         raise LifecycleError("recovery predecessor audit binding changed")
     return predecessor
+
+
+def validate_consumed_continuation(
+    lease: dict[str, Any],
+    continuation: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    task: str,
+    run: str,
+    branch: str,
+    worktree: str,
+    campaign: str,
+    base: str,
+    head: str,
+    repo_root: Path,
+    current: bool,
+) -> None:
+    """Validate a consumed continuation for its own accepted execution.
+
+    A repair successor may retain a predecessor's consumed continuation. Its
+    immutable authority, archived attempt and accepted candidate still bind
+    that predecessor, while current lease ownership and accounting belong to
+    the repair and therefore apply only to a current continuation.
+    """
+    authority_path = Path(str(continuation.get("authorityPath", "")))
+    authority_sha = str(continuation.get("authoritySha256", ""))
+    if (
+        not authority_path.is_file()
+        or not authority_sha
+        or sha256(authority_path) != authority_sha
+        or str(continuation.get("authorizationId", "")) != authority_sha
+    ):
+        raise LifecycleError("continuation authority evidence is missing or changed")
+    recorded = read_object(authority_path)
+    if any(continuation.get(field) != value for field, value in recorded.items()):
+        raise LifecycleError("recorded continuation authorization changed")
+    if continuation.get("state") != "claimed":
+        raise LifecycleError("accepted continuation authority is not consumed")
+    for field, value in (
+        ("taskId", task),
+        ("executionRunId", run),
+        ("branch", branch),
+        ("campaignBinding", campaign),
+        ("candidateBaseSha", base),
+    ):
+        if str(continuation.get(field, "")) != value:
+            raise LifecycleError(f"accepted continuation {field} mismatch")
+    if os.path.realpath(str(continuation.get("worktree", ""))) != os.path.realpath(
+        worktree
+    ):
+        raise LifecycleError("accepted continuation worktree mismatch")
+    candidate_source = str(continuation.get("candidateSourceSha", ""))
+    if not candidate_source or not git_is_ancestor(repo_root, candidate_source, head):
+        raise LifecycleError("accepted continuation head lost its authorized source")
+
+    owner = str(continuation.get("reservationOwner", ""))
+    reservation_run = str(continuation.get("reservationRunId", ""))
+    predecessor = continuation.get("predecessorAccounting")
+    try:
+        generation = int(continuation.get("reservationGeneration", 0) or 0)
+        attempt_generation = int(attempt.get("reservationGeneration", 0) or 0)
+        allowance = (
+            int(continuation.get("additionalWorkerAttemptsAuthorized", 0) or 0),
+            int(continuation.get("additionalWorkerAttemptsClaimed", 0) or 0),
+            int(continuation.get("additionalWorkerAttemptsRemaining", -1)),
+        )
+        if not isinstance(predecessor, dict):
+            raise TypeError("predecessor accounting is not an object")
+        predecessor_retry = int(predecessor.get("retryCount", -1))
+        predecessor_max = int(predecessor.get("maxRetries", -1))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise LifecycleError("accepted continuation has malformed numeric identity") from exc
+    if (
+        predecessor_retry < 0
+        or predecessor_max < predecessor_retry
+        or not isinstance(predecessor.get("productPassStarted"), bool)
+        or not isinstance(predecessor.get("productPassStartedRunId"), str)
+    ):
+        raise LifecycleError("accepted continuation has malformed predecessor accounting")
+    if not owner or generation < 1 or not reservation_run:
+        raise LifecycleError("accepted continuation lacks scheduler identity")
+    if (
+        attempt.get("taskId") != task
+        or attempt.get("runId") != run
+        or attempt.get("reservationOwner") != owner
+        or attempt_generation != generation
+        or attempt.get("reservationRunId") != reservation_run
+        or attempt.get("campaignBinding") != campaign
+        or attempt.get("continuationAuthorizationId")
+        != continuation.get("authorizationId")
+        or attempt.get("state") not in {"started", "terminal"}
+    ):
+        raise LifecycleError("accepted continuation scheduler attempt identity mismatch")
+    if allowance != (1, 1, 0):
+        raise LifecycleError("accepted continuation allowance is not exactly consumed")
+    if not current:
+        return
+
+    try:
+        lease_generation = int(
+            lease.get("reservationGeneration")
+            or lease.get("lastReservationGeneration")
+            or 0
+        )
+        lease_retry = int(lease.get("retryCount", -2))
+        lease_max = int(lease.get("maxRetries", -2))
+    except (TypeError, ValueError) as exc:
+        raise LifecycleError("accepted continuation has malformed current accounting") from exc
+    lease_owner = str(
+        lease.get("reservationOwner") or lease.get("lastReservationOwner") or ""
+    )
+    if lease_owner != owner or lease_generation != generation:
+        raise LifecycleError("accepted continuation scheduler generation mismatch")
+    if (
+        predecessor_retry != lease_retry
+        or predecessor_max != lease_max
+        or predecessor.get("productPassStarted")
+        != (lease.get("productPassStarted") is True)
+        or predecessor.get("productPassStartedRunId")
+        != str(lease.get("productPassStartedRunId", "") or "")
+    ):
+        raise LifecycleError("accepted continuation predecessor accounting mismatch")
 
 
 def repair_dispatch_eligible(lease: dict[str, Any], task_path: Path) -> bool:
@@ -1555,12 +1689,7 @@ def authorize_recovery(args: argparse.Namespace) -> None:
     """Consume host-authored recovery authority without erasing its predecessor."""
     authority_path = Path(args.authority)
     authority = read_object(authority_path)
-    allowed = {
-        "schema", "taskId", "predecessorRunId", "predecessorHeadSha",
-        "predecessorTreeSha", "campaignBinding", "policyIdentity", "failureId",
-        "action", "successorRunId", "successorBranch", "successorWorktree",
-        "authorizedBy",
-    }
+    allowed = RECOVERY_AUTHORITY_FIELDS
     unexpected = sorted(set(authority) - allowed)
     if unexpected:
         raise LifecycleError("recovery authority contains unsupported fields: " + ", ".join(unexpected))
@@ -1852,113 +1981,101 @@ def validate_accepted_publication(args: argparse.Namespace) -> None:
                 raise LifecycleError(f"retained accepted candidate {field} mismatch")
         validate_candidate_artifacts(candidate)
 
+    continuation_present = "continuationAuthorization" in lease
+    recovery_present = "recoveryAuthorization" in lease
     continuation = lease.get("continuationAuthorization")
     authority = lease.get("recoveryAuthorization")
-    if isinstance(continuation, dict):
-        if isinstance(authority, dict):
-            raise LifecycleError("accepted publication has conflicting successor authorities")
-        authority_path = Path(str(continuation.get("authorityPath", "")))
-        authority_sha = str(continuation.get("authoritySha256", ""))
-        if (
-            not authority_path.is_file()
-            or not authority_sha
-            or sha256(authority_path) != authority_sha
-            or str(continuation.get("authorizationId", "")) != authority_sha
-        ):
-            raise LifecycleError("continuation authority evidence is missing or changed")
-        recorded = read_object(authority_path)
-        if any(continuation.get(key) != value for key, value in recorded.items()):
-            raise LifecycleError("recorded continuation authorization changed")
-        if continuation.get("state") != "claimed":
-            raise LifecycleError("accepted continuation authority is not consumed")
-        for field, value in (
-            ("taskId", args.task),
-            ("executionRunId", args.run),
-            ("branch", args.branch),
-            ("campaignBinding", args.campaign),
-            ("candidateBaseSha", args.base),
-        ):
-            if str(continuation.get(field, "")) != value:
-                raise LifecycleError(f"accepted continuation {field} mismatch")
-        if os.path.realpath(str(continuation.get("worktree", ""))) != os.path.realpath(
-            args.worktree
-        ):
-            raise LifecycleError("accepted continuation worktree mismatch")
-        candidate_source = str(continuation.get("candidateSourceSha", ""))
-        if not candidate_source or not git_is_ancestor(
-            Path(args.repo_root), candidate_source, args.head
-        ):
-            raise LifecycleError("accepted continuation head lost its authorized source")
+    if continuation_present and (not isinstance(continuation, dict) or not continuation):
+        raise LifecycleError("accepted publication has malformed continuation authority")
+    if recovery_present and (not isinstance(authority, dict) or not authority):
+        raise LifecycleError("accepted publication has malformed recovery authority")
+    recovery_predecessor_candidate = (
+        validate_recovery_authorization(
+            lease, authority, allow_status_transition=True
+        )
+        if isinstance(authority, dict) else None
+    )
 
-        owner = str(continuation.get("reservationOwner", ""))
-        try:
-            generation = int(continuation.get("reservationGeneration", 0) or 0)
-            attempt_generation = int(
-                (lease.get("attemptLifecycle") or {}).get("reservationGeneration", 0) or 0
+    attempt = lease.get("attemptLifecycle")
+    current_marker = (
+        "continuationAuthorizationId" in attempt
+        if isinstance(attempt, dict) else False
+    )
+    current_repair = (
+        isinstance(authority, dict)
+        and str(authority.get("successorRunId", "")) == args.run
+    )
+    if current_repair:
+        if current_marker:
+            raise LifecycleError("accepted repair attempt retained continuation authority")
+        if not isinstance(recovery_predecessor_candidate, dict):
+            raise LifecycleError("accepted repair predecessor is unavailable")
+        predecessor_candidate = recovery_predecessor_candidate
+        predecessor_packet = read_object(
+            Path(str(predecessor_candidate.get("packetPath", "")))
+        )
+        predecessor_run = str(predecessor_candidate.get("runId", ""))
+        historical_attempts = [
+            item for item in lease.get("attemptHistory", [])
+            if isinstance(item, dict) and str(item.get("runId", "")) == predecessor_run
+        ]
+        historical_markers = [
+            item for item in historical_attempts
+            if "continuationAuthorizationId" in item
+        ]
+        if continuation is None and historical_markers:
+            raise LifecycleError("repair predecessor lost its continuation authority")
+        if continuation is not None:
+            if len(historical_markers) != 1:
+                raise LifecycleError("repair predecessor continuation attempt is not unique")
+            validate_consumed_continuation(
+                lease, continuation, historical_markers[0],
+                task=args.task,
+                run=predecessor_run,
+                branch=str(predecessor_candidate.get("branch", "")),
+                worktree=str(predecessor_packet.get("workspace", "")),
+                campaign=str(predecessor_candidate.get("campaignBinding", "")),
+                base=str(predecessor_packet.get("baseRef", "")),
+                head=str(predecessor_candidate.get("headSha", "")),
+                repo_root=Path(args.repo_root),
+                current=False,
             )
-            lease_generation = int(
-                lease.get("reservationGeneration")
-                or lease.get("lastReservationGeneration")
-                or 0
-            )
-            allowance = (
-                int(continuation.get("additionalWorkerAttemptsAuthorized", 0) or 0),
-                int(continuation.get("additionalWorkerAttemptsClaimed", 0) or 0),
-                int(continuation.get("additionalWorkerAttemptsRemaining", -1)),
-            )
-            predecessor_retry = int(
-                (continuation.get("predecessorAccounting") or {}).get("retryCount", -1)
-            )
-            predecessor_max = int(
-                (continuation.get("predecessorAccounting") or {}).get("maxRetries", -1)
-            )
-            lease_retry = int(lease.get("retryCount", -2))
-            lease_max = int(lease.get("maxRetries", -2))
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise LifecycleError("accepted continuation has malformed numeric identity") from exc
-        reservation_run = str(continuation.get("reservationRunId", ""))
-        if not owner or generation < 1 or not reservation_run:
-            raise LifecycleError("accepted continuation lacks scheduler identity")
-        attempt = lease.get("attemptLifecycle")
-        if not isinstance(attempt, dict):
+    elif authority is not None:
+        raise LifecycleError("accepted publication recovery authority is for another run")
+    elif continuation is not None:
+        if not isinstance(attempt, dict) or not current_marker:
             raise LifecycleError("accepted continuation lost its scheduler attempt binding")
-        if (
-            attempt.get("taskId") != args.task
-            or attempt.get("runId") != args.run
-            or attempt.get("reservationOwner") != owner
-            or attempt_generation != generation
-            or attempt.get("reservationRunId") != reservation_run
-            or attempt.get("campaignBinding") != args.campaign
-            or attempt.get("continuationAuthorizationId")
-            != continuation.get("authorizationId")
-            or attempt.get("state") not in {"started", "terminal"}
-        ):
-            raise LifecycleError("accepted continuation scheduler attempt identity mismatch")
-        lease_owner = str(lease.get("reservationOwner") or lease.get("lastReservationOwner") or "")
-        if lease_owner != owner or lease_generation != generation:
-            raise LifecycleError("accepted continuation scheduler generation mismatch")
-        if allowance != (1, 1, 0):
-            raise LifecycleError("accepted continuation allowance is not exactly consumed")
-        predecessor = continuation.get("predecessorAccounting")
-        if not isinstance(predecessor, dict) or (
-            predecessor_retry != lease_retry
-            or predecessor_max != lease_max
-            or bool(predecessor.get("productPassStarted"))
-            != (lease.get("productPassStarted") is True)
-            or str(predecessor.get("productPassStartedRunId", ""))
-            != str(lease.get("productPassStartedRunId", "") or "")
-        ):
-            raise LifecycleError("accepted continuation predecessor accounting mismatch")
+        validate_consumed_continuation(
+            lease, continuation, attempt,
+            task=args.task, run=args.run, branch=args.branch,
+            worktree=args.worktree, campaign=args.campaign,
+            base=args.base, head=args.head, repo_root=Path(args.repo_root),
+            current=True,
+        )
         print("continuation-claimed")
         return
-    if not isinstance(authority, dict):
+    else:
+        if current_marker:
+            raise LifecycleError("accepted continuation marker has no matching authority")
+        retained_repair_predecessor = any(
+            isinstance(item, dict)
+            and str(item.get("taskId", "")) == args.task
+            and str(item.get("headSha", "")) == args.base
+            and str(item.get("campaignBinding", "")) == args.campaign
+            and str(item.get("runId", "")) != args.run
+            for item in lease.get("candidateHistory", [])
+        )
+        if retained_repair_predecessor:
+            raise LifecycleError("accepted repair lineage has no matching authority")
         print("ordinary-retained" if isinstance(candidate, dict) else "ordinary")
         return
+
+    # The current run is a repair successor. Its retained continuation, when
+    # present, was validated above solely against the archived predecessor.
     if authority.get("action") != "repair" or authority.get("state") not in {
         "claimed", "audit-accepted", "gate-passed",
     }:
         raise LifecycleError("accepted publication has conflicting recovery authority")
-    validate_recovery_authorization(lease, authority, allow_status_transition=True)
     for field, value in (
         ("taskId", args.task), ("successorRunId", args.run),
         ("successorBranch", args.branch), ("campaignBinding", args.campaign),

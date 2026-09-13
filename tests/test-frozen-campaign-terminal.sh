@@ -582,7 +582,47 @@ PY
 prepare_public_continuation() {
   local name="$1" predecessor_retry="$2" require_bootstrap="$3"
   local workspace_shape="${4:-default}"
+  local predecessor_max="${5:-1}" repair_shape="${6:-no}"
   make_fixture "$name"
+  if [[ "$repair_shape" == "yes" ]]; then
+    "$PYTHON_BIN" - "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<'PY'
+import sys
+p=sys.argv[1]; text=open(p, encoding="utf-8").read()
+text=text.replace("Area: widget\n", "Area: widget\nRisk tier: high\n", 1)
+open(p, "w", encoding="utf-8").write(text)
+PY
+    : >"$FIXTURE_ROOT/.frozen-repair-case"
+    cat >"$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0002.md" <<'TASK'
+# TASK-0002: Frozen dependent fixture
+
+Status: ready
+Area: followup
+Target branch: `target`
+Worker branch: `agent/followup/TASK-0002-frozen`
+Test policy: `strict_test_first`
+Gate command: `bash strict-gate.sh`
+Dispatch mode: canonical
+Depends on: [TASK-0001]
+
+## Objective
+
+Exercise the first native reservation after exact predecessor integration.
+
+## Scope
+
+Owned files:
+
+- `internal/followup/`
+
+Forbidden files:
+
+- Any file outside the owned scope.
+
+## Acceptance Criteria
+
+- The dependent fixture receives the integrated target as its reservation base.
+TASK
+  fi
   CONTINUATION_BOOTSTRAP_MARKER="$scratch/$name/bootstrap-ready"
   CONTINUATION_BOOTSTRAP_SCRIPT="$scratch/$name/bootstrap-check.sh"
   {
@@ -605,6 +645,11 @@ PY
   mkdir -p "$FIXTURE_ROOT/internal/widget"
   printf 'candidate baseline\n' >"$FIXTURE_ROOT/internal/widget/parser.go"
   git -C "$FIXTURE_ROOT" add singular.config.json internal/widget/parser.go
+  if [[ "$repair_shape" == "yes" ]]; then
+    git -C "$FIXTURE_ROOT" add .frozen-repair-case \
+      docs/orchestration/tasks/TASK-0001.md \
+      docs/orchestration/tasks/TASK-0002.md
+  fi
   git -C "$FIXTURE_ROOT" commit -qm 'older continuation candidate source'
   CONTINUATION_CANDIDATE="$(git -C "$FIXTURE_ROOT" rev-parse HEAD)"
   git -C "$FIXTURE_ROOT" branch agent/widget/TASK-0001-frozen
@@ -644,14 +689,14 @@ PY
     "$CONTINUATION_OWNER" "$CONTINUATION_RESERVATION_BASE" "$CONTINUATION_WORKTREE")"
   assert_eq "$CONTINUATION_GENERATION" "1" "$name predecessor reservation generation"
   "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
-    "$predecessor_retry" <<'PY'
+    "$predecessor_retry" "$predecessor_max" <<'PY'
 import json, os, sys
-path, retry = sys.argv[1], int(sys.argv[2])
+path, retry, maximum = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 data = json.load(open(path, encoding="utf-8"))
 data["productPassStarted"] = True
 data["productPassStartedRunId"] = "WORKER-OLD"
 data["retryCount"] = retry
-data["maxRetries"] = 1
+data["maxRetries"] = maximum
 tmp = path + ".tmp"
 json.dump(data, open(tmp, "w", encoding="utf-8"), indent=2)
 os.replace(tmp, path)
@@ -748,6 +793,7 @@ test_custom_continuation_accepted_publication() {
   local wrapper_rc=0 run_id run_dir packet audit base head target_after out rc=0
   local worker_before auditor_before gate_before decider_before evidence_before
   local authority_before accounting_before lease_snapshot mutation
+  local decoy_branch decoy_head decoy_status
   source_engine="$ENGINE_HOME"
   FROZEN_BOUND_SOURCE_ENGINE="$source_engine"
   FROZEN_BOUND_SOURCE_BINDING="$(tree_bytes_modes_binding "$source_engine")"
@@ -881,6 +927,86 @@ PY
   [[ "$base" != "$head" && "$base" != "$target_after" && "$head" != "$target_after" ]] \
     || fail "$name did not preserve distinct B/H/T"
 
+  continuation_state_digest() {
+    {
+      shasum -a 256 "$lease" "$packet" "$audit" \
+        "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md"
+      git -C "$CONTINUATION_WORKTREE" rev-parse HEAD
+      git -C "$CONTINUATION_WORKTREE" status --porcelain=v1 -z | shasum -a 256
+      { find "$FIXTURE_ROOT/.singular-state/inbox" \
+          "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" \
+          -type f -print0 2>/dev/null || true; } \
+        | sort -z | while IFS= read -r -d '' path; do
+          shasum -a 256 "$path"
+        done
+    } | shasum -a 256 | awk '{print $1}'
+  }
+  assert_continuation_authority_refusals() {
+    local phase="$1" pristine
+    local state_before worker_at_start auditor_at_start gate_at_start
+    local decider_at_start evidence_at_start rc out mutation
+    pristine="$scratch/$name/$phase-lease.json"
+    cp "$lease" "$pristine"
+    worker_at_start="$(calls worker)"; auditor_at_start="$(calls auditor)"
+    gate_at_start="$(calls gate)"; decider_at_start="$(calls decider)"
+    evidence_at_start="$(calls evidence)"
+    for mutation in missing null list empty; do
+      cp "$pristine" "$lease"
+      "$PYTHON_BIN" - "$lease" "$mutation" <<'PY'
+import json, os, sys
+path, mutation = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+if mutation == "missing":
+    data.pop("continuationAuthorization", None)
+elif mutation == "null":
+    data["continuationAuthorization"] = None
+elif mutation == "list":
+    data["continuationAuthorization"] = []
+elif mutation == "empty":
+    data["continuationAuthorization"] = {}
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+      state_before="$(continuation_state_digest)"
+      rc=0
+      out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+      assert_eq "$rc" "3" "$name $phase $mutation authority refusal ($out)"
+      assert_eq "$(continuation_state_digest)" "$state_before" \
+        "$name $phase $mutation complete retained state"
+      assert_eq "$(calls worker)" "$worker_at_start" "$name $phase $mutation worker calls"
+      assert_eq "$(calls auditor)" "$auditor_at_start" "$name $phase $mutation auditor calls"
+      assert_eq "$(calls gate)" "$gate_at_start" "$name $phase $mutation gate calls"
+      assert_eq "$(calls decider)" "$decider_at_start" "$name $phase $mutation decider calls"
+      assert_eq "$(calls evidence)" "$evidence_at_start" "$name $phase $mutation evidence calls"
+    done
+    cp "$pristine" "$lease"
+  }
+
+  # The first refusal set proves malformed authority cannot reach evidence
+  # recovery while the ordinary/default task worktree is genuinely absent.
+  assert_continuation_authority_refusals awaiting-evidence
+  [[ ! -e "$default_worktree" ]] || fail "$name refusal created the absent default worktree"
+
+  # Keep a distinct, real default-shaped worktree present for all later
+  # publication and duplicate checks. It is a decoy, never the accepted run's
+  # retained custom workspace.
+  decoy_branch="agent/widget/TASK-0001-default-decoy"
+  mkdir -p "$(dirname "$default_worktree")"
+  git -C "$FIXTURE_ROOT" worktree add -q -b "$decoy_branch" \
+    "$default_worktree" "$target_after"
+  decoy_head="$(git -C "$default_worktree" rev-parse HEAD)"
+  decoy_status="$(git -C "$default_worktree" status --porcelain=v1 -z | shasum -a 256)"
+  assert_default_decoy_unchanged() {
+    assert_eq "$(git -C "$default_worktree" branch --show-current)" "$decoy_branch" \
+      "$name decoy branch"
+    assert_eq "$(git -C "$default_worktree" rev-parse HEAD)" "$decoy_head" \
+      "$name decoy head"
+    assert_eq "$(git -C "$default_worktree" status --porcelain=v1 -z | shasum -a 256)" \
+      "$decoy_status" "$name decoy bytes"
+  }
+
   authority_before="$($PYTHON_BIN - "$lease" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
@@ -907,7 +1033,12 @@ PY
   assert_eq "$(calls decider)" "$decider_before" "$name recovery decider calls"
   assert_eq "$(calls evidence)" "$((evidence_before + 1))" "$name recovery evidence calls"
   assert_file "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json" "$name accepted publication"
-  [[ ! -e "$default_worktree" ]] || fail "$name recovery created or reset a default worktree"
+  assert_default_decoy_unchanged
+
+  # Queued duplicate classification must reject the same malformed shapes
+  # before its no-op result, without touching the distinct default worktree.
+  assert_continuation_authority_refusals queued-duplicate
+  assert_default_decoy_unchanged
 
   evidence_before="$(calls evidence)"; rc=0
   out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
@@ -918,6 +1049,7 @@ PY
   assert_eq "$(calls auditor)" "$auditor_before" "$name duplicate auditor calls"
   assert_eq "$(calls gate)" "$gate_before" "$name duplicate gate calls"
   assert_eq "$(calls decider)" "$decider_before" "$name duplicate decider calls"
+  assert_default_decoy_unchanged
   "$PYTHON_BIN" - "$packet" "$base" "$head" "$CONTINUATION_WORKTREE" <<'PY'
 import json, os, sys
 packet = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -942,9 +1074,22 @@ print(json.dumps({"retryCount":d.get("retryCount"), "maxRetries":d.get("maxRetri
 PY
 )" "$accounting_before" "$name continuation accounting preserved"
 
+  reconcile success "$name-import"
+  assert_file "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001/$run_id.json" \
+    "$name imported continuation packet"
+  assert_continuation_authority_refusals imported-duplicate
+  assert_default_decoy_unchanged
+  rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name imported duplicate ($out)"
+  assert_contains "$out" "already queued/imported; dispatch is a no-op" \
+    "$name imported duplicate no-op"
+  assert_eq "$(calls evidence)" "$evidence_before" "$name imported duplicate evidence calls"
+  assert_default_decoy_unchanged
+
   lease_snapshot="$scratch/$name/accepted-lease.json"
   cp "$lease" "$lease_snapshot"
-  for mutation in recorded execution owner attempt allowance; do
+  for mutation in recorded execution owner attempt attempt-missing allowance; do
     cp "$lease_snapshot" "$lease"
     "$PYTHON_BIN" - "$lease" "$mutation" <<'PY'
 import json, os, sys
@@ -954,6 +1099,7 @@ if mutation == "recorded": a["authorizationId"] = "0" * 64
 elif mutation == "execution": a["executionRunId"] = "RUN-MISMATCH"
 elif mutation == "owner": a["reservationOwner"] = "reconcile:OTHER:TASK-0001"
 elif mutation == "attempt": d["attemptLifecycle"]["continuationAuthorizationId"] = "0" * 64
+elif mutation == "attempt-missing": d["attemptLifecycle"].pop("continuationAuthorizationId", None)
 elif mutation == "allowance": a["additionalWorkerAttemptsRemaining"] = 1
 temporary = path + ".test.tmp"
 json.dump(d, open(temporary, "w", encoding="utf-8"), indent=2)
@@ -968,9 +1114,11 @@ PY
     assert_eq "$(calls gate)" "$gate_before" "$name $mutation gate calls"
     assert_eq "$(calls decider)" "$decider_before" "$name $mutation decider calls"
     assert_eq "$(calls evidence)" "$evidence_before" "$name $mutation evidence calls"
-    [[ ! -e "$default_worktree" ]] || fail "$name $mutation refusal created default worktree"
+    assert_default_decoy_unchanged
   done
   cp "$lease_snapshot" "$lease"
+  unset -f continuation_state_digest assert_continuation_authority_refusals \
+    assert_default_decoy_unchanged
   verify_frozen_engine_bindings || fail "$name engine binding failed at test exit"
   unset FROZEN_EVIDENCE_COUNTER FROZEN_EVIDENCE_TARGET_RUNS_DIR
   ENGINE_HOME="$source_engine"
@@ -1736,6 +1884,84 @@ PY
     || fail "$name public repair was absent from the scheduler frontier"
 }
 
+prepare_continued_native_repair() {
+  local name="$1" lease owner generation dispatch_run dispatch_log wrapper_pid wrapper_rc=0
+  prepare_public_continuation "$name" 1 no custom 2 yes
+  lease="$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json"
+  owner="reconcile:ORIGIN-CONTINUED-REPAIR:TASK-0001"
+  dispatch_run="ORIGIN-CONTINUED-REPAIR"
+  generation="$(run_engine success "$BASH_BIN" -c \
+    '. "$1"; SCRIPT_DIR="$2"; . "$2/lifecycle.sh"; singular_lifecycle_reserve TASK-0001 "$3" "$4" agent/widget/TASK-0001-frozen widget '\''["internal/widget/"]'\'' "$5" BATCH-CONTINUED-REPAIR "$6"' \
+    fixture "$ENGINE_HOME/engine/lib.sh" "$ENGINE_HOME/engine" "$owner" \
+    "$dispatch_run" "$CONTINUATION_CURRENT_TARGET" "$CONTINUATION_WORKTREE")"
+  assert_eq "$generation" "2" "$name continued predecessor reservation generation"
+  dispatch_log="$scratch/$name/continued-predecessor-dispatch.log"
+  FROZEN_CONTINUATION_EXPECTED=1 run_engine success "$BASH_BIN" \
+    "$ENGINE_HOME/engine/dispatch-wrap.sh" TASK-0001 \
+    "$ENGINE_HOME/engine/l1-drive.sh" "$owner" "$generation" \
+    BATCH-CONTINUED-REPAIR >"$dispatch_log" 2>&1 &
+  wrapper_pid=$!
+  run_engine success "$BASH_BIN" -c \
+    '. "$1"; SCRIPT_DIR="$2"; . "$2/lifecycle.sh"; singular_lifecycle_dispatch_record_write TASK-0001 "$3" "$4" "$(singular_dispatch_pid_start "$4")" "$5" "$6" BATCH-CONTINUED-REPAIR "$7" "$8"' \
+    fixture "$ENGINE_HOME/engine/lib.sh" "$ENGINE_HOME/engine" "$dispatch_run" \
+    "$wrapper_pid" "$dispatch_log" "$CONTINUATION_CURRENT_TARGET" "$owner" "$generation"
+  if wait "$wrapper_pid"; then wrapper_rc=0; else wrapper_rc=$?; fi
+  assert_eq "$wrapper_rc" "0" \
+    "$name continued predecessor accepted publication ($(tail -30 "$dispatch_log"))"
+
+  PREDECESSOR_RUN="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
+assert d["retryCount"] == 1 and d["maxRetries"] == 2, d
+assert a["predecessorAccounting"]["retryCount"] == 1, a
+assert a["predecessorAccounting"]["maxRetries"] == 2, a
+assert a["state"] == "claimed" and a["additionalWorkerAttemptsRemaining"] == 0, a
+assert d["attemptLifecycle"]["continuationAuthorizationId"] == a["authorizationId"], d
+print(a["executionRunId"])
+PY
+)"
+  assert_file "$FIXTURE_ROOT/.singular-state/inbox/$PREDECESSOR_RUN.json" \
+    "$name continued predecessor publication"
+  reconcile success "$name-predecessor-import"
+  PREDECESSOR_ATTEMPT_SHA="$(shasum -a 256 "$lease" | awk '{print $1}')"
+
+  local rc=0
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/integrate.sh" \
+    --task TASK-0001 --run-id "$name-integration-red" \
+    >"$scratch/$name-integration-red.log" 2>&1 || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "$name continued predecessor unexpectedly integrated"
+  REPAIR_FAILURE_ID="$($PYTHON_BIN - "$lease" "$PREDECESSOR_RUN" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); c=d["acceptedCandidate"]
+assert c["runId"] == sys.argv[2] and c["state"] == "integration-failed", d
+assert c["failures"][-1]["domain"] == "product", c
+assert d["retryCount"] == 1 and d["maxRetries"] == 2, d
+assert d["continuationAuthorization"]["executionRunId"] == sys.argv[2], d
+print(c["failures"][-1]["failureId"])
+PY
+)"
+  REPAIR_RUN="RUN-$name-SUCCESSOR"
+  REPAIR_BRANCH="agent/widget/TASK-0001-repair"
+  REPAIR_WORKTREE="$FIXTURE_ROOT/.worktrees/TASK-0001-repair"
+  run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/recover.sh" candidate TASK-0001 \
+    --action repair --successor-run "$REPAIR_RUN" --successor-branch "$REPAIR_BRANCH" \
+    --successor-worktree "$REPAIR_WORKTREE" --failure-id "$REPAIR_FAILURE_ID" \
+    >"$scratch/$name-authorize.log"
+  run_engine success "$PYTHON_BIN" "$ENGINE_HOME/engine/task_lifecycle.py" \
+    repair-dispatch-eligible --lease "$lease" \
+    --task-contract "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" >/dev/null \
+    || fail "$name public continued-predecessor repair was absent from the scheduler frontier"
+  "$PYTHON_BIN" - "$lease" "$PREDECESSOR_RUN" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); c=d["continuationAuthorization"]
+r=d["recoveryAuthorization"]
+assert c["executionRunId"] == r["predecessorRunId"] == sys.argv[2], d
+assert r["successorRunId"] != c["executionRunId"], d
+assert d["retryCount"] == 1 and d["maxRetries"] == 2, d
+assert c["predecessorAccounting"]["retryCount"] == 1, c
+PY
+}
+
 assert_repair_scheduler_identity() {
   local name="$1" expected_kind="$2"
   "$PYTHON_BIN" - "$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json" \
@@ -1857,7 +2083,7 @@ EVIDENCE
   export FROZEN_EVIDENCE_TARGET_RUNS_DIR="$scratch/$name/repo/.singular-state/runs"
   export FROZEN_EVIDENCE_TARGET_RUN_ID="RUN-$name-SUCCESSOR"
 
-  prepare_native_repair "$name" yes
+  prepare_continued_native_repair "$name"
   assert_eq "$(calls evidence)" "0" \
     "$name canary and predecessor did not consume successor evidence failures"
   reconcile success "$name-successor-awaiting-publication"
@@ -1883,6 +2109,7 @@ import json, os, sys
 packet, audit, lease = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
 run, branch, worktree, base, head = sys.argv[4:]
 authority = lease["recoveryAuthorization"]
+continuation = lease["continuationAuthorization"]
 assert packet["status"] == "blocked" and audit["verdict"] == "accepted", (packet, audit)
 assert lease["status"] == "blocked" and authority["state"] == "claimed", lease
 assert packet["runId"] == lease["runId"] == authority["successorRunId"] == run, lease
@@ -1890,6 +2117,14 @@ assert packet["branch"] == lease["branch"] == authority["successorBranch"] == br
 assert os.path.realpath(packet["workspace"]) == os.path.realpath(lease["worktree"]) == os.path.realpath(authority["successorWorktree"]) == os.path.realpath(worktree), lease
 assert packet["baseRef"] == lease["baseSha"] == authority["predecessorHeadSha"] == base, lease
 assert packet["headSha"] == head and head != base, packet
+assert lease["retryCount"] == lease["maxRetries"] == 2, lease
+assert continuation["predecessorAccounting"]["retryCount"] == 1, continuation
+assert continuation["predecessorAccounting"]["maxRetries"] == 2, continuation
+assert continuation["executionRunId"] == authority["predecessorRunId"], lease
+assert all("continuationAuthorizationId" not in x for x in [lease["attemptLifecycle"]]), lease
+historical = [x for x in lease["attemptHistory"] if x.get("runId") == authority["predecessorRunId"]]
+assert len(historical) == 1, lease
+assert historical[0]["continuationAuthorizationId"] == continuation["authorizationId"], lease
 PY
 
   printf 'independent target after accepted repair\n' >"$FIXTURE_ROOT/repair-target-after.txt"
@@ -1917,6 +2152,96 @@ PY
   worker_before="$(calls worker)"; auditor_before="$(calls auditor)"
   gate_before="$(calls gate)"; decider_before="$(calls decider)"
   evidence_before="$(calls evidence)"
+
+  repair_publication_state_digest() {
+    {
+      shasum -a 256 "$lease" "$packet" "$audit" \
+        "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md"
+      git -C "$REPAIR_WORKTREE" rev-parse HEAD
+      git -C "$REPAIR_WORKTREE" status --porcelain=v1 -z | shasum -a 256
+      git -C "$CONTINUATION_WORKTREE" rev-parse HEAD
+      git -C "$CONTINUATION_WORKTREE" status --porcelain=v1 -z | shasum -a 256
+      { find "$FIXTURE_ROOT/.singular-state/inbox" \
+          "$FIXTURE_ROOT/docs/orchestration/packets/imported/TASK-0001" \
+          -type f -print0 2>/dev/null || true; } \
+        | sort -z | while IFS= read -r -d '' path; do
+          shasum -a 256 "$path"
+        done
+    } | shasum -a 256 | awk '{print $1}'
+  }
+  assert_repair_provenance_refusals() {
+    local phase="$1" pristine
+    local state_before worker_at_start auditor_at_start gate_at_start
+    local decider_at_start evidence_at_start rc out mutation
+    pristine="$scratch/$name/$phase-repair-lease.json"
+    cp "$lease" "$pristine"
+    worker_at_start="$(calls worker)"; auditor_at_start="$(calls auditor)"
+    gate_at_start="$(calls gate)"; decider_at_start="$(calls decider)"
+    evidence_at_start="$(calls evidence)"
+    for mutation in missing null list empty historical-run historical-authorization \
+        current-marker history-authorizes-current recovery-missing recovery-null \
+        recovery-list recovery-empty recovery-recorded; do
+      cp "$pristine" "$lease"
+      "$PYTHON_BIN" - "$lease" "$mutation" <<'PY'
+import json, os, sys
+path, mutation = sys.argv[1:]
+d = json.load(open(path, encoding="utf-8"))
+c = d.get("continuationAuthorization")
+r = d["recoveryAuthorization"]
+historical = [x for x in d["attemptHistory"]
+              if x.get("runId") == r["predecessorRunId"]]
+assert len(historical) == 1, d
+if mutation == "missing":
+    d.pop("continuationAuthorization", None)
+elif mutation == "null":
+    d["continuationAuthorization"] = None
+elif mutation == "list":
+    d["continuationAuthorization"] = []
+elif mutation == "empty":
+    d["continuationAuthorization"] = {}
+elif mutation == "historical-run":
+    historical[0]["runId"] = "RUN-UNRELATED-HISTORY"
+elif mutation == "historical-authorization":
+    historical[0]["continuationAuthorizationId"] = "0" * 64
+elif mutation == "current-marker":
+    d["attemptLifecycle"]["continuationAuthorizationId"] = c["authorizationId"]
+elif mutation == "history-authorizes-current":
+    c["executionRunId"] = d["runId"]
+elif mutation == "recovery-missing":
+    d.pop("recoveryAuthorization", None)
+elif mutation == "recovery-null":
+    d["recoveryAuthorization"] = None
+elif mutation == "recovery-list":
+    d["recoveryAuthorization"] = []
+elif mutation == "recovery-empty":
+    d["recoveryAuthorization"] = {}
+elif mutation == "recovery-recorded":
+    d.pop("continuationAuthorization", None)
+    historical[0].pop("continuationAuthorizationId", None)
+    r["authorizedBy"] = "tampered-cached-issuer"
+temporary = path + ".test.tmp"
+json.dump(d, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+      state_before="$(repair_publication_state_digest)"
+      rc=0
+      out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+      assert_eq "$rc" "3" "$name $phase $mutation provenance refusal ($out)"
+      assert_eq "$(repair_publication_state_digest)" "$state_before" \
+        "$name $phase $mutation complete retained state"
+      assert_eq "$(calls worker)" "$worker_at_start" "$name $phase $mutation worker calls"
+      assert_eq "$(calls auditor)" "$auditor_at_start" "$name $phase $mutation auditor calls"
+      assert_eq "$(calls gate)" "$gate_at_start" "$name $phase $mutation gate calls"
+      assert_eq "$(calls decider)" "$decider_at_start" "$name $phase $mutation decider calls"
+      assert_eq "$(calls evidence)" "$evidence_at_start" "$name $phase $mutation evidence calls"
+    done
+    cp "$pristine" "$lease"
+  }
+
+  if [[ "${FROZEN_SKIP_PROVENANCE_NEGATIVES:-0}" != "1" ]]; then
+    assert_repair_provenance_refusals awaiting-evidence
+  fi
 
   rc=0
   out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
@@ -1956,6 +2281,9 @@ PY
   assert_eq "$(calls evidence)" "$evidence_before" "$name duplicate evidence calls"
   assert_eq "$(shasum -a 256 "$packet" | awk '{print $1}')" "$packet_after" \
     "$name duplicate packet bytes"
+  if [[ "${FROZEN_SKIP_PROVENANCE_NEGATIVES:-0}" != "1" ]]; then
+    assert_repair_provenance_refusals queued-duplicate
+  fi
 
   reconcile success "$name-successor-import"
   "$PYTHON_BIN" - "$lease" "$claim_before" <<'PY'
@@ -1966,6 +2294,9 @@ assert a["state"] == "claimed", a
 claim="|".join(str(a.get(k, "")) for k in ("authorizationId", "claimId", "reservationOwner", "reservationGeneration", "reservationRunId", "successorRunId", "successorBranch", "successorWorktree", "predecessorHeadSha"))
 assert claim == sys.argv[2], (claim, sys.argv[2])
 PY
+  if [[ "${FROZEN_SKIP_PROVENANCE_NEGATIVES:-0}" != "1" ]]; then
+    assert_repair_provenance_refusals imported-duplicate
+  fi
   rc=0
   out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
   assert_eq "$rc" "0" "$name imported repair duplicate ($out)"
@@ -2026,6 +2357,7 @@ PY
   assert_eq "$(calls auditor)" "$((predecessor_auditor + 1))" \
     "$name next dependent received one independent audit"
   verify_frozen_engine_bindings || fail "$name engine binding failed at test exit"
+  unset -f repair_publication_state_digest assert_repair_provenance_refusals
   unset FROZEN_EVIDENCE_COUNTER FROZEN_EVIDENCE_TARGET_RUNS_DIR \
     FROZEN_EVIDENCE_TARGET_RUN_ID
   ENGINE_HOME="$source_engine"
@@ -2291,6 +2623,9 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
   continuation-bootstrap) test_public_continuation_bootstrap_reissue ;;
   repair) test_native_repair_scheduler ;;
   repair-accepted-publication) test_native_repair_accepted_publication ;;
+  repair-continued-supported)
+    FROZEN_SKIP_PROVENANCE_NEGATIVES=1 test_native_repair_accepted_publication
+    ;;
   repair-crash) test_native_repair_started_crash ;;
   continuation)
     test_public_continuation_budget continuation-budget-available 0
