@@ -284,8 +284,24 @@ def append_context_event(receipt, path=None):
 
 def verify_campaign(expected_binding=None):
     """Verify campaign policy and return its canonical resolved projection."""
-    library = Path(__file__).resolve().with_name('lib.sh')
-    if not library.is_file():
+    # Preserve the selected engine path spelling at this bridge. Campaign
+    # policy intentionally fingerprints literal resolved settings, and on
+    # systems where /tmp aliases /private/tmp resolving __file__ here would
+    # make lib.sh derive a different engine path from the one that created the
+    # frozen campaign. Still refuse a lexical sibling that is not physically
+    # the library adjacent to the executing source (for example, a symlinked
+    # evidence_delivery.py beside an unrelated lib.sh).
+    library = Path(os.path.abspath(__file__)).with_name('lib.sh')
+    try:
+        physical_library = Path(__file__).resolve(strict=True).with_name('lib.sh')
+        library_valid = (
+            library.is_file()
+            and physical_library.is_file()
+            and library.samefile(physical_library)
+        )
+    except OSError:
+        library_valid = False
+    if not library_valid:
         raise ValueError('campaign verifier is unavailable')
     bash = os.environ.get('SINGULAR_BASH_BIN') or '/opt/homebrew/bin/bash'
     if not Path(bash).is_file():
