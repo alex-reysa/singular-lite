@@ -2,8 +2,8 @@
 set -euo pipefail
 campaign_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export SINGULAR_ROOT="$campaign_root"
-export SINGULAR_ENGINE_HOME="$campaign_root/.singular-state/runtime/0.21.0-brain-rescue-20260910-A10"
-export SINGULAR_JSON_CONFIG_FILE="$campaign_root/.singular-state/campaign-policy/rescue-20260910/config-A10.json"
+export SINGULAR_ENGINE_HOME="$campaign_root/.singular-state/runtime/0.21.0-brain-rescue-20260910-A11"
+export SINGULAR_JSON_CONFIG_FILE="$campaign_root/.singular-state/campaign-policy/rescue-20260910/config-A11.json"
 export SINGULAR_CONFIG_FILE=/dev/null
 export SINGULAR_LOCAL_CONFIG_FILE=/dev/null
 export SINGULAR_BASH_BIN="${SINGULAR_BASH_BIN:-/opt/homebrew/bin/bash}"
