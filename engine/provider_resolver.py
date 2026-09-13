@@ -348,6 +348,7 @@ def unavailable_effective_configuration(
         "targetBranch": None,
         "paths": {"root": str(root), "tasks": None, "state": None},
         "roles": {},
+        "roleRunners": {},
         "settings": {},
         "providerRuntime": {},
         "contextService": {
@@ -489,6 +490,21 @@ def effective_configuration(
             }
             return unavailable
 
+    if not environment_is_effective:
+        role_runners_cfg = config.get("roleRunners")
+        if isinstance(role_runners_cfg, dict):
+            for role_name, role_runner in role_runners_cfg.items():
+                if (
+                    isinstance(role_name, str)
+                    and role_name.isalpha()
+                    and role_name == role_name.lower()
+                    and isinstance(role_runner, str)
+                    and role_runner
+                ):
+                    effective_env[f"SINGULAR_ROLE_RUNNER_{role_name.upper()}"] = (
+                        role_runner
+                    )
+
     def consumer_path(key: str, fallback: str) -> str:
         raw = str(effective_env.get(key, "") or "").strip()
         path = Path(raw).expanduser() if raw else root / fallback
@@ -535,6 +551,44 @@ def effective_configuration(
             }
             for role in DIAGNOSTIC_ROLES
         }
+
+    def role_runner_entry(role: str) -> dict[str, Any]:
+        key = "SINGULAR_ROLE_RUNNER_" + role.upper().replace("-", "_")
+        raw = str(effective_env.get(key, "") or "").strip()
+        if raw:
+            selected, selected_provider, selected_specs = _runner_identity(
+                root, effective_env, raw
+            )
+            source = key
+        else:
+            selected, selected_provider, selected_specs = runner, provider, specs
+            source = "default"
+        selected_name = selected_provider or "unknown"
+        model = reasoning = None
+        if selected_provider:
+            spec = (
+                selected_specs.get(selected_provider)
+                if isinstance(selected_specs.get(selected_provider), dict)
+                else {}
+            )
+            model_spec = spec.get("model") if isinstance(spec.get("model"), dict) else {}
+            role_settings = _provider_role_settings(
+                effective_env,
+                selected_provider,
+                role,
+                str(model_spec.get("default") or ""),
+            )
+            model = role_settings.get("model")
+            reasoning = role_settings.get("reasoningEffort")
+        return {
+            "runner": selected,
+            "provider": selected_name,
+            "source": source,
+            "model": model,
+            "reasoningEffort": reasoning,
+        }
+
+    role_runners = {role: role_runner_entry(role) for role in DIAGNOSTIC_ROLES}
     result: dict[str, Any] = {
         "schema": "singular.effective-configuration.v1",
         "configuration": {
@@ -561,6 +615,7 @@ def effective_configuration(
             "state": consumer_path("SINGULAR_STATE_DIR", ".singular-state"),
         },
         "roles": roles,
+        "roleRunners": role_runners,
         "settings": {
             key: effective_env[key] if key in effective_env else None
             for key in DIAGNOSTIC_SETTING_KEYS

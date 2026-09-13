@@ -74,6 +74,9 @@ SUBSET_REASONS = {
         "console providers with a login command",
     ("plugin/scripts/singular_graph_server.py", frozenset({"gemini", "opencode"})):
         "console auth inference strategies keyed by provider",
+    ("engine/provider_resolver.py", frozenset({"claude", "grok"})):
+        "adapters that consume per-role model and effort keys rather than a "
+        "single flat model setting",
 }
 ISOLATION_SUBSETS = {frozenset({"cursor", "grok"})}
 

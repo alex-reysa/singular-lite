@@ -77,7 +77,8 @@ singular_ctx_plan_critic_run() {
   fi
   # DEFAULT runner (cross-provider independence): a module-routed planner still
   # gets a default-runner critic.
-  local runner="${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}"
+  local runner
+  runner="$(singular_role_runner critic "${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}")" || return 78
   local raw="$stage_dir/plan-critique-raw.json"
   local record="$stage_dir/plan-critique.json"
   local critic_input="$stage_dir/plan-critic-input.md"
