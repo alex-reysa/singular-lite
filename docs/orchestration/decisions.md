@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-13T05:39:19Z — TASK-1105 — decide:retry
+
+- Run: `RUN-20260913T051349Z-29042`
+- Branch: `codex/brain-rescue/TASK-1105`
+- Authority: policy
+- Rationale: fast-path: audit-needs-fix -> retry
+
 ### 2026-09-12T23:23:50Z — TASK-1113 — integrate
 
 - Run: `ORIGIN-20260912T232217Z-73342`
