@@ -180,9 +180,10 @@ case "$role" in
   implementer)
     bump worker
     [[ "$level" == "l2" && -d "$worktree" ]] || exit 93
-    [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]] || exit 94
+    task_id="${SINGULAR_TEST_TASK_ID:-}"
+    [[ "$task_id" == "TASK-0001" || "$task_id" == "TASK-0002" ]] || exit 94
     [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
-      "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]] || exit 95
+      "${SINGULAR_TEST_TASKS_DIR:-}/$task_id.md" ]] || exit 95
     if [[ "${FROZEN_CONTINUATION_EXPECTED:-0}" == "1" ]]; then
       [[ "$(cat "$worktree/internal/widget/parser.go")" == \
         'preserved tracked candidate bytes' ]] || exit 98
@@ -238,26 +239,36 @@ with open(temporary, "w", encoding="utf-8") as handle:
 os.replace(temporary, proof)
 PY
     fi
-    mkdir -p "$worktree/internal/widget" "$worktree/.singular-evidence"
+    mkdir -p "$worktree/.singular-evidence"
     branch="$(git -C "$worktree" branch --show-current)"
-    if [[ "$branch" == "agent/widget/TASK-0001-repair" ]]; then
+    if [[ "$task_id" == "TASK-0002" ]]; then
+      mkdir -p "$worktree/internal/followup"
+      printf 'package followup\n// dependent fixture\n' >"$worktree/internal/followup/next.go"
+    elif [[ "$branch" == "agent/widget/TASK-0001-repair" ]]; then
+      mkdir -p "$worktree/internal/widget"
       printf 'package widget\n// authorized repair marker\n' >"$worktree/internal/widget/parser.go"
     else
+      mkdir -p "$worktree/internal/widget"
       printf 'package widget\n// frozen campaign candidate\n' >"$worktree/internal/widget/parser.go"
     fi
-    [[ -f "$worktree/internal/widget/note.txt" ]] \
-      || printf 'worker note\n' >"$worktree/internal/widget/note.txt"
+    if [[ "$task_id" == "TASK-0001" ]]; then
+      [[ -f "$worktree/internal/widget/note.txt" ]] \
+        || printf 'worker note\n' >"$worktree/internal/widget/note.txt"
+    fi
     printf 'intentional red fixture\n' >"$worktree/.singular-evidence/red.log"
     printf 'green fixture\n' >"$worktree/.singular-evidence/green.log"
     printf 'regression fixture\n' >"$worktree/.singular-evidence/regression.log"
-    "$FROZEN_PYTHON" - "$output" "$run_id" "$worktree" "$branch" <<'PY'
+    "$FROZEN_PYTHON" - "$output" "$run_id" "$worktree" "$branch" "$task_id" <<'PY'
 import datetime, json, sys
-out, run_id, worktree, branch = sys.argv[1:]
+out, run_id, worktree, branch, task_id = sys.argv[1:]
+changed = (["internal/followup/next.go"] if task_id == "TASK-0002" else
+           ["internal/widget/note.txt", "internal/widget/parser.go"])
+owned = ["internal/followup/"] if task_id == "TASK-0002" else ["internal/widget/"]
 json.dump({
     "schema": "singular.orchestration.state-packet.v0",
     "packetId": run_id + "-packet",
     "runId": run_id,
-    "taskId": "TASK-0001",
+    "taskId": task_id,
     "area": "widget",
     "role": "l2-developer",
     "status": "needs-review",
@@ -265,8 +276,8 @@ json.dump({
     "branch": branch,
     "headSha": "uncommitted",
     "workspace": worktree,
-    "ownedFiles": ["internal/widget/parser.go", "internal/widget/note.txt"],
-    "changedFiles": ["internal/widget/parser.go", "internal/widget/note.txt"],
+    "ownedFiles": owned,
+    "changedFiles": changed,
     "commands": [{"cmd": "bash strict-gate.sh", "exitCode": 0,
                   "logRef": ".singular-evidence/regression.log"}],
     "tests": [
@@ -298,13 +309,15 @@ PY
     "$FROZEN_PYTHON" - "$output" "$run_id" "$host_report" "$branch" <<'PY'
 import json, sys
 out, run_id, report, branch = sys.argv[1:]
-status = json.load(open(report, encoding="utf-8"))["outcome"]
+host = json.load(open(report, encoding="utf-8"))
+status = host["outcome"]
+task_id = host["taskId"]
 if status == "passed-with-acknowledged-baseline":
     status = "passed"
 assert status in {"passed", "not-rerun-evidence-verified"}, status
 json.dump({
     "schema": "singular.orchestration.audit-verdict.v1",
-    "taskId": "TASK-0001",
+    "taskId": task_id,
     "runId": run_id,
     "branch": branch,
     "verdict": "accepted",
@@ -377,8 +390,7 @@ Implement the frozen campaign widget.
 
 Owned files:
 
-- `internal/widget/parser.go`
-- `internal/widget/note.txt`
+- `internal/widget/`
 
 Forbidden files:
 
@@ -398,9 +410,10 @@ if [[ -n "${FROZEN_FIXTURE_COUNTER_DIR:-}" ]]; then
   printf '%s\n' "$((count + 1))" >"$counter"
 fi
 if [[ -n "${SINGULAR_TEST_TASK_CONTRACT:-}" ]]; then
-  [[ "${SINGULAR_TEST_TASK_ID:-}" == "TASK-0001" ]]
+  task_id="${SINGULAR_TEST_TASK_ID:-}"
+  [[ "$task_id" == "TASK-0001" || "$task_id" == "TASK-0002" ]]
   [[ "${SINGULAR_TEST_TASK_CONTRACT:-}" == \
-    "${SINGULAR_TEST_TASKS_DIR:-}/TASK-0001.md" ]]
+    "${SINGULAR_TEST_TASKS_DIR:-}/$task_id.md" ]]
 fi
 if [[ -z "${SINGULAR_TEST_TASK_CONTRACT:-}" \
     && -f .frozen-repair-case \
@@ -568,6 +581,7 @@ PY
 
 prepare_public_continuation() {
   local name="$1" predecessor_retry="$2" require_bootstrap="$3"
+  local workspace_shape="${4:-default}"
   make_fixture "$name"
   CONTINUATION_BOOTSTRAP_MARKER="$scratch/$name/bootstrap-ready"
   CONTINUATION_BOOTSTRAP_SCRIPT="$scratch/$name/bootstrap-check.sh"
@@ -594,10 +608,15 @@ PY
   git -C "$FIXTURE_ROOT" commit -qm 'older continuation candidate source'
   CONTINUATION_CANDIDATE="$(git -C "$FIXTURE_ROOT" rev-parse HEAD)"
   git -C "$FIXTURE_ROOT" branch agent/widget/TASK-0001-frozen
-  mkdir -p "$FIXTURE_ROOT/.worktrees"
-  git -C "$FIXTURE_ROOT" worktree add -q "$FIXTURE_ROOT/.worktrees/TASK-0001" \
+  if [[ "$workspace_shape" == "custom" ]]; then
+    CONTINUATION_WORKTREE="$scratch/$name/retained continuation workspace"
+    mkdir -p "$(dirname "$CONTINUATION_WORKTREE")"
+  else
+    mkdir -p "$FIXTURE_ROOT/.worktrees"
+    CONTINUATION_WORKTREE="$FIXTURE_ROOT/.worktrees/TASK-0001"
+  fi
+  git -C "$FIXTURE_ROOT" worktree add -q "$CONTINUATION_WORKTREE" \
     agent/widget/TASK-0001-frozen
-  CONTINUATION_WORKTREE="$FIXTURE_ROOT/.worktrees/TASK-0001"
   printf 'preserved tracked candidate bytes\n' >"$CONTINUATION_WORKTREE/internal/widget/parser.go"
   printf 'preserved untracked candidate bytes\n' >"$CONTINUATION_WORKTREE/internal/widget/note.txt"
   CONTINUATION_TRACKED_SHA="$(shasum -a 256 "$CONTINUATION_WORKTREE/internal/widget/parser.go" | awk '{print $1}')"
@@ -620,7 +639,7 @@ PY
     '. "$1"; singular_campaign_engine_source_fingerprint' fixture "$ENGINE_HOME/engine/lib.sh")"
   CONTINUATION_OWNER='reconcile:ORIGIN-OLD:TASK-0001'
   CONTINUATION_GENERATION="$(run_engine success "$BASH_BIN" -c \
-    '. "$1"; SCRIPT_DIR="$2"; . "$2/lifecycle.sh"; singular_lifecycle_reserve TASK-0001 "$3" ORIGIN-OLD agent/widget/TASK-0001-frozen widget '\''["internal/widget/parser.go","internal/widget/note.txt"]'\'' "$4" BATCH-OLD "$5"' \
+    '. "$1"; SCRIPT_DIR="$2"; . "$2/lifecycle.sh"; singular_lifecycle_reserve TASK-0001 "$3" ORIGIN-OLD agent/widget/TASK-0001-frozen widget '\''["internal/widget/"]'\'' "$4" BATCH-OLD "$5"' \
     fixture "$ENGINE_HOME/engine/lib.sh" "$ENGINE_HOME/engine" \
     "$CONTINUATION_OWNER" "$CONTINUATION_RESERVATION_BASE" "$CONTINUATION_WORKTREE")"
   assert_eq "$CONTINUATION_GENERATION" "1" "$name predecessor reservation generation"
@@ -721,6 +740,241 @@ test_public_continuation_budget() {
   FROZEN_CONTINUATION_EXPECTED=1 reconcile success "$name-no-duplicate"
   assert_public_continuation_identity "$name" "$predecessor_retry" 2
   echo "ok: $name public frozen continuation preserves ordinary retry accounting"
+}
+
+test_custom_continuation_accepted_publication() {
+  local name=continuation-custom-accepted source_engine test_engine default_worktree
+  local lease authorization_id owner generation dispatch_run dispatch_log wrapper_pid
+  local wrapper_rc=0 run_id run_dir packet audit base head target_after out rc=0
+  local worker_before auditor_before gate_before decider_before evidence_before
+  local authority_before accounting_before lease_snapshot mutation
+  source_engine="$ENGINE_HOME"
+  FROZEN_BOUND_SOURCE_ENGINE="$source_engine"
+  FROZEN_BOUND_SOURCE_BINDING="$(tree_bytes_modes_binding "$source_engine")"
+  test_engine="$scratch/$name/test-engine"
+  mkdir -p "$test_engine"
+  test_engine="$(cd "$test_engine" && pwd -P)"
+  FROZEN_OWNED_TEST_ENGINE="$test_engine"
+  cp -R "$source_engine/." "$test_engine/"
+  chmod u+w "$test_engine/engine"
+  mv "$test_engine/engine/evidence-manifest.sh" \
+    "$test_engine/engine/evidence-manifest.real.sh"
+  cat >"$test_engine/engine/evidence-manifest.sh" <<'EVIDENCE'
+#!/usr/bin/env bash
+set -euo pipefail
+counter="${FROZEN_EVIDENCE_COUNTER:?}"
+target_runs="${FROZEN_EVIDENCE_TARGET_RUNS_DIR:?}"
+task_id=""; run_dir=""; args=("$@")
+for ((index=0; index<${#args[@]}; index++)); do
+  case "${args[$index]}" in
+    --task-id) [[ $((index + 1)) -lt ${#args[@]} ]] && task_id="${args[$((index + 1))]}" ;;
+    --run-dir) [[ $((index + 1)) -lt ${#args[@]} ]] && run_dir="${args[$((index + 1))]}" ;;
+  esac
+done
+real_driver="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/evidence-manifest.real.sh"
+if [[ "$task_id" != "TASK-0001" || ! -d "$run_dir" || ! -d "$target_runs" ]]; then
+  exec "$real_driver" "$@"
+fi
+run_dir="$(cd "$run_dir" && pwd -P)"
+target_runs="$(cd "$target_runs" && pwd -P)"
+[[ "$(dirname "$run_dir")" == "$target_runs" ]] || exec "$real_driver" "$@"
+run_binding="${counter}.run-dir"
+if [[ -f "$run_binding" ]]; then
+  [[ "$(cat "$run_binding")" == "$run_dir" ]] || exec "$real_driver" "$@"
+else
+  printf '%s\n' "$run_dir" >"$run_binding"
+fi
+count=0
+[[ -f "$counter" ]] && count="$(cat "$counter")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$counter"
+if [[ "$count" -eq 3 || "$count" -eq 4 ]]; then
+  echo "injected bounded custom-continuation evidence transport failure" >&2
+  exit 77
+fi
+exec "$real_driver" "$@"
+EVIDENCE
+  chmod +x "$test_engine/engine/evidence-manifest.sh"
+  chmod -R a-w "$test_engine"
+  FROZEN_BOUND_TEST_ENGINE="$test_engine"
+  FROZEN_BOUND_TEST_BINDING="$(tree_bytes_modes_binding "$test_engine")"
+  ENGINE_HOME="$test_engine"
+  export FROZEN_EVIDENCE_COUNTER="$scratch/$name/counters/evidence-calls"
+  export FROZEN_EVIDENCE_TARGET_RUNS_DIR="$scratch/$name/repo/.singular-state/runs"
+
+  prepare_public_continuation "$name" 1 no custom
+  default_worktree="$FIXTURE_ROOT/.worktrees/TASK-0001"
+  [[ ! -e "$default_worktree" ]] || fail "$name unexpectedly created the default worktree"
+  lease="$FIXTURE_ROOT/.singular-state/leases/TASK-0001.json"
+  authorization_id="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["continuationAuthorization"]["authorizationId"])
+PY
+)"
+  owner="reconcile:ORIGIN-CUSTOM:TASK-0001"
+  dispatch_run="ORIGIN-CUSTOM"
+  generation="$(run_engine success "$BASH_BIN" -c \
+    '. "$1"; SCRIPT_DIR="$2"; . "$2/lifecycle.sh"; singular_lifecycle_reserve TASK-0001 "$3" "$4" agent/widget/TASK-0001-frozen widget '\''["internal/widget/"]'\'' "$5" BATCH-CUSTOM "$6"' \
+    fixture "$ENGINE_HOME/engine/lib.sh" "$ENGINE_HOME/engine" "$owner" \
+    "$dispatch_run" "$CONTINUATION_CURRENT_TARGET" "$CONTINUATION_WORKTREE")"
+  assert_eq "$generation" "2" "$name exact continuation reservation generation"
+  dispatch_log="$scratch/$name/custom-dispatch.log"
+  FROZEN_CONTINUATION_EXPECTED=1 run_engine success "$BASH_BIN" \
+    "$ENGINE_HOME/engine/dispatch-wrap.sh" TASK-0001 \
+    "$ENGINE_HOME/engine/l1-drive.sh" "$owner" "$generation" BATCH-CUSTOM \
+    >"$dispatch_log" 2>&1 &
+  wrapper_pid=$!
+  run_engine success "$BASH_BIN" -c \
+    '. "$1"; SCRIPT_DIR="$2"; . "$2/lifecycle.sh"; singular_lifecycle_dispatch_record_write TASK-0001 "$3" "$4" "$(singular_dispatch_pid_start "$4")" "$5" "$6" BATCH-CUSTOM "$7" "$8"' \
+    fixture "$ENGINE_HOME/engine/lib.sh" "$ENGINE_HOME/engine" "$dispatch_run" \
+    "$wrapper_pid" "$dispatch_log" "$CONTINUATION_CURRENT_TARGET" "$owner" "$generation"
+  if wait "$wrapper_pid"; then wrapper_rc=0; else wrapper_rc=$?; fi
+  assert_eq "$wrapper_rc" "3" "$name initial accepted publication interruption ($(tail -30 "$dispatch_log"))"
+
+  run_id="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["continuationAuthorization"]["executionRunId"])
+PY
+)"
+  run_dir="$FIXTURE_ROOT/.singular-state/runs/$run_id"
+  packet="$run_dir/packet.json"
+  audit="$run_dir/audit.json"
+  assert_file "$packet" "$name accepted continuation packet"
+  assert_file "$audit" "$name accepted continuation audit"
+  base="$($PYTHON_BIN - "$packet" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["baseRef"])
+PY
+)"
+  head="$($PYTHON_BIN - "$packet" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["headSha"])
+PY
+)"
+  "$PYTHON_BIN" - "$lease" "$packet" "$audit" "$CONTINUATION_WORKTREE" \
+      "$authorization_id" "$run_id" "$base" "$head" <<'PY'
+import json, os, sys
+lease, packet, audit = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
+worktree, authorization, run, base, head = sys.argv[4:]
+authority = lease["continuationAuthorization"]
+attempt = lease["attemptLifecycle"]
+assert packet["status"] == "blocked" and audit["verdict"] == "accepted", (packet, audit)
+assert authority["state"] == "claimed", authority
+assert authority["authorizationId"] == attempt["continuationAuthorizationId"] == authorization
+assert authority["executionRunId"] == packet["runId"] == run
+assert authority["candidateBaseSha"] == packet["baseRef"] == base
+assert packet["headSha"] == head and head != base
+assert os.path.realpath(packet["workspace"]) == os.path.realpath(lease["worktree"]) == os.path.realpath(authority["worktree"]) == os.path.realpath(worktree)
+assert authority["additionalWorkerAttemptsClaimed"] == 1
+assert authority["additionalWorkerAttemptsRemaining"] == 0
+assert authority["predecessorAccounting"]["retryCount"] == lease["retryCount"] == 1
+PY
+  assert_eq "$(calls worker)" "1" "$name one continuation worker before recovery"
+  assert_eq "$(calls auditor)" "1" "$name one continuation audit before recovery"
+  assert_eq "$(calls evidence)" "4" "$name bounded interrupted evidence calls"
+  [[ ! -e "$default_worktree" ]] || fail "$name interruption created the default worktree"
+
+  printf 'independent custom continuation target\n' >"$FIXTURE_ROOT/custom-target-after.txt"
+  git -C "$FIXTURE_ROOT" add custom-target-after.txt
+  git -C "$FIXTURE_ROOT" commit -qm 'advance target after accepted custom continuation'
+  target_after="$(git -C "$FIXTURE_ROOT" rev-parse target)"
+  [[ "$base" != "$head" && "$base" != "$target_after" && "$head" != "$target_after" ]] \
+    || fail "$name did not preserve distinct B/H/T"
+
+  authority_before="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
+keys=("authorizationId", "authoritySha256", "state", "executionRunId", "branch", "worktree", "campaignBinding", "candidateBaseSha", "reservationOwner", "reservationGeneration", "reservationRunId", "additionalWorkerAttemptsAuthorized", "additionalWorkerAttemptsClaimed", "additionalWorkerAttemptsRemaining")
+lease_keys=("taskId", "runId", "branch", "worktree", "baseSha", "reservationBaseSha", "campaignBinding", "reservationOwner", "reservationGeneration", "reservationRunId")
+attempt_keys=("taskId", "runId", "reservationRunId", "reservationOwner", "reservationGeneration", "campaignBinding", "state", "continuationAuthorizationId")
+print(json.dumps({"authority":{k:a.get(k) for k in keys}, "lease":{k:d.get(k) for k in lease_keys}, "attempt":{k:d["attemptLifecycle"].get(k) for k in attempt_keys}}, sort_keys=True, separators=(",", ":")))
+PY
+)"
+  accounting_before="$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
+print(json.dumps({"retryCount":d.get("retryCount"), "maxRetries":d.get("maxRetries"), "productPassStarted":d.get("productPassStarted"), "productPassStartedRunId":d.get("productPassStartedRunId"), "predecessorAccounting":a.get("predecessorAccounting")}, sort_keys=True, separators=(",", ":")))
+PY
+)"
+  worker_before="$(calls worker)"; auditor_before="$(calls auditor)"
+  gate_before="$(calls gate)"; decider_before="$(calls decider)"; evidence_before="$(calls evidence)"
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name retained custom-worktree recovery ($out)"
+  assert_contains "$out" "RESUMED ACCEPTED EVIDENCE" "$name explicit accepted recovery"
+  assert_eq "$(calls worker)" "$worker_before" "$name recovery worker calls"
+  assert_eq "$(calls auditor)" "$auditor_before" "$name recovery auditor calls"
+  assert_eq "$(calls gate)" "$gate_before" "$name recovery gate calls"
+  assert_eq "$(calls decider)" "$decider_before" "$name recovery decider calls"
+  assert_eq "$(calls evidence)" "$((evidence_before + 1))" "$name recovery evidence calls"
+  assert_file "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json" "$name accepted publication"
+  [[ ! -e "$default_worktree" ]] || fail "$name recovery created or reset a default worktree"
+
+  evidence_before="$(calls evidence)"; rc=0
+  out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+  assert_eq "$rc" "0" "$name duplicate reentry ($out)"
+  assert_contains "$out" "already queued/imported; dispatch is a no-op" "$name duplicate no-op"
+  assert_eq "$(calls evidence)" "$evidence_before" "$name duplicate evidence calls"
+  assert_eq "$(calls worker)" "$worker_before" "$name duplicate worker calls"
+  assert_eq "$(calls auditor)" "$auditor_before" "$name duplicate auditor calls"
+  assert_eq "$(calls gate)" "$gate_before" "$name duplicate gate calls"
+  assert_eq "$(calls decider)" "$decider_before" "$name duplicate decider calls"
+  "$PYTHON_BIN" - "$packet" "$base" "$head" "$CONTINUATION_WORKTREE" <<'PY'
+import json, os, sys
+packet = json.load(open(sys.argv[1], encoding="utf-8"))
+assert packet["status"] == "accepted", packet
+assert packet["baseRef"] == sys.argv[2], packet
+assert packet["headSha"] == sys.argv[3], packet
+assert os.path.realpath(packet["workspace"]) == os.path.realpath(sys.argv[4]), packet
+PY
+  assert_eq "$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
+keys=("authorizationId", "authoritySha256", "state", "executionRunId", "branch", "worktree", "campaignBinding", "candidateBaseSha", "reservationOwner", "reservationGeneration", "reservationRunId", "additionalWorkerAttemptsAuthorized", "additionalWorkerAttemptsClaimed", "additionalWorkerAttemptsRemaining")
+lease_keys=("taskId", "runId", "branch", "worktree", "baseSha", "reservationBaseSha", "campaignBinding", "reservationOwner", "reservationGeneration", "reservationRunId")
+attempt_keys=("taskId", "runId", "reservationRunId", "reservationOwner", "reservationGeneration", "campaignBinding", "state", "continuationAuthorizationId")
+print(json.dumps({"authority":{k:a.get(k) for k in keys}, "lease":{k:d.get(k) for k in lease_keys}, "attempt":{k:d["attemptLifecycle"].get(k) for k in attempt_keys}}, sort_keys=True, separators=(",", ":")))
+PY
+)" "$authority_before" "$name continuation lease/claim identity preserved"
+  assert_eq "$($PYTHON_BIN - "$lease" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8")); a=d["continuationAuthorization"]
+print(json.dumps({"retryCount":d.get("retryCount"), "maxRetries":d.get("maxRetries"), "productPassStarted":d.get("productPassStarted"), "productPassStartedRunId":d.get("productPassStartedRunId"), "predecessorAccounting":a.get("predecessorAccounting")}, sort_keys=True, separators=(",", ":")))
+PY
+)" "$accounting_before" "$name continuation accounting preserved"
+
+  lease_snapshot="$scratch/$name/accepted-lease.json"
+  cp "$lease" "$lease_snapshot"
+  for mutation in recorded execution owner attempt allowance; do
+    cp "$lease_snapshot" "$lease"
+    "$PYTHON_BIN" - "$lease" "$mutation" <<'PY'
+import json, os, sys
+path, mutation = sys.argv[1:]
+d = json.load(open(path, encoding="utf-8")); a = d["continuationAuthorization"]
+if mutation == "recorded": a["authorizationId"] = "0" * 64
+elif mutation == "execution": a["executionRunId"] = "RUN-MISMATCH"
+elif mutation == "owner": a["reservationOwner"] = "reconcile:OTHER:TASK-0001"
+elif mutation == "attempt": d["attemptLifecycle"]["continuationAuthorizationId"] = "0" * 64
+elif mutation == "allowance": a["additionalWorkerAttemptsRemaining"] = 1
+temporary = path + ".test.tmp"
+json.dump(d, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+    rc=0
+    out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+    assert_eq "$rc" "3" "$name $mutation provenance refusal ($out)"
+    assert_eq "$(calls worker)" "$worker_before" "$name $mutation worker calls"
+    assert_eq "$(calls auditor)" "$auditor_before" "$name $mutation auditor calls"
+    assert_eq "$(calls gate)" "$gate_before" "$name $mutation gate calls"
+    assert_eq "$(calls decider)" "$decider_before" "$name $mutation decider calls"
+    assert_eq "$(calls evidence)" "$evidence_before" "$name $mutation evidence calls"
+    [[ ! -e "$default_worktree" ]] || fail "$name $mutation refusal created default worktree"
+  done
+  cp "$lease_snapshot" "$lease"
+  verify_frozen_engine_bindings || fail "$name engine binding failed at test exit"
+  unset FROZEN_EVIDENCE_COUNTER FROZEN_EVIDENCE_TARGET_RUNS_DIR
+  ENGINE_HOME="$source_engine"
+  echo "ok: consumed continuation publishes only from its retained custom workspace"
 }
 
 test_public_continuation_bootstrap_reissue() {
@@ -1260,6 +1514,48 @@ PY
     assert_eq "$(calls evidence)" "$evidence_before" "$label evidence calls"
   }
 
+  # Directory ownership is segment-aware, not a string prefix. A neighboring
+  # name and a traversal-shaped packet path must both fail before duplicate
+  # publication can borrow the retained accepted audit.
+  local escaped_path
+  for escaped_path in internal/widget-neighbor/escape.go internal/widget/../escape.go; do
+    "$PYTHON_BIN" - "$packet" "$escaped_path" <<'PY'
+import json, os, sys
+path, changed = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+data["changedFiles"] = [changed]
+temporary = path + ".test.tmp"
+json.dump(data, open(temporary, "w", encoding="utf-8"), indent=2)
+open(temporary, "a", encoding="utf-8").write("\n")
+os.replace(temporary, path)
+PY
+    retained_digest_before="$(accepted_state_digest)"
+    rc=0
+    out="$(run_engine success "$BASH_BIN" "$ENGINE_HOME/engine/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
+    assert_eq "$rc" "3" "$name changed-path scope refusal for $escaped_path ($out)"
+    assert_eq "$(accepted_state_digest)" "$retained_digest_before" \
+      "$name changed-path scope state for $escaped_path"
+    assert_retained_refusal_quiet "$name changed-path scope $escaped_path"
+    cp "$publishable_packet" "$packet"
+  done
+
+  # Task preflight intentionally disallows overlapping declarations, so prove
+  # forbidden precedence directly at the shared admission/publication leaf.
+  # This is the otherwise unreachable malicious-packet shape: the path matches
+  # both declarations and must be classified forbidden, never merely allowed.
+  "$PYTHON_BIN" - "$ENGINE_HOME/engine" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from git_changes import scope_membership
+forbidden, disallowed = scope_membership(
+    ["internal/widget/private/secret.txt"],
+    ["internal/widget/"],
+    ["internal/widget/private/"],
+)
+assert forbidden == ["internal/widget/private/secret.txt"], forbidden
+assert disallowed == [], disallowed
+PY
+
   "$PYTHON_BIN" - "$packet" "$FIXTURE_ROOT/.singular-state/inbox/$run_id.json" <<'PY'
 import json, os, sys
 for path in sys.argv[1:]:
@@ -1348,7 +1644,7 @@ PY
 }
 
 prepare_native_repair() {
-  local name="$1"
+  local name="$1" with_dependent="${2:-no}"
   make_fixture "$name"
   "$PYTHON_BIN" - "$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0001.md" <<'PY'
 import sys
@@ -1357,7 +1653,42 @@ text=text.replace("Area: widget\n", "Area: widget\nRisk tier: high\n", 1)
 open(p, "w", encoding="utf-8").write(text)
 PY
   : >"$FIXTURE_ROOT/.frozen-repair-case"
+  if [[ "$with_dependent" == "yes" ]]; then
+    cat >"$FIXTURE_ROOT/docs/orchestration/tasks/TASK-0002.md" <<'TASK'
+# TASK-0002: Frozen dependent fixture
+
+Status: ready
+Area: followup
+Target branch: `target`
+Worker branch: `agent/followup/TASK-0002-frozen`
+Test policy: `strict_test_first`
+Gate command: `bash strict-gate.sh`
+Dispatch mode: canonical
+Depends on: [TASK-0001]
+
+## Objective
+
+Exercise the first native reservation after exact predecessor integration.
+
+## Scope
+
+Owned files:
+
+- `internal/followup/`
+
+Forbidden files:
+
+- Any file outside the owned scope.
+
+## Acceptance Criteria
+
+- The dependent fixture receives the integrated target as its reservation base.
+TASK
+  fi
   git -C "$FIXTURE_ROOT" add .frozen-repair-case docs/orchestration/tasks/TASK-0001.md
+  if [[ "$with_dependent" == "yes" ]]; then
+    git -C "$FIXTURE_ROOT" add docs/orchestration/tasks/TASK-0002.md
+  fi
   git -C "$FIXTURE_ROOT" commit -qm 'declare frozen repair fixture control'
   start_campaign success
 
@@ -1526,7 +1857,7 @@ EVIDENCE
   export FROZEN_EVIDENCE_TARGET_RUNS_DIR="$scratch/$name/repo/.singular-state/runs"
   export FROZEN_EVIDENCE_TARGET_RUN_ID="RUN-$name-SUCCESSOR"
 
-  prepare_native_repair "$name"
+  prepare_native_repair "$name" yes
   assert_eq "$(calls evidence)" "0" \
     "$name canary and predecessor did not consume successor evidence failures"
   reconcile success "$name-successor-awaiting-publication"
@@ -1663,11 +1994,42 @@ assert c["headSha"] == sys.argv[2] and a["state"] == "published", d
 assert os.path.realpath(d["worktree"]) == os.path.realpath(sys.argv[4]), d
 assert c["integrationProof"]["targetParent"] == sys.argv[3], c
 PY
+  local integrated_target task2_lease predecessor_worker predecessor_auditor
+  integrated_target="$(git -C "$FIXTURE_ROOT" rev-parse target)"
+  predecessor_worker="$(calls worker)"
+  predecessor_auditor="$(calls auditor)"
+  reconcile success "$name-dependent-reservation"
+  task2_lease="$FIXTURE_ROOT/.singular-state/leases/TASK-0002.json"
+  assert_file "$task2_lease" "$name next dependent lease"
+  "$PYTHON_BIN" - "$task2_lease" "$lease" "$integrated_target" "$REPAIR_RUN" \
+      "$claim_before" <<'PY'
+import json, sys
+next_lease = json.load(open(sys.argv[1], encoding="utf-8"))
+predecessor = json.load(open(sys.argv[2], encoding="utf-8"))
+target, predecessor_run, predecessor_claim = sys.argv[3:]
+attempt = next_lease["attemptLifecycle"]
+assert next_lease["taskId"] == "TASK-0002", next_lease
+assert next_lease["baseSha"] == next_lease["reservationBaseSha"] == target, next_lease
+assert next_lease["runId"] != predecessor_run, next_lease
+assert attempt["runId"] == next_lease["runId"], next_lease
+assert attempt["reservationOwner"] != predecessor["recoveryAuthorization"]["reservationOwner"], (next_lease, predecessor)
+assert attempt["reservationRunId"] != predecessor["recoveryAuthorization"]["reservationRunId"], (next_lease, predecessor)
+claim = "|".join(str(predecessor["recoveryAuthorization"].get(k, "")) for k in (
+    "authorizationId", "claimId", "reservationOwner", "reservationGeneration",
+    "reservationRunId", "successorRunId", "successorBranch", "successorWorktree",
+    "predecessorHeadSha"))
+assert claim == predecessor_claim, (claim, predecessor_claim)
+assert predecessor["status"] == "integrated", predecessor
+PY
+  assert_eq "$(calls worker)" "$((predecessor_worker + 1))" \
+    "$name next dependent received one independent worker run"
+  assert_eq "$(calls auditor)" "$((predecessor_auditor + 1))" \
+    "$name next dependent received one independent audit"
   verify_frozen_engine_bindings || fail "$name engine binding failed at test exit"
   unset FROZEN_EVIDENCE_COUNTER FROZEN_EVIDENCE_TARGET_RUNS_DIR \
     FROZEN_EVIDENCE_TARGET_RUN_ID
   ENGINE_HOME="$source_engine"
-  echo "ok: claimed native repair resumes accepted publication once and integrates exact successor"
+  echo "ok: claimed native repair publishes, integrates, then reserves its real dependent"
 }
 
 test_native_repair_started_crash() {
@@ -1925,6 +2287,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
     ;;
+  continuation-custom-accepted) test_custom_continuation_accepted_publication ;;
   continuation-bootstrap) test_public_continuation_bootstrap_reissue ;;
   repair) test_native_repair_scheduler ;;
   repair-accepted-publication) test_native_repair_accepted_publication ;;
@@ -1932,6 +2295,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
   continuation)
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
+    test_custom_continuation_accepted_publication
     test_public_continuation_bootstrap_reissue
     test_native_repair_scheduler
     test_native_repair_accepted_publication
@@ -1948,6 +2312,7 @@ case "${FROZEN_TERMINAL_CASE:-all}" in
     test_policy_drift
     test_public_continuation_budget continuation-budget-available 0
     test_public_continuation_budget continuation-budget-exhausted 1
+    test_custom_continuation_accepted_publication
     test_public_continuation_bootstrap_reissue
     test_native_repair_scheduler
     test_native_repair_accepted_publication

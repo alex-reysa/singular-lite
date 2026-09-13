@@ -14,9 +14,79 @@ from pathlib import Path
 import subprocess
 import sys
 
+from task_parser import TaskParseError, validate_scope_path
+
 
 class GitChangeError(RuntimeError):
     pass
+
+
+class ScopeMembershipError(RuntimeError):
+    pass
+
+
+def _scope_prefix(value: str, label: str) -> str:
+    try:
+        validated = validate_scope_path(value)
+    except TaskParseError as exc:
+        raise ScopeMembershipError(f"invalid {label}: {value!r}: {exc}") from exc
+    return validated.rstrip("/")
+
+
+def path_matches_scope(path: str, prefix: str) -> bool:
+    """Match one validated repository path against one path-segment prefix."""
+    normalized = prefix.rstrip("/")
+    return path == normalized or path.startswith(normalized + "/")
+
+
+def scope_membership(
+    paths: list[str], allow_prefixes: list[str], forbid_prefixes: list[str], *,
+    validate_paths: bool = True,
+) -> tuple[list[str], list[str]]:
+    """Return forbidden and disallowed paths using admission scope semantics."""
+    if not allow_prefixes:
+        raise ScopeMembershipError("at least one allowed scope prefix is required")
+    allowed = [_scope_prefix(value, "allowed scope prefix") for value in allow_prefixes]
+    forbidden = [_scope_prefix(value, "forbidden scope prefix") for value in forbid_prefixes]
+    checked_paths = paths
+    if validate_paths:
+        checked_paths = []
+        for value in paths:
+            try:
+                checked_paths.append(validate_scope_path(value))
+            except TaskParseError as exc:
+                raise ScopeMembershipError(f"invalid changed path: {value!r}: {exc}") from exc
+
+    forbidden_hits: list[str] = []
+    violations: list[str] = []
+    for path in checked_paths:
+        # Forbidden precedence is intentional even when an allow prefix also
+        # matches. This is the same decision admission applies to Git paths.
+        if any(path_matches_scope(path, prefix) for prefix in forbidden):
+            forbidden_hits.append(path)
+        elif not any(path_matches_scope(path, prefix) for prefix in allowed):
+            violations.append(path)
+    return forbidden_hits, violations
+
+
+def require_scope_membership(
+    paths: list[str], allow_prefixes: list[str], forbid_prefixes: list[str], *,
+    validate_paths: bool = True,
+) -> None:
+    forbidden_hits, violations = scope_membership(
+        paths, allow_prefixes, forbid_prefixes, validate_paths=validate_paths
+    )
+    if forbidden_hits or violations:
+        details: list[str] = []
+        if forbidden_hits:
+            details.append("forbidden paths touched:\n" + "".join(
+                f"  {path}\n" for path in forbidden_hits
+            ).rstrip())
+        if violations:
+            details.append("disallowed paths:\n" + "".join(
+                f"  {path}\n" for path in violations
+            ).rstrip())
+        raise ScopeMembershipError("\n".join(details))
 
 
 def _git(worktree: Path, *args: str) -> bytes:
@@ -131,12 +201,41 @@ def working_paths(worktree: Path) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--worktree", required=True)
-    parser.add_argument("--base", required=True)
+    parser.add_argument("--worktree")
+    parser.add_argument("--base")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--include-working", action="store_true")
     parser.add_argument("--format", choices=("json", "nul"), default="json")
+    parser.add_argument("--check-scope", action="store_true")
+    parser.add_argument("--paths-nul")
+    parser.add_argument("--allow-prefix", action="append", default=[])
+    parser.add_argument("--forbid-prefix", action="append", default=[])
     args = parser.parse_args()
+    if args.check_scope:
+        if not args.paths_nul:
+            parser.error("--check-scope requires --paths-nul")
+        try:
+            raw_paths = Path(args.paths_nul).read_bytes().split(b"\0")
+            if raw_paths and raw_paths[-1] == b"":
+                raw_paths.pop()
+            paths = [_decode_path(raw) for raw in raw_paths]
+            # Git supplies NUL-delimited repository paths here. Admission keeps
+            # unusual Git names representable so it can report every violation;
+            # declared prefixes were validated above. Packet consumers use the
+            # default path validation for untrusted changedFiles strings.
+            require_scope_membership(
+                paths, args.allow_prefix, args.forbid_prefix, validate_paths=False
+            )
+        except (OSError, UnicodeError, ScopeMembershipError) as exc:
+            print(f"scope check failed; {exc}", file=sys.stderr)
+            return 2
+        if paths:
+            print(f"scope check: {len(paths)} changed path(s), all allowed")
+        else:
+            print("scope check: no changed files")
+        return 0
+    if not args.worktree or not args.base:
+        parser.error("--worktree and --base are required")
     worktree = Path(args.worktree)
     try:
         paths = committed_paths(worktree, args.base, args.head)

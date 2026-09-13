@@ -1852,7 +1852,105 @@ def validate_accepted_publication(args: argparse.Namespace) -> None:
                 raise LifecycleError(f"retained accepted candidate {field} mismatch")
         validate_candidate_artifacts(candidate)
 
+    continuation = lease.get("continuationAuthorization")
     authority = lease.get("recoveryAuthorization")
+    if isinstance(continuation, dict):
+        if isinstance(authority, dict):
+            raise LifecycleError("accepted publication has conflicting successor authorities")
+        authority_path = Path(str(continuation.get("authorityPath", "")))
+        authority_sha = str(continuation.get("authoritySha256", ""))
+        if (
+            not authority_path.is_file()
+            or not authority_sha
+            or sha256(authority_path) != authority_sha
+            or str(continuation.get("authorizationId", "")) != authority_sha
+        ):
+            raise LifecycleError("continuation authority evidence is missing or changed")
+        recorded = read_object(authority_path)
+        if any(continuation.get(key) != value for key, value in recorded.items()):
+            raise LifecycleError("recorded continuation authorization changed")
+        if continuation.get("state") != "claimed":
+            raise LifecycleError("accepted continuation authority is not consumed")
+        for field, value in (
+            ("taskId", args.task),
+            ("executionRunId", args.run),
+            ("branch", args.branch),
+            ("campaignBinding", args.campaign),
+            ("candidateBaseSha", args.base),
+        ):
+            if str(continuation.get(field, "")) != value:
+                raise LifecycleError(f"accepted continuation {field} mismatch")
+        if os.path.realpath(str(continuation.get("worktree", ""))) != os.path.realpath(
+            args.worktree
+        ):
+            raise LifecycleError("accepted continuation worktree mismatch")
+        candidate_source = str(continuation.get("candidateSourceSha", ""))
+        if not candidate_source or not git_is_ancestor(
+            Path(args.repo_root), candidate_source, args.head
+        ):
+            raise LifecycleError("accepted continuation head lost its authorized source")
+
+        owner = str(continuation.get("reservationOwner", ""))
+        try:
+            generation = int(continuation.get("reservationGeneration", 0) or 0)
+            attempt_generation = int(
+                (lease.get("attemptLifecycle") or {}).get("reservationGeneration", 0) or 0
+            )
+            lease_generation = int(
+                lease.get("reservationGeneration")
+                or lease.get("lastReservationGeneration")
+                or 0
+            )
+            allowance = (
+                int(continuation.get("additionalWorkerAttemptsAuthorized", 0) or 0),
+                int(continuation.get("additionalWorkerAttemptsClaimed", 0) or 0),
+                int(continuation.get("additionalWorkerAttemptsRemaining", -1)),
+            )
+            predecessor_retry = int(
+                (continuation.get("predecessorAccounting") or {}).get("retryCount", -1)
+            )
+            predecessor_max = int(
+                (continuation.get("predecessorAccounting") or {}).get("maxRetries", -1)
+            )
+            lease_retry = int(lease.get("retryCount", -2))
+            lease_max = int(lease.get("maxRetries", -2))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise LifecycleError("accepted continuation has malformed numeric identity") from exc
+        reservation_run = str(continuation.get("reservationRunId", ""))
+        if not owner or generation < 1 or not reservation_run:
+            raise LifecycleError("accepted continuation lacks scheduler identity")
+        attempt = lease.get("attemptLifecycle")
+        if not isinstance(attempt, dict):
+            raise LifecycleError("accepted continuation lost its scheduler attempt binding")
+        if (
+            attempt.get("taskId") != args.task
+            or attempt.get("runId") != args.run
+            or attempt.get("reservationOwner") != owner
+            or attempt_generation != generation
+            or attempt.get("reservationRunId") != reservation_run
+            or attempt.get("campaignBinding") != args.campaign
+            or attempt.get("continuationAuthorizationId")
+            != continuation.get("authorizationId")
+            or attempt.get("state") not in {"started", "terminal"}
+        ):
+            raise LifecycleError("accepted continuation scheduler attempt identity mismatch")
+        lease_owner = str(lease.get("reservationOwner") or lease.get("lastReservationOwner") or "")
+        if lease_owner != owner or lease_generation != generation:
+            raise LifecycleError("accepted continuation scheduler generation mismatch")
+        if allowance != (1, 1, 0):
+            raise LifecycleError("accepted continuation allowance is not exactly consumed")
+        predecessor = continuation.get("predecessorAccounting")
+        if not isinstance(predecessor, dict) or (
+            predecessor_retry != lease_retry
+            or predecessor_max != lease_max
+            or bool(predecessor.get("productPassStarted"))
+            != (lease.get("productPassStarted") is True)
+            or str(predecessor.get("productPassStartedRunId", ""))
+            != str(lease.get("productPassStartedRunId", "") or "")
+        ):
+            raise LifecycleError("accepted continuation predecessor accounting mismatch")
+        print("continuation-claimed")
+        return
     if not isinstance(authority, dict):
         print("ordinary-retained" if isinstance(candidate, dict) else "ordinary")
         return

@@ -454,7 +454,15 @@ elif [[ "${#authorized_repair[@]}" -ne 7 && -z "$accepted_checkpoint_mode" ]]; t
 fi
 run_dir="$(singular_run_dir "$run_id")"
 mkdir -p "$run_dir"
-worktree="${authorized_repair_worktree:-$SINGULAR_WORKTREES_DIR/$task_id}"
+if [[ -n "$accepted_checkpoint_mode" ]]; then
+  # Publication provenance is independent of unspent execution authority. A
+  # consumed continuation is claimed, so it is intentionally absent from the
+  # reserved-only execution selector above; recognition has nevertheless
+  # checked this retained packet workspace against the lease already.
+  worktree="$accepted_checkpoint_workspace"
+else
+  worktree="${authorized_repair_worktree:-$SINGULAR_WORKTREES_DIR/$task_id}"
+fi
 # Product repair and infrastructure recovery are intentionally separate budget
 # domains.  `Risk tier:` is optional task metadata, so existing task files are
 # ordinary-risk by default.  An operator may override it for one dispatch with
@@ -1193,14 +1201,19 @@ PY
   singular_json_schema_check "$checkpoint_packet_json" "$SINGULAR_PACKET_SCHEMA" \
     "accepted publication packet" >/dev/null 2>&1 \
     || l1_evidence_resume_refuse "checkpoint-packet-schema-invalid"
-  python3 - "$accepted_packet" "$task_json" <<'PY' >/dev/null 2>&1 \
+  python3 - "$SCRIPT_DIR" "$accepted_packet" "$task_json" <<'PY' >/dev/null 2>&1 \
     || l1_evidence_resume_refuse "checkpoint-task-ownership-mismatch"
 import json
 import sys
-packet = json.load(open(sys.argv[1], encoding="utf-8"))
-task = json.loads(sys.argv[2])
+sys.path.insert(0, sys.argv[1])
+from git_changes import require_scope_membership
+
+packet = json.load(open(sys.argv[2], encoding="utf-8"))
+task = json.loads(sys.argv[3])
 assert packet.get("ownedFiles") == task.get("ownedFiles")
-assert set(packet.get("changedFiles", [])) <= set(task.get("ownedFiles", []))
+changed = packet.get("changedFiles")
+assert isinstance(changed, list) and all(isinstance(path, str) for path in changed)
+require_scope_membership(changed, task.get("ownedFiles", []), task.get("forbiddenFiles", []))
 PY
   audit_schema="$(singular_json_field "$accepted_audit" schema 2>/dev/null || true)"
   if [[ "$audit_schema" == "singular.orchestration.audit-verdict.v1" ]]; then
