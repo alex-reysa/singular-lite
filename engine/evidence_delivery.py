@@ -192,10 +192,112 @@ def client(args):
     sys.stdout.buffer.write(base64.b64decode(response['data']))
 
 
-RESTRICTED_ADAPTERS = {
-    'claude-run.sh', 'gemini-run.sh', 'cursor-run.sh', 'opencode-run.sh',
-    'openrouter-run.sh', 'grok-run.sh',
-}
+def delivery_engine_dir():
+    """Lexical engine/ directory of this file.
+
+    Same rule as verify_campaign's lib.sh probe: keep the path spelling the
+    caller used (a symlink farm of engine/ is valid) but refuse a lexical
+    sibling that is not physically this source file.
+    """
+    lexical_self = Path(os.path.abspath(__file__))
+    try:
+        physical_self = Path(__file__).resolve(strict=True)
+        if (
+            lexical_self.is_file()
+            and physical_self.is_file()
+            and lexical_self.samefile(physical_self)
+        ):
+            return lexical_self.parent
+    except OSError:
+        pass
+    raise ValueError(
+        'host evidence delivery requires an OS-enforced read-only adapter; '
+        'engine directory is not the physical sibling of evidence_delivery.py'
+    )
+
+
+def _adapter_table(engine_dir):
+    """adapter basename -> provider spec entry, from engine_dir/providers.json."""
+    path = Path(engine_dir) / 'providers.json'
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    providers = data.get('providers') if isinstance(data, dict) else None
+    if not isinstance(providers, dict):
+        return {}
+    table = {}
+    for entry in providers.values():
+        if not isinstance(entry, dict):
+            continue
+        adapter = entry.get('adapter')
+        if isinstance(adapter, str) and adapter:
+            table[adapter] = entry
+    return table
+
+
+def admit_read_only_adapter(command, engine_dir, system):
+    """Admit a review-evidence child when it is the engine's own OS-enforced adapter.
+
+    Unknown names (fixture runners) are allowed. A known adapter must be the
+    engine file itself -- never a wrapper or copy -- and must declare
+    readOnlyEnforcement for `any` or the current platform. Absolute-path
+    mechanisms must exist and be executable.
+    """
+    if not command:
+        raise ValueError(
+            'host evidence delivery requires an OS-enforced read-only adapter; '
+            'missing runner'
+        )
+    presented = Path(command[0]).name
+    resolved = Path(command[0]).resolve(strict=False).name
+    adapters = _adapter_table(engine_dir)
+    adapter_name = presented if presented in adapters else (
+        resolved if resolved in adapters else None
+    )
+    if adapter_name is None:
+        return
+    expected = (Path(engine_dir) / adapter_name).resolve()
+    actual = Path(command[0]).resolve(strict=False)
+    if actual != expected:
+        raise ValueError(
+            'host evidence delivery requires an OS-enforced read-only adapter; '
+            'use the engine file ' + str(expected) + ', not a copy or wrapper'
+        )
+    entry = adapters[adapter_name]
+    enforcement = entry.get('readOnlyEnforcement') or {}
+    if not isinstance(enforcement, dict):
+        enforcement = {}
+    mechanism = None
+    if isinstance(enforcement.get('any'), str) and enforcement.get('any'):
+        mechanism = enforcement['any']
+    elif isinstance(enforcement.get(system), str) and enforcement.get(system):
+        mechanism = enforcement[system]
+    if not mechanism:
+        raise ValueError(
+            'host evidence delivery requires an OS-enforced read-only adapter; '
+            + adapter_name
+            + ' has no declared OS enforcement on '
+            + str(system)
+            + '; use codex-run.sh'
+        )
+    if mechanism.startswith('/'):
+        tool = Path(mechanism)
+        if not tool.is_file() or not os.access(tool, os.X_OK):
+            raise ValueError(
+                'host evidence delivery requires an OS-enforced read-only adapter; '
+                + adapter_name
+                + ' declares '
+                + mechanism
+                + ' but it is missing or not executable; use codex-run.sh'
+            )
+
+
+def _provider_launch_env(require_os_readonly=False):
+    env = runner_child_environment()
+    if require_os_readonly:
+        env['SINGULAR_RUNNER_REQUIRE_OS_READONLY'] = '1'
+    return env
 
 
 def publish_bytes(data, path):
@@ -414,15 +516,13 @@ def run(args):
     if ledger is not None:
         ledger.parent.mkdir(parents=True, exist_ok=True)
 
-    # Validate the actual adapter, never an opaque shell wrapper. Resolve
-    # symlinks as well as the presented argv name so aliases cannot erase the
-    # isolation boundary.
-    presented = Path(command[0]).name
-    resolved = Path(command[0]).resolve(strict=False).name
-    if evidence is not None and ({presented, resolved} & RESTRICTED_ADAPTERS):
-        raise ValueError(
-            'host evidence delivery requires an OS-enforced read-only adapter; use codex-run.sh'
-        )
+    # Validate the actual adapter by declared OS-enforced capability, never by
+    # a name blocklist a wrapper could dodge. Unknown fixture names stay
+    # allowed; a known adapter must be the engine's own file.
+    require_os_readonly = False
+    if evidence is not None:
+        admit_read_only_adapter(command, delivery_engine_dir(), sys.platform)
+        require_os_readonly = True
     executable = command[0] if os.path.sep in command[0] else shutil.which(command[0])
     if not executable or not Path(executable).is_file() or not os.access(executable, os.X_OK):
         raise ValueError('actual runner is missing or not executable: ' + command[0])
@@ -594,10 +694,10 @@ def run(args):
         command[prompt_index] = str(prompt_path)
 
     if evidence is None:
-        return subprocess.call(command, env=runner_child_environment())
+        return subprocess.call(command, env=_provider_launch_env(require_os_readonly))
 
     with tempfile.TemporaryDirectory(prefix='singular-delivery-') as temporary:
-        env = runner_child_environment()
+        env = _provider_launch_env(require_os_readonly)
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         env['SINGULAR_EVIDENCE_SOCKET'] = str(Path(temporary) / 'broker.sock')
         env['SINGULAR_EVIDENCE_CAPABILITY'] = secrets.token_hex(32)

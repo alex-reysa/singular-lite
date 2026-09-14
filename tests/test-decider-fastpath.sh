@@ -77,6 +77,12 @@ with_fixture() {
   export SINGULAR_WORKTREES_DIR="$SINGULAR_ROOT/.worktrees"
   export SINGULAR_TARGET_BRANCH="target"
   export SINGULAR_ENGINE_HOME="$ENGINE_HOME"
+  # This fixture pins the risk-tier repair semantics (normal=1, high=2).
+  # The review policy bounds repairs to maxReviewRounds-1 and defaults to
+  # two rounds; keep the high-risk two-repair ceiling reachable here so the
+  # cases below keep asserting the tier table. Policy behaviour itself is
+  # pinned by tests/test-review-policy.sh and test-first-audit-correction.sh.
+  export SINGULAR_REVIEW_MAX_ROUNDS=3
   unset SINGULAR_MODULES SINGULAR_WORKER_RED_LOG SINGULAR_WORKER_CONTRACT_EXTRA SINGULAR_RUNNER \
     SINGULAR_PREFLIGHT_REQUIRE_ACCEPTANCE SINGULAR_ATTEMPT_TASK_ID SINGULAR_ATTEMPT_STARTED_AT \
     SINGULAR_DECIDER_FAST SINGULAR_WORKER_INFRA_MAX SINGULAR_AUDIT_INFRA_MAX \

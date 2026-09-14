@@ -116,7 +116,8 @@ singular_ctx_critic_recheck_run() {
   local session_meta; session_meta="$("${_critic_pfx}session_path" "$node")"
   # DEFAULT runner (cross-provider independence): a module-routed planner still gets
   # a default-runner critic, and the recheck resumes only that session.
-  local runner="${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}"
+  local runner
+  runner="$(singular_role_runner critic "${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}")" || return 78
   local runner_basename; runner_basename="$(basename "$runner")"
   # Accepted-diff lineage head = the current worktree HEAD; the decider's
   # head-rewritten gate keys the stored headShaAtCreate against it.

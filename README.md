@@ -58,6 +58,14 @@ two questions the engine would use if it could, so a gate may optionally write a
   that as `inconclusive-infrastructure` instead of spending a task's retry
   budget asking a model to fix code that was never broken.
 
+Review rounds are independently bounded. `reviewPolicy` in
+`singular.config.json` (defaults: two rounds, P0/P1 blocking, classification
+required) plus `SINGULAR_REVIEW_*` env overrides decide when a `needs-fix`
+verdict is still blocking, when P2/P3 findings become backlog, and when the
+drive must park instead of spending another product repair. See
+[`docs/review-policy.md`](docs/review-policy.md) and
+`singular review-policy --help`.
+
 `singular init` scaffolds `docs/orchestration/gates/gate.sh` as a starting point.
 The sidecar is never required — including on `schemaVersion: v2`. Without one
 the engine falls back to the exit code plus a deliberately narrow set of log
@@ -316,8 +324,21 @@ All per-repo variation lives in the consumer repo, never in engine files:
 - **`singular.config.json`** — declarative: `targetBranch`, `gateCommand`, `runner`,
   `areas{}`, `areaPrefix`, `prewarm`, `worktreeCopyPaths[]`, `modules[]`,
   `identity{}`, `env{}`, `provisionFiles[]`, `envAllowlist[]`,
-  `capabilityProfiles{}`, `roleProfiles{}`, `evidence{}`, `bootstrap{}`,
+  `capabilityProfiles{}`, `roleProfiles{}`, `roleRunners{}`, `evidence{}`, `bootstrap{}`,
   `resources{}`, `promoter`, `controlState{}`, and `legacyCompatibility{}`.
+
+### Per-role runners and review isolation
+
+`roleRunners` pins an adapter per role (`implementer`, `auditor`, `planner`,
+`critic`, `decider`, `supervisor`, `integrator`). A bare name resolves inside
+`engine/`; a relative path is consumer-root relative. Review-evidence delivery
+admits an adapter only when `engine/providers.json` declares
+`readOnlyEnforcement` for this host **and** the argv is the engine's own file —
+copies and wrappers are refused. On macOS, `claude-run.sh` at `--level readonly`
+wraps the CLI in `/usr/bin/sandbox-exec` (deny `file-write*` under the worktree,
+repo root, and state dir). Codex uses its native OS sandbox on every platform.
+Grok has no declared read-only enforcement and is an implementer (l2) runner
+only. See `docs/providers.md`.
 
 **`promoter` is the one most consumers need and miss.** It names the script that
 decides when a DAG node's gate may be promoted — a bare name resolves to

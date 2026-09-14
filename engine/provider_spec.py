@@ -50,6 +50,11 @@ INVENTORIES = {
 }
 INVENTORIES_WITH_ARGV = {INVENTORY_LISTING, INVENTORY_COMMAND}
 
+# Platform keys for declared OS-enforced read-only. `any` matches every host;
+# `darwin` / `linux` are sys.platform values. Values name the mechanism or an
+# absolute tool path the adapter actually applies.
+READ_ONLY_ENFORCEMENT_KEYS = frozenset({"any", "darwin", "linux"})
+
 _CACHE: dict[str, dict[str, Any]] = {}
 
 
@@ -172,6 +177,21 @@ def _validate(data: Any, source: str) -> dict[str, Any]:
             isinstance(pin.get("evidence"), str) and pin["evidence"],
             f"{label}.updatePin.evidence must say what pins it, or why nothing does",
         )
+        enforcement = entry.get("readOnlyEnforcement", {})
+        _require(
+            isinstance(enforcement, dict),
+            f"{label}.readOnlyEnforcement must be an object",
+        )
+        for key, value in enforcement.items():
+            _require(
+                key in READ_ONLY_ENFORCEMENT_KEYS,
+                f"{label}.readOnlyEnforcement keys must be one of "
+                f"{sorted(READ_ONLY_ENFORCEMENT_KEYS)}",
+            )
+            _require(
+                isinstance(value, str) and value and value == value.strip(),
+                f"{label}.readOnlyEnforcement.{key} must be a non-empty string",
+            )
     adapters = [entry["adapter"] for entry in providers.values()]
     _require(
         len(set(adapters)) == len(adapters),
@@ -277,6 +297,16 @@ def update_pin(
     return tuple(pin.get("args", [])), dict(pin.get("env", {}))
 
 
+def read_only_enforcement(
+    provider: str, path: Path | str | None = None
+) -> dict[str, str]:
+    """Declared OS-enforced read-only mechanism, keyed by platform (`any`/`darwin`/`linux`)."""
+    raw = entry(provider, path).get("readOnlyEnforcement") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
+
+
 def strict_isolation_providers(path: Path | str | None = None) -> set[str]:
     """Providers with a proven built-in isolation mode.
 
@@ -305,6 +335,8 @@ def shell_pairs(provider: str, path: Path | str | None = None) -> list[tuple[str
     ]
     pairs += [("updateArg", value) for value in pin_args]
     pairs += [("updateEnv", f"{name}={value}") for name, value in pin_env.items()]
+    for key, value in read_only_enforcement(provider, path).items():
+        pairs.append((f"readOnlyEnforcement.{key}", value))
     return pairs
 
 

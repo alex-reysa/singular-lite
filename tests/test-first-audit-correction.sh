@@ -94,6 +94,7 @@ FIXTURE_COUNTERS=""
 FIXTURE_RUNNER=""
 FIXTURE_MODE=""
 CASE_MAX_RETRIES="1"
+REVIEW_MAX_ROUNDS="3"
 SEED_HEAD=""
 CAMPAIGN_BINDING=""
 ENGINE_FINGERPRINT=""
@@ -214,7 +215,8 @@ PY
       grep -q 'FINDING_ALPHA: replace the seeded implementation' "$prompt" || exit 100
       if [[ "${FIRST_AUDIT_MODE:?}" == "accept" \
           || "${FIRST_AUDIT_MODE:?}" == "required-fixes" \
-          || "${FIRST_AUDIT_MODE:?}" == "moved-repeat" ]]; then
+          || "${FIRST_AUDIT_MODE:?}" == "moved-repeat" \
+          || "${FIRST_AUDIT_MODE:?}" == "p1-then-accept" ]]; then
         printf 'package widget\n// corrected after actionable audit feedback\n' \
           >"$worktree/internal/widget/parser.go"
       fi
@@ -304,6 +306,30 @@ elif mode == "moved-repeat":
             "`FINDING_ALPHA: replace the seeded implementation`",
             " finding_alpha: replace the seeded implementation ",
         ]
+classified = []
+if mode == "p2-only":
+    verdict = "needs-fix"
+    findings = ["P2 leftover comment", "P2 unused helper"]
+    required_fixes = list(findings)
+    classified = [
+        {"id": "p2-comment", "severity": "P2", "summary": "P2 leftover comment"},
+        {"id": "p2-helper", "severity": "P2", "summary": "P2 unused helper"},
+    ]
+elif mode == "p1-then-accept":
+    if call > 1:
+        verdict = "accepted"
+        findings = []
+        required_fixes = []
+        classified = []
+    else:
+        classified = [{
+            "id": "p1-seeded",
+            "severity": "P1",
+            "summary": canonical,
+            "trigger": "seeded implementation remains",
+            "impact": "acceptance criteria unmet",
+            "requirement": "replace the seeded implementation",
+        }]
 record = {
     "schema": "singular.orchestration.audit-verdict.v1",
     "taskId": "TASK-0001",
@@ -323,6 +349,8 @@ record = {
     "requiredFixes": required_fixes,
     "rationale": "fresh accepted audit" if verdict == "accepted" else "fresh audit feedback",
 }
+if classified:
+    record["classifiedFindings"] = classified
 with open(os.environ["FIRST_AUDIT_OUTPUT"], "w", encoding="utf-8") as handle:
     json.dump(record, handle)
     handle.write("\n")
@@ -366,12 +394,14 @@ run_engine() {
       SINGULAR_AUDIT_INFRA_MAX=0 \
       SINGULAR_MAX_RETRIES="$CASE_MAX_RETRIES" \
       SINGULAR_DECIDER_FAST=1 \
+      SINGULAR_REVIEW_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-3}" \
       "$@"
   )
 }
 
 make_fixture() {
   local name="$1" mode="$2" max_retries="$3" risk_tier="$4"
+  REVIEW_MAX_ROUNDS="${5:-3}"
   FIXTURE_ROOT="$scratch/$name/repo"
   FIXTURE_COUNTERS="$scratch/$name/counters"
   FIXTURE_RUNNER="$scratch/$name/runner.sh"
@@ -827,6 +857,101 @@ test_no_output_stays_fail_closed() {
   echo "ok: frozen rc-zero no-output remains fail-closed without audit or repair spend"
 }
 
+test_p2_only_accepted_without_repair() {
+  local name=p2-only events
+  make_fixture "$name" p2-only 1 normal 2
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "1" "$name worker calls"
+  assert_eq "$(calls auditor)" "1" "$name auditor calls"
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.task_accepted"' "$name accepted after policy"
+  assert_contains "$events" '"type":"review.policy_applied"' "$name policy applied"
+  assert_contains "$events" '"effectiveVerdict":"accepted"' "$name effective accepted"
+  assert_eq "$(grep -c . "$FIXTURE_ROOT/.singular-state/review-policy/backlog.ndjson")" "2" \
+    "$name backlog lines"
+  assert_not_contains "$events" '"type":"l1.product_repair_budget_consumed"' \
+    "$name did not spend product repair"
+  assert_attempt_count 1
+  finish_and_prove_no_redispatch "$name" 1 1
+  assert_terminal_contract completed "" accepted 0
+  echo "ok: P2-only needs-fix is accepted as backlog without a correction charge"
+}
+
+test_p1_then_accept() {
+  local name=p1-then-accept events ledger
+  make_fixture "$name" p1-then-accept 1 normal 2
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "2" "$name worker calls"
+  assert_eq "$(calls auditor)" "2" "$name auditor calls"
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_eq "$(event_count review.policy_applied)" "2" "$name policy applied twice"
+  assert_contains "$events" '"type":"l1.task_accepted"' "$name accepted after P1 fix"
+  ledger="$(cat "$FIXTURE_ROOT/.singular-state/review-policy/ledger.json")"
+  assert_eq "$("$PYTHON_BIN" -c 'import json,sys; d=json.loads(sys.stdin.read()); e=d["logicalChanges"]["TASK-0001"]; print(len(e["rounds"]), e["status"])' <<<"$ledger")" \
+    "2 accepted" "$name ledger two rounds accepted"
+  assert_attempt_count 2
+  finish_and_prove_no_redispatch "$name" 2 2
+  assert_terminal_contract completed "" accepted 1
+  echo "ok: supported P1 charges one correction and accepts on the follow-up round"
+}
+
+test_rounds_exhausted_without_auditor() {
+  local name=rounds-exhausted events
+  make_fixture "$name" accept 1 normal 2
+  cat >"$scratch/$name/backfill.json" <<'JSON'
+{
+  "logicalChange": "TASK-0001",
+  "rounds": [
+    {
+      "round": 1,
+      "kind": "initial",
+      "taskId": "TASK-0001",
+      "runId": "historical-1",
+      "attempt": 1,
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "originalVerdict": "needs-fix",
+      "effectiveVerdict": "needs-fix",
+      "blocking": ["f-hist-1"],
+      "backlog": [],
+      "downgraded": [],
+      "unclassifiedCount": 0
+    },
+    {
+      "round": 2,
+      "kind": "followup",
+      "taskId": "TASK-0001",
+      "runId": "historical-2",
+      "attempt": 2,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "originalVerdict": "needs-fix",
+      "effectiveVerdict": "needs-fix",
+      "blocking": ["f-hist-1"],
+      "backlog": [],
+      "downgraded": [],
+      "unclassifiedCount": 0
+    }
+  ]
+}
+JSON
+  SINGULAR_REVIEW_MAX_ROUNDS=2 \
+    "$PYTHON_BIN" "$ENGINE_HOME/engine/review_policy.py" \
+    --config "$FIXTURE_ROOT/singular.config.json" \
+    --state-dir "$FIXTURE_ROOT/.singular-state" \
+    backfill --file "$scratch/$name/backfill.json" >/dev/null \
+    || fail "$name backfill failed"
+  reconcile "$name" dispatch
+  assert_eq "$(calls worker)" "1" "$name worker calls"
+  assert_eq "$(calls auditor)" "0" "$name auditor not called"
+  events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"review.rounds_exhausted"' "$name exhausted event"
+  assert_not_contains "$events" '"type":"l1.product_repair_budget_consumed"' \
+    "$name did not spend product repair"
+  assert_attempt_count 1
+  finish_and_prove_no_redispatch "$name" 1 0
+  assert_terminal_contract blocked review-rounds-exhausted escalate-parked 0
+  echo "ok: pre-filled review rounds exhaust before auditor launch"
+}
+
 echo "NOTE: deterministic fixture provider; this test is not live unattended-provider evidence"
 case "${FIRST_AUDIT_CASE:-all}" in
   identity) test_feedback_identity_contract ;;
@@ -837,6 +962,9 @@ case "${FIRST_AUDIT_CASE:-all}" in
   max-zero) test_max_zero_is_terminal ;;
   repeated) test_repeated_findings_stop_with_budget_left ;;
   no-output) test_no_output_stays_fail_closed ;;
+  p2-only) test_p2_only_accepted_without_repair ;;
+  p1-then-accept) test_p1_then_accept ;;
+  rounds-exhausted) test_rounds_exhausted_without_auditor ;;
   all)
     test_feedback_identity_contract
     test_corrected_after_fresh_audit
@@ -846,6 +974,9 @@ case "${FIRST_AUDIT_CASE:-all}" in
     test_max_zero_is_terminal
     test_repeated_findings_stop_with_budget_left
     test_no_output_stays_fail_closed
+    test_p2_only_accepted_without_repair
+    test_p1_then_accept
+    test_rounds_exhausted_without_auditor
     ;;
   *) fail "unknown FIRST_AUDIT_CASE=${FIRST_AUDIT_CASE}" ;;
 esac

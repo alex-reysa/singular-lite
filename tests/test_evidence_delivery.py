@@ -71,19 +71,27 @@ assert any(p.returncode for p in results)
 assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
 '''.replace('4115-1', str(len(data))))
     base = host + ['--manifest', str(manifest), '--ledger', str(ledger), '--']
-    result = fixture_run(base + [sys.executable, str(child), str(root / 'engine/evidence_delivery.py'), str(manifest)], capture_output=True)
-    assert result.returncode == 0, result.stderr.decode()
-    with sqlite3.connect(ledger) as db:
-        assert db.execute('select sum(bytes) from deliveries').fetchone()[0] == len(data) * 2
-    # Relocation and refreshed manifest preserve cumulative accounting.
-    moved = t / 'moved'
-    shutil.copytree(run, moved)
-    doc['createdAt'] = 'new timestamp'
-    (moved / manifest.name).write_text(json.dumps(doc))
-    probe = host + ['--manifest', str(moved / manifest.name), '--ledger', str(ledger), '--',
-                    sys.executable, str(root / 'engine/evidence_delivery.py'), 'get', str(moved / manifest.name), 'packet.json']
-    result = fixture_run(probe, capture_output=True)
-    assert result.returncode and b'budget exhausted' in result.stderr
+    sandbox_apply = subprocess.run(
+        ['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)', '/usr/bin/true'],
+        capture_output=True,
+    ) if sys.platform == 'darwin' and os.access('/usr/bin/sandbox-exec', os.X_OK) else None
+    sandbox_apply_ok = bool(sandbox_apply and sandbox_apply.returncode == 0)
+    if sandbox_apply_ok:
+        result = fixture_run(base + [sys.executable, str(child), str(root / 'engine/evidence_delivery.py'), str(manifest)], capture_output=True)
+        assert result.returncode == 0, result.stderr.decode()
+        with sqlite3.connect(ledger) as db:
+            assert db.execute('select sum(bytes) from deliveries').fetchone()[0] == len(data) * 2
+        # Relocation and refreshed manifest preserve cumulative accounting.
+        moved = t / 'moved'
+        shutil.copytree(run, moved)
+        doc['createdAt'] = 'new timestamp'
+        (moved / manifest.name).write_text(json.dumps(doc))
+        probe = host + ['--manifest', str(moved / manifest.name), '--ledger', str(ledger), '--',
+                        sys.executable, str(root / 'engine/evidence_delivery.py'), 'get', str(moved / manifest.name), 'packet.json']
+        result = fixture_run(probe, capture_output=True)
+        assert result.returncode and b'budget exhausted' in result.stderr
+    else:
+        print('skip nested sandbox-exec broker proof: sandbox_apply not permitted')
     # Required source invalidity stops before launching child or charging it.
     (run / 'packet.json').write_bytes(b'tampered')
     result = fixture_run(host + ['--manifest', str(manifest), '--ledger', str(ledger), '--required', 'packet.json', '--', '/usr/bin/true'], capture_output=True)
@@ -146,6 +154,37 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
     result = fixture_run(host + ['--manifest', str(manifest), '--ledger', str(ledger), '--',
                                 '/does-not-exist/claude-run.sh'], capture_output=True)
     assert result.returncode and b'OS-enforced' in result.stderr
+
+    # Direct unit checks of admit_read_only_adapter (capability, not name).
+    sys.path.insert(0, str(root / 'engine'))
+    import evidence_delivery as delivery
+    engine_dir = root / 'engine'
+    sandbox_exec = Path('/usr/bin/sandbox-exec')
+    delivery.admit_read_only_adapter(['/tmp/fixture-runner.sh'], engine_dir, 'darwin')
+    copy_dir = t / 'copied-adapter'
+    copy_dir.mkdir()
+    shutil.copy2(engine_dir / 'claude-run.sh', copy_dir / 'claude-run.sh')
+    os.chmod(copy_dir / 'claude-run.sh', os.stat(copy_dir / 'claude-run.sh').st_mode | stat.S_IXUSR)
+    try:
+        delivery.admit_read_only_adapter([str(copy_dir / 'claude-run.sh')], engine_dir, 'darwin')
+        raise AssertionError('copy of claude-run.sh must be rejected')
+    except ValueError as exc:
+        assert 'OS-enforced read-only adapter' in str(exc)
+    claude_adapter = str(engine_dir / 'claude-run.sh')
+    if sandbox_exec.is_file() and os.access(sandbox_exec, os.X_OK):
+        delivery.admit_read_only_adapter([claude_adapter], engine_dir, 'darwin')
+    try:
+        delivery.admit_read_only_adapter([claude_adapter], engine_dir, 'linux')
+        raise AssertionError('claude-run.sh must be rejected on linux')
+    except ValueError as exc:
+        assert 'OS-enforced read-only adapter' in str(exc)
+    try:
+        delivery.admit_read_only_adapter([str(engine_dir / 'grok-run.sh')], engine_dir, 'darwin')
+        raise AssertionError('grok-run.sh must be rejected (no enforcement declared)')
+    except ValueError as exc:
+        assert 'OS-enforced read-only adapter' in str(exc)
+    delivery.admit_read_only_adapter([str(engine_dir / 'codex-run.sh')], engine_dir, 'darwin')
+    delivery.admit_read_only_adapter([str(engine_dir / 'codex-run.sh')], engine_dir, 'linux')
 
 # Exercise the real public campaign producer and verifier through the /tmp
 # spelling that macOS physically aliases to /private/tmp. The selected spelling

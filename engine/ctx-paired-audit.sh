@@ -87,7 +87,8 @@ singular_ctx_paired_audit_record() {
   local base_prompt="$SINGULAR_ORCH_DIR/prompts/auditor.md"
   local raw="$run_dir/paired-audit-raw.json"
   local record="$run_dir/paired-audit.json"
-  local runner="${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}"
+  local runner
+  runner="$(singular_role_runner auditor "${SINGULAR_RUNNER:-$SINGULAR_ENGINE_DIR/codex-run.sh}")" || return 78
 
   mkdir -p "$run_dir"
 

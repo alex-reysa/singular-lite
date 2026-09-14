@@ -111,6 +111,21 @@ if isinstance(legacy_compatibility, dict) and isinstance(
         "1" if legacy_compatibility["unboundWaivers"] else "0",
     )
 setv("SINGULAR_PROMOTER", cfg.get("promoter"))
+role_runners = cfg.get("roleRunners")
+if isinstance(role_runners, dict):
+    # Per-role runner selection (0.22.0): {"auditor": "claude-run.sh",
+    # "implementer": "grok-run.sh"}. A bare name resolves inside the engine
+    # dir at use time (singular_role_runner); unknown roles are ignored here
+    # and rejected by the consumer that names its role.
+    for role, runner in role_runners.items():
+        if isinstance(role, str) and re.fullmatch(r"[a-z]+", role) and isinstance(runner, str) and runner:
+            setv("SINGULAR_ROLE_RUNNER_" + role.upper(), runner)
+review_policy = cfg.get("reviewPolicy")
+if isinstance(review_policy, dict):
+    # Programmable review policy (0.22.0): projected as one canonical JSON
+    # value so the campaign manifest pins it; engine/review_policy.py reads
+    # it and applies SINGULAR_REVIEW_* env overrides on top.
+    setv("SINGULAR_REVIEW_POLICY_JSON", json.dumps(review_policy, separators=(",", ":"), sort_keys=True))
 ident = cfg.get("identity") or {}
 l0 = ident.get("l0") or {}; l1 = ident.get("l1") or {}
 setv("SINGULAR_GIT_L0_NAME", l0.get("name")); setv("SINGULAR_GIT_L0_EMAIL", l0.get("email"))
@@ -2378,6 +2393,34 @@ PY
 singular_select_l2_runner() {
   local task_file="$1" default_runner="$2" alt_runner="${3:-}"
   printf '%s\n' "$default_runner"
+}
+
+# Per-role runner resolution (0.22.0). Roles: implementer, auditor, planner,
+# critic, decider, supervisor, integrator. SINGULAR_ROLE_RUNNER_<ROLE> (from
+# config roleRunners or the environment) names an adapter: a bare name is the
+# engine's own adapter file, a relative path is consumer-relative, an absolute
+# path is used as spelled. Unset -> the default (normally SINGULAR_RUNNER).
+# A configured runner that is missing or not executable is a hard stop (78):
+# silently running another provider than the operator pinned is the defect.
+#   singular_role_runner <role> <default_runner>
+singular_role_runner() {
+  local role="$1" default_runner="$2" key value resolved
+  key="SINGULAR_ROLE_RUNNER_$(printf '%s' "$role" | tr '[:lower:]-' '[:upper:]_')"
+  value="${!key:-}"
+  if [[ -z "$value" ]]; then
+    printf '%s\n' "$default_runner"
+    return 0
+  fi
+  case "$value" in
+    /*) resolved="$value" ;;
+    */*) resolved="$SINGULAR_ROOT/$value" ;;
+    *) resolved="$SINGULAR_ENGINE_DIR/$value" ;;
+  esac
+  if [[ ! -f "$resolved" || ! -x "$resolved" ]]; then
+    echo "singular: $key names a runner that is missing or not executable: $resolved" >&2
+    return 78
+  fi
+  printf '%s\n' "$resolved"
 }
 
 # Extra worker-prompt contract text for a task. Generic: none. A module may
@@ -8437,15 +8480,17 @@ singular_render_fix_prompt() {
   local scope_log="$run_dir/scope-check.log"
   local capsule="$run_dir/implementer-capsule.json"
   local ledger="$run_dir/findings-status.json"
+  local policy_file="$run_dir/review-policy-attempt-$((n - 1)).json"
   python3 - "$out_path" "$base_prompt" "$ledger" "$capsule" "$n" "$failure_class" \
     "$attempt_ctx" "$gate_log" "$scope_log" "$owned_json" "$forbidden_json" \
-    "$SINGULAR_CONTEXT_SECTION_MAX_CHARS" <<'PY'
+    "$SINGULAR_CONTEXT_SECTION_MAX_CHARS" "$policy_file" <<'PY'
 import json
 import os
 import sys
 
 (out_path, base_prompt, ledger_path, capsule_path, n_raw, failure_class,
- attempt_ctx, gate_log, scope_log, owned_raw, forbidden_raw, cap_raw) = sys.argv[1:13]
+ attempt_ctx, gate_log, scope_log, owned_raw, forbidden_raw, cap_raw,
+ policy_path) = sys.argv[1:14]
 n = int(n_raw)
 cap = int(cap_raw)
 prev = n - 1
@@ -8534,16 +8579,71 @@ parts.append("Forbidden: " + (", ".join(forbidden) if forbidden else "(none)"))
 parts.append("")
 
 # --- Authoritative findings ---------------------------------------------------
-parts.append("### Authoritative findings — fix ALL of these (open items from the findings ledger)")
-if open_findings:
-    lines = []
-    for e in open_findings:
-        text = str(e.get("text", ""))[:500]
-        lines.append(f"- [from attempt {e.get('firstSeenAttempt')}] ({e.get('id')}) {text}")
-    parts.append(section_cap("\n".join(lines)))
+policy = None
+try:
+    with open(policy_path, "r", encoding="utf-8") as f:
+        loaded_policy = json.load(f)
+    if isinstance(loaded_policy, dict):
+        policy = loaded_policy
+except Exception:
+    policy = None
+
+if policy is not None:
+    parts.append("### Authoritative findings")
+    blocking_ids = [str(x) for x in policy.get("blocking") or [] if str(x)]
+    items_by_id = {}
+    for item in policy.get("items") or []:
+        if isinstance(item, dict) and item.get("id"):
+            items_by_id[str(item["id"])] = item
+    ledger_by_id = {str(e.get("id")): e for e in open_findings if e.get("id")}
+    if blocking_ids:
+        lines = []
+        for ident in blocking_ids:
+            item = items_by_id.get(ident) or {}
+            summary = str(item.get("summary") or "")
+            matched = None
+            if ident in ledger_by_id:
+                matched = ledger_by_id[ident]
+            elif summary:
+                needle = summary.lower()
+                for e in open_findings:
+                    if needle and needle in str(e.get("text", "")).lower():
+                        matched = e
+                        break
+            if matched:
+                text = str(matched.get("text", ""))[:500] or summary
+                lines.append(
+                    f"- [from attempt {matched.get('firstSeenAttempt')}] ({ident}) {text}"
+                )
+            else:
+                lines.append(f"- ({ident}) {summary[:500]}")
+        parts.append(section_cap("\n".join(lines)))
+    else:
+        parts.append("(no open blocking findings recorded)")
+    parts.append("")
+    parts.append("### Non-blocking backlog (do not spend the repair on these unless trivial)")
+    backlog_ids = [str(x) for x in policy.get("backlog") or [] if str(x)]
+    if backlog_ids:
+        lines = []
+        for ident in backlog_ids:
+            item = items_by_id.get(ident) or {}
+            summary = str(item.get("summary") or ident)
+            lines.append(f"- ({ident}) {summary[:500]}")
+        parts.append(section_cap("\n".join(lines)))
+    else:
+        parts.append("(none)")
+    parts.append("")
 else:
-    parts.append("(no open ledger findings recorded)")
-parts.append("")
+    parts.append("### Authoritative findings — fix ALL of these (open items from the findings ledger)")
+    if open_findings:
+        lines = []
+        for e in open_findings:
+            text = str(e.get("text", ""))[:500]
+            lines.append(f"- [from attempt {e.get('firstSeenAttempt')}] ({e.get('id')}) {text}")
+        parts.append(section_cap("\n".join(lines)))
+    else:
+        parts.append("(no open ledger findings recorded)")
+    parts.append("")
 
 # --- Evidence (class-scoped) --------------------------------------------------
 parts.append("### Evidence (host logs, informational)")
@@ -8588,6 +8688,19 @@ with open(out_path, "w", encoding="utf-8") as f:
 PY
 }
 
+# Append the review-round policy section to an auditor prompt when the driver
+# exported SINGULAR_REVIEW_ROUND_LABEL. A no-op (byte-identical prompt) when
+# the label is empty. Shared by the re-audit renderer and its fallback so the
+# degraded path cannot drop the round label or the classification instruction.
+singular_review_round_policy_append() {
+  local target="$1"
+  [[ -n "${SINGULAR_REVIEW_ROUND_LABEL:-}" ]] || return 0
+  {
+    printf '\n### Review round policy\n\n%s\n\n' "$SINGULAR_REVIEW_ROUND_LABEL"
+    printf '%s\n' "Verify closure of the listed open blocking findings and any regression introduced by the fix diff. Do not re-review unchanged code unless you can state a reproducible P0/P1 trigger. Classify every finding."
+  } >>"$target"
+}
+
 # Re-audit delta prompt (T-E4). Renders <base_audit_prompt> + re-audit context
 # (prior findings/ledger status + fix diff since the auditor's last review +
 # per-id verification targets + a findingsStatus output-contract addition) into
@@ -8603,6 +8716,7 @@ singular_render_reaudit_prompt() {
   local ledger="$run_dir/findings-status.json"
   if [[ "$n" -lt 2 || ! -f "$capsule" || -z "$prior_head" ]]; then
     cp "$base_prompt" "$out_path"
+    singular_review_round_policy_append "$out_path"
     return 0
   fi
 
@@ -8689,6 +8803,7 @@ parts.append(
 with open(out_path, "w", encoding="utf-8") as f:
     f.write("\n".join(parts) + "\n")
 PY
+  singular_review_round_policy_append "$out_path"
 }
 
 # --- Kill switch + circuit breaker ---
