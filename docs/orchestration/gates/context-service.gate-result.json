@@ -3,7 +3,7 @@
   "node": "context-service",
   "status": "passed",
   "authoritative": true,
-  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-SOL-HIGH-ASTRA-MEDIUM-A11:sha256:d1450174d00a7fb1367918cf559ab6932b605860b0630765b651c72be8912cb9:epoch:cbf4c3f9fa29b5f3a967d7aea73cf88d033468d5a93bce43",
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-GROK-HIGH-ASTRA-LOW-OPUS-MEDIUM-A12:sha256:3b7842e50b6ee5d6d9621fc0bf77dfd098e583ff45193252aae0165fc1f1f6ec:epoch:6526d78886eb64d8cdd2e75c00084de3e82f96634935d6fb",
   "evidenceClass": "deterministic-proof",
   "evidence": [
     {
@@ -46,7 +46,7 @@
       "kind": "source-path",
       "ref": "cli/singular",
       "description": "Explicit context-service implementation or acceptance-test input for the promoted gate.",
-      "sha256": "b508a05dacc7cc1e686dd8fc1514b4021b48dcfdd7245b8046bfa568d5068e1e"
+      "sha256": "63e42e7cd6f900b2f363fb7177ef2bc168d4acc7d977070a32f38465e983eaf0"
     },
     {
       "kind": "source-path",
@@ -77,12 +77,12 @@
       "exitCode": 0,
       "logRef": "docs/orchestration/gates/evidence/context-service.regression.txt",
       "sha256": "1ce423311b2cc03c824e4df3211f1f81b2b1126be9789b97944f535629e4cbc0",
-      "headSha": "81e624622cb349ecca618d0487e252c9c899a53b"
+      "headSha": "8acd455ed85ab9a3a7d368190d1f3ab9c9f4b3e0"
     },
     {
       "kind": "gate-report",
       "ref": "docs/orchestration/gates/evidence/context-service.gate-report.json",
-      "sha256": "ae9d600139c7bfc9963afdab6ed54833d1c6bfd8b4d80ae1d0b175cf39a40e14",
+      "sha256": "e855825555329f9b6d19529b81204846a9f686501c469c7f984ec2a59d7d2164",
       "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
     }
   ],
@@ -91,7 +91,7 @@
   ],
   "decidedBy": "l0-gate-promoter",
   "rationale": "Integrated audited end-to-end acceptance for context-service plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
-  "recordedAt": "2026-09-13T05:06:34Z",
+  "recordedAt": "2026-09-14T01:34:38Z",
   "verificationClassification": "passed",
   "gateReportRef": "docs/orchestration/gates/evidence/context-service.gate-report.json"
 }
