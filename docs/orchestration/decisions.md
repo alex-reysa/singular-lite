@@ -2,6 +2,20 @@
 
 ## Decision Log
 
+### 2026-09-14T17:22:32Z — TASK-1106 — escalate-parked
+
+- Run: `RUN-20260914T170342Z-79862`
+- Branch: `codex/brain-rescue/TASK-1106`
+- Authority: l1
+- Rationale: no product progress: attempt 2 left the exact candidate unchanged after worker-no-packet; another implement/audit pass would evaluate identical source.
+
+### 2026-09-14T17:22:24Z — TASK-1106 — decide:retry
+
+- Run: `RUN-20260914T170342Z-79862`
+- Branch: `codex/brain-rescue/TASK-1106`
+- Authority: policy
+- Rationale: fast-path: worker-no-packet -> retry
+
 ### 2026-09-14T17:03:35Z — TASK-1117 — integrate
 
 - Run: `ORIGIN-20260914T170052Z-52178`
