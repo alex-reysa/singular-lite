@@ -589,7 +589,8 @@ chmod +x "$driver_engine/engine/evidence_delivery.py"
 reset_driver() {
   git -C "$driver_root" checkout -q target 2>/dev/null || true
   rm -rf "$driver_root/.singular-state/runs" "$driver_root/.singular-state/leases" \
-    "$driver_root/.singular-state/inbox" "$driver_root/.worktrees"
+    "$driver_root/.singular-state/inbox" "$driver_root/.singular-state/review-policy" \
+    "$driver_root/.worktrees"
   mkdir -p "$driver_root/.singular-state"
   : >"$driver_root/.singular-state/events.ndjson"
   rm -f "$driver_root/docs/orchestration/decisions.md" "$tmp/driver-l2-count" "$tmp/driver-audit-count"

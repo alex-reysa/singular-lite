@@ -364,7 +364,7 @@ singular_effective_configuration_json() {
     SINGULAR_SUPERVISOR_INTERVAL_MIN SINGULAR_PAIRED_AUDIT_PCT SINGULAR_CTX_PACKET \
     SINGULAR_CTX_ROUTING SINGULAR_CTX_ARTIFACT_SCAN SINGULAR_PLAN_CRITIQUE \
     SINGULAR_PLANNER_SESSION; do
-    [[ -v "$key" ]] && export "$key"
+    [[ -n "${!key+x}" ]] && export "$key"
   done
   while IFS= read -r key; do
     case "$key" in
@@ -8610,13 +8610,25 @@ if policy is not None:
                     if needle and needle in str(e.get("text", "")).lower():
                         matched = e
                         break
+            severity = str(item.get("severity") or "")
             if matched:
+                # The ledger id is the durable identity the fix/re-audit contract
+                # keys on (findingsStatus, resolved ledger lines); the policy id is
+                # the auditor's per-verdict label and may be synthetic when the
+                # verdict carried no classification. Print the ledger id first and
+                # keep the policy label as a suffix so both stay traceable.
+                ledger_id = str(matched.get("id") or ident)
                 text = str(matched.get("text", ""))[:500] or summary
+                label = ""
+                if ident != ledger_id or severity:
+                    bits = [b for b in (ident if ident != ledger_id else "", severity) if b]
+                    label = " [policy " + " ".join(bits) + "]"
                 lines.append(
-                    f"- [from attempt {matched.get('firstSeenAttempt')}] ({ident}) {text}"
+                    f"- [from attempt {matched.get('firstSeenAttempt')}] ({ledger_id}) {text}{label}"
                 )
             else:
-                lines.append(f"- ({ident}) {summary[:500]}")
+                label = f" [{severity}]" if severity else ""
+                lines.append(f"- ({ident}) {summary[:500]}{label}")
         parts.append(section_cap("\n".join(lines)))
     else:
         parts.append("(no open blocking findings recorded)")
@@ -8716,7 +8728,13 @@ singular_render_reaudit_prompt() {
   local ledger="$run_dir/findings-status.json"
   if [[ "$n" -lt 2 || ! -f "$capsule" || -z "$prior_head" ]]; then
     cp "$base_prompt" "$out_path"
-    singular_review_round_policy_append "$out_path"
+    # Attempt 1 MUST stay byte-identical to the base audit prompt: that equality is
+    # a pre-existing engine contract (test-context-continuity, test-ctx-assumptions-drive)
+    # and it is what makes the first-round prompt reproducible from the base render.
+    # The round-policy section therefore starts at round 2, where a re-audit is
+    # genuinely bounded by the remaining budget; the severity rubric that round 1
+    # needs already ships in the auditor template.
+    [[ "$n" -ge 2 ]] && singular_review_round_policy_append "$out_path"
     return 0
   fi
 

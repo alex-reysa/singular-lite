@@ -177,7 +177,8 @@ chmod +x "$mock_runner"
 reset_state() {
   git -C "$drv_root" checkout -q target 2>/dev/null || true
   rm -rf "$drv_root/.singular-state/runs" "$drv_root/.singular-state/leases" \
-    "$drv_root/.singular-state/inbox" "$drv_root/.worktrees" 2>/dev/null || true
+    "$drv_root/.singular-state/inbox" "$drv_root/.singular-state/review-policy" \
+    "$drv_root/.worktrees" 2>/dev/null || true
   : > "$EVENTS"
   rm -f "$drv_root/docs/orchestration/decisions.md" 2>/dev/null || true
   rm -f "$workroot/l2-count" "$workroot/audit-count" 2>/dev/null || true

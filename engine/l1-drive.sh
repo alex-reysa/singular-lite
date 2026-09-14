@@ -2938,7 +2938,8 @@ run_audit_phase() {
     singular_append_event "l1.reaudit_prompt_fallback" "re-audit prompt render failed; using base audit prompt" \
       "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n}" || true
     if cp "$audit_prompt" "$active_audit_prompt" 2>/dev/null; then
-      singular_review_round_policy_append "$active_audit_prompt" 2>/dev/null || true
+      # Same n>=2 gate as the renderer: attempt 1 stays byte-identical to the base.
+      [[ "$n" -ge 2 ]] && singular_review_round_policy_append "$active_audit_prompt" 2>/dev/null || true
     else
       active_audit_prompt="$audit_prompt"
     fi
