@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-14T16:45:30Z — TASK-1117 — unpark
+
+- Run: `ORIGIN-20260914T164529Z-19823`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: user authority: retained worktree + own planned reservation self-refused (active/accepted worktree) x3; worktree removed, branch 575f054a preserved; fresh dispatch on A15
+
 ### 2026-09-14T16:44:31Z — TASK-1117 — escalate-parked
 
 - Run: `RUN-20260914T164429Z-13549`
