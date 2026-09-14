@@ -1,0 +1,171 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PKT-TASK-1117-RUN-20260914T164608Z-24263",
+  "runId": "RUN-20260914T164608Z-24263",
+  "taskId": "TASK-1117",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "95b5f12feb53d8169c011842e63804804e78d77f",
+  "branch": "codex/brain-rescue/TASK-1117",
+  "headSha": "d22d66180d172ad5a2691d6268a7422557a422ed",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1117",
+  "ownedFiles": [
+    "engine/memory_service.py",
+    "engine/context_service.py",
+    "engine/context_cli.py",
+    "engine/brain_documents.py",
+    "engine/evidence_delivery.py",
+    "engine/campaign_manifest.py",
+    "cli/singular",
+    "schemas/memory-record.v1.schema.json",
+    "schemas/orchestration/memory-record.v1.schema.json",
+    "schemas/context-bundle.v1.schema.json",
+    "schemas/orchestration/context-bundle.v1.schema.json",
+    "tests/test-memory-lifecycle-e2e.sh",
+    "tests/test_memory_lifecycle.py",
+    "tests/test_context_invocation.py",
+    "tests/test_evidence_delivery.py",
+    "tests/fixtures/memory-lifecycle/",
+    "README.md"
+  ],
+  "changedFiles": [
+    "README.md",
+    "cli/singular",
+    "engine/campaign_manifest.py",
+    "engine/context_cli.py",
+    "engine/context_service.py",
+    "engine/evidence_delivery.py",
+    "engine/memory_service.py",
+    "schemas/context-bundle.v1.schema.json",
+    "schemas/memory-record.v1.schema.json",
+    "schemas/orchestration/context-bundle.v1.schema.json",
+    "schemas/orchestration/memory-record.v1.schema.json",
+    "tests/fixtures/memory-lifecycle/candidate.md",
+    "tests/fixtures/memory-lifecycle/checkpoint.json",
+    "tests/fixtures/memory-lifecycle/human-authority.json",
+    "tests/fixtures/memory-lifecycle/reviewer-authority.json",
+    "tests/fixtures/memory-lifecycle/reviewer-code.py",
+    "tests/fixtures/memory-lifecycle/source-event.json",
+    "tests/test-memory-lifecycle-e2e.sh",
+    "tests/test_context_invocation.py",
+    "tests/test_evidence_delivery.py",
+    "tests/test_memory_lifecycle.py"
+  ],
+  "commands": [
+    {
+      "cmd": "git merge-base --is-ancestor f5d2858285b90158de9c96c1f384bb53f752aa61 HEAD",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Read-only precondition check. Exit 0 confirms the preserved candidate f5d2858285b90158de9c96c1f384bb53f752aa61 is contained in the worktree HEAD d22d66180d172ad5a2691d6268a7422557a422ed. No git mutation was performed at any point; the L1 driver commits."
+    },
+    {
+      "cmd": "git diff --name-status f5d2858285b90158de9c96c1f384bb53f752aa61 HEAD -- engine/memory_service.py engine/context_service.py engine/context_cli.py engine/brain_documents.py engine/evidence_delivery.py engine/campaign_manifest.py cli/singular schemas/memory-record.v1.schema.json schemas/orchestration/memory-record.v1.schema.json schemas/context-bundle.v1.schema.json schemas/orchestration/context-bundle.v1.schema.json tests/test-memory-lifecycle-e2e.sh tests/test_memory_lifecycle.py tests/test_context_invocation.py tests/test_evidence_delivery.py tests/fixtures/memory-lifecycle/ README.md",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "Empty output: every owned path at HEAD is byte-identical to f5d28582. The base-refresh merge d22d661 touched only non-owned paths (engine/l1-drive.sh, engine/lib.sh, engine/task_lifecycle.py and non-owned tests), exactly as the task contract states."
+    },
+    {
+      "cmd": "test -f tests/test-memory-lifecycle-e2e.sh && test -f tests/test-context-service-e2e.sh && test -f tests/test-context-invocation-e2e.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-memory-lifecycle-e2e.sh test-context-service-e2e.sh test-context-invocation-e2e.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "The declared three-script gate, run once, in the foreground, on the exact preserved source. Result: 3 passed, 0 failed. Output retained verbatim in .singular-evidence/regression.log and reproduced in .singular-evidence/green.log. Not re-executed; no supplementary full-suite or 236-script sweep was run."
+    },
+    {
+      "cmd": "git status --porcelain",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "Run after the gate. Empty output proves the gate wrote nothing into the source tree and that no source edit was made by this run; a re-check of the owned-path diff against f5d28582 was likewise empty."
+    }
+  ],
+  "tests": [
+    {
+      "name": "red phase (test_after_waiver)",
+      "phase": "red",
+      "status": "waived",
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "No red phase is claimed. The retained B4 implementation (94e372cbdd242d86c33b47a44ffb5fe218d86977) and the memory transaction/snapshot correction (aa42a8268d729d1fbc2d68b0a9e67e833c6a5c01) were authored outside this task; the waiver inherited unchanged from TASK-1116 permits exact-source behavioural qualification only. No failing output is recorded because none was produced, and producing one would require a manufactured source edit that the task contract prohibits."
+    },
+    {
+      "name": "test-memory-lifecycle-e2e.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-context-service-e2e.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-context-invocation-e2e.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "declared three-script gate (SINGULAR_TEST_JOBS=2 bash tests/run.sh)",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "log",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "log",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "log",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "source-hashes",
+      "ref": ".singular-evidence/owned-source-hashes.log"
+    },
+    {
+      "kind": "note",
+      "ref": "Exact-source qualification confirmed. HEAD d22d66180d172ad5a2691d6268a7422557a422ed contains f5d2858285b90158de9c96c1f384bb53f752aa61; every owned path is byte-identical to it, before and after the gate; the worktree was clean at start and end."
+    },
+    {
+      "kind": "owned-source-sha256",
+      "ref": "engine/memory_service.py 5dbd3341b4a04a8bf8fdfab7e2d056c737bd35a1d80dddecdc3616d7f555c325; engine/context_service.py 1c90a38f07ca00d5c1e9decb8bc105f055da3987f97400d4936b6e84fe9e9b99; engine/context_cli.py 796b548b8d6b68090eaa406f30103e8f5e96be403915c9a4e213967f9a8c6637; engine/brain_documents.py aef4b4d6f90306ff0acb04660aad06fc67ad76d45e225661de0f42699df9afb2; engine/evidence_delivery.py fe3e30362d0115f69c49621a1b8f1dce5e50d8656f5d2a19831f4e248fb96835; engine/campaign_manifest.py fe529f53b9f08bf007578318eb9fa5d19fba708784728a1d8da42001ccae5916; cli/singular c8bf920d3d1bd63a157f26b5b394e4eb835e86e4f78a20ff2c073edad1eafc58; schemas/memory-record.v1.schema.json 2c1f08ea5c74e7eb8ad97592636122f7e80b1aea136d29f613059afd550727d9; schemas/orchestration/memory-record.v1.schema.json 2c1f08ea5c74e7eb8ad97592636122f7e80b1aea136d29f613059afd550727d9; schemas/context-bundle.v1.schema.json 36dc7057b9131fb5b3b73c03d88f0684d37675dfa39acba08eccbf01dffc6813; schemas/orchestration/context-bundle.v1.schema.json 36dc7057b9131fb5b3b73c03d88f0684d37675dfa39acba08eccbf01dffc6813; tests/test-memory-lifecycle-e2e.sh 1cd434bf9ab6da3bf07fec7c70e8d7a5660c005ea0133c69e5f95bd18085b898; tests/test_memory_lifecycle.py 6b99d6cd921f65f2689513ccc3637c32c535efcd7e1c99c05514f36a1ac50136; tests/test_context_invocation.py 2576dc7424ba9747fbe5bd448a5573c00e69b230c0b22ea07e0193ca89bd7d18; tests/test_evidence_delivery.py ec94d1d4c5b278b84906dc54a75943ef43ca43b8bd835f432f1455b64dfc9181; README.md 3ac8e14df26aceadf21e45a7ce522bec2a0eed2d60ed114973980a78b9c1f639; tests/fixtures/memory-lifecycle/candidate.md 48f9c608b71506bc805e1d668bac4e887266bb9aea7062e01426da5e03a238d4; tests/fixtures/memory-lifecycle/checkpoint.json 459dc7d05c5584e9c8c59ffbaf776122ae0139fec2396c1ea545e75843ac770d; tests/fixtures/memory-lifecycle/human-authority.json ad3f258391d709df9ce1df0ed7e9b0ca0dab49269f5abd3221f928f5808cf922; tests/fixtures/memory-lifecycle/reviewer-authority.json c2b550242f1de68a28c36b4fdf5f3f57e78887064996007a61357d892313cb5f; tests/fixtures/memory-lifecycle/reviewer-code.py 642b153c6acd9e1fc8d7ef85319d81dfb84d232eeffb35ffcda46ea71dbac104; tests/fixtures/memory-lifecycle/source-event.json 4a207182f565b9af97cbe733df828109e1e48387f4c7e2f922b24f4ea968311c"
+    },
+    {
+      "kind": "gate-result",
+      "ref": "3 passed, 0 failed (test-context-invocation-e2e.sh, test-context-service-e2e.sh, test-memory-lifecycle-e2e.sh); gate exit code 0"
+    },
+    {
+      "kind": "scope-note",
+      "ref": "changedFiles is empty: this run made no source edit. The only files written are qualification evidence under .singular-evidence/, which is outside the tracked source tree (git status --porcelain remained empty). No forbidden path (.singular-state/, .worktrees/, docs/orchestration/, tools/brain-campaign/) was touched."
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260914T164608Z-24263/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15:sha256:a1bacf01898f4c06eda9d088873426cbcc0b157001660d6e097cee5dec872786:epoch:10cb89f6b5253f8acf6354afa1973165b9c77230657659f9"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260914T164608Z-24263/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260914T164608Z-24263/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260914T164608Z-24263/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-14T16:51:56Z"
+}

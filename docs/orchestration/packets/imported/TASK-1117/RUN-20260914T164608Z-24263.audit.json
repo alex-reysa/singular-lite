@@ -1,0 +1,130 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1117",
+  "runId": "RUN-20260914T164608Z-24263",
+  "branch": "codex/brain-rescue/TASK-1117",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json (.singular-state/runs/RUN-20260914T164608Z-24263/evidence-manifest.json)",
+    "packet.json sha256:c64349dfe68e124d88f53e139b7d24c1eb6dbbc729aea44a53bd7d32d84cc5d8",
+    "audit-verification.json sha256:b092ec6a7e592a05d09351f4868e00be319795e46b1ae9aa1913370b45a1f734",
+    "gate-check.log sha256:7e1bd9d08e828d913c35127c4af60648a78f7fcf38cea2a325a624a90efbe7d5 (135 bytes)",
+    "manifest checks: gate=passed, scope=passed (scope-check-result.json sha256:6df2df5e358f1bfcfbbc2ff3c6f191d44e3b686d832fddeb40a0e28c4411d436), secret=passed (secret-scan-result.json sha256:e77709a6097cdda1a8851547565c351835f01e5c08611bfd3f1df1834e8e24e7)",
+    "manifest commands[] excerpts for packet-command-1..4 and regression-gate (worker-evidence/red.log, green.log, regression.log)",
+    "manifest files[] owned-path sha256 list (21 entries)",
+    "worker-evidence/owned-source-hashes.log sha256:09b55a6e6af567cf655094f538a3ed596e536ddbbfb98f10afe479b9487f7feb (referenced)",
+    "read-only inspection of the committed worker tree at d22d66180d172ad5a2691d6268a7422557a422ed: engine/memory_service.py, cli/singular, tests/test-memory-lifecycle-e2e.sh, tests/test_memory_lifecycle.py, tests/test_context_invocation.py, tests/test_evidence_delivery.py",
+    "task contract TASK-1117 (owned/forbidden file lists, acceptance criteria, worker obligation, review-policy accounting)",
+    "campaign contract docs/brain-build-plan/campaign.md section B4 (sha256:3691aaf0102209da8f50e9fcfbf0a007ecb15d4939cbec9ba6445d5cdfca23a3)",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15:sha256:a1bacf01898f4c06eda9d088873426cbcc0b157001660d6e097cee5dec872786:epoch:10cb89f6b5253f8acf6354afa1973165b9c77230657659f9",
+    "reviewed-head-sha:d22d66180d172ad5a2691d6268a7422557a422ed"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "test -f tests/test-memory-lifecycle-e2e.sh && test -f tests/test-context-service-e2e.sh && test -f tests/test-context-invocation-e2e.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-memory-lifecycle-e2e.sh test-context-service-e2e.sh test-context-invocation-e2e.sh",
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-check.log",
+        "packet.json",
+        "evidence-manifest.json"
+      ],
+      "rationale": "The host classified this gate as not-rerun-evidence-verified: audit-verification.json records evidenceOnly=true, workspaceKind=evidence-only, outcome=not-rerun-evidence-verified, rawExitCode=0, and hash-binds the worker gate evidence to headSha d22d66180d172ad5a2691d6268a7422557a422ed (commandSha256 34d2f6c6... equals evidenceSourceCommandIdentity; logSha256 7e1bd9d0... equals the manifest gate-check.log digest and the worker regression.log digest; sourceIntegrity.status=verified with changedPaths empty). Log content is 'PASS test-context-invocation-e2e.sh / PASS test-context-service-e2e.sh / PASS test-memory-lifecycle-e2e.sh / SUMMARY: 3 passed, 0 failed'. I did not rerun the gate, as instructed, and I reproduce the host classification verbatim rather than upgrading it to passed. No failure or infrastructure signals were recorded.",
+      "exitCode": 0
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "git merge-base --is-ancestor f5d2858285b90158de9c96c1f384bb53f752aa61 HEAD",
+      "evidenceRefs": [
+        "packet.json",
+        "evidence-manifest.json (commands[].packet-command-1)"
+      ],
+      "rationale": "Exact-source precondition. I independently re-executed this read-only git predicate in the worker checkout at d22d661 and it exited 0, matching the packet's recorded result: the preserved candidate f5d28582 is an ancestor of HEAD. This is a git containment query, not a test rerun, so the host gate classification is unaffected.",
+      "exitCode": 0
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "git diff --name-status f5d2858285b90158de9c96c1f384bb53f752aa61 HEAD -- <17 owned paths>",
+      "evidenceRefs": [
+        "packet.json (commands[1], evidence[owned-source-sha256])",
+        "evidence-manifest.json (files[])"
+      ],
+      "rationale": "I re-ran this read-only diff restricted to exactly the 17 contract-owned paths and it produced empty output, confirming every owned path at HEAD is byte-identical to f5d28582 and that the base-refresh merge d22d661 changed no owned path. I also recomputed sha256 for all 16 owned regular files in the worktree; each digest matches the packet's owned-source-sha256 list and the manifest files[] entries character-for-character (e.g. engine/memory_service.py 5dbd3341..., cli/singular c8bf920d..., README.md 3ac8e14d..., and the identical schema-copy pairs 2c1f08ea.../36dc7057...).",
+      "exitCode": 0
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "git diff --name-only 95b5f12feb53d8169c011842e63804804e78d77f HEAD  # product base = merge-base with codex/brain-integration",
+      "evidenceRefs": [
+        "evidence-manifest.json (checks.scope, diffSha256 7fa3c547...)",
+        "packet.json (changedFiles)"
+      ],
+      "rationale": "Scope compliance. git merge-base HEAD codex/brain-integration resolves to 95b5f12feb53, equal to the packet's baseRef, so there is no branch drift from the target. The product diff from that base touches exactly 21 paths, all inside the owned list; grepping that diff for the forbidden prefixes .singular-state/, .worktrees/, docs/orchestration/ and tools/brain-campaign/ returns nothing. This matches the host scope check (status passed) and the secret scan (status passed). git status --porcelain in the worker checkout is empty, consistent with the packet's post-gate cleanliness claim.",
+      "exitCode": 0
+    }
+  ],
+  "commandsRun": [
+    "git log --oneline -3",
+    "git rev-parse HEAD",
+    "git merge-base --is-ancestor f5d2858285b90158de9c96c1f384bb53f752aa61 HEAD",
+    "git diff --name-status f5d2858285b90158de9c96c1f384bb53f752aa61 HEAD -- <17 owned paths>",
+    "git merge-base HEAD codex/brain-integration",
+    "git diff --name-only 95b5f12feb53d8169c011842e63804804e78d77f HEAD",
+    "git diff --name-only 95b5f12feb53d8169c011842e63804804e78d77f HEAD | grep -E '^(\\.singular-state/|\\.worktrees/|docs/orchestration/|tools/brain-campaign/)'",
+    "shasum -a 256 <16 owned files>",
+    "git status --porcelain",
+    "cat .singular-state/runs/RUN-20260914T164608Z-24263/evidence-manifest.json",
+    "wc -l tests/test-memory-lifecycle-e2e.sh tests/test_memory_lifecycle.py tests/test_context_invocation.py tests/test_evidence_delivery.py engine/memory_service.py",
+    "cat tests/test-memory-lifecycle-e2e.sh",
+    "grep -nE '^def test|^    def test' tests/test_memory_lifecycle.py",
+    "grep -rnE 'skipTest|skipif|SkipTest|skip\\(' tests/test_memory_lifecycle.py tests/test_context_invocation.py tests/test_evidence_delivery.py",
+    "grep -rniE 'memory_credential|credential_key|MEMORY_KEY|SINGULAR_MEMORY' tests/test_memory_lifecycle.py tests/test_context_invocation.py tests/test_evidence_delivery.py",
+    "grep -rniE 'drift|stale|publication|admission' tests/test_context_invocation.py",
+    "grep -rn 'def sandbox_apply_reason' -A 30 tests/*.py",
+    "sed -n 344,404p tests/test_memory_lifecycle.py",
+    "sed -n 770,828p tests/test_memory_lifecycle.py",
+    "grep -nE 'propose|review|approve|reject|supersede|tombstone|checkpoint|rebuild' cli/singular",
+    "sed -n 1,40p schemas/orchestration/audit-verdict.v1.schema.json"
+  ],
+  "findings": [
+    "AF-1117-1 (P2): the retained gate evidence records only the three per-script PASS lines and the 'SUMMARY: 3 passed, 0 failed' summary (gate-check.log is 135 bytes), so it cannot show whether tests/test_memory_lifecycle.py::test_public_memory_readers_are_os_enforced_read_only_for_absent_populated_and_pending_store executed or was skipped by sandbox_apply_reason() under a nested seatbelt. The OS-deny-write half of the read-only acceptance criterion is therefore not provable from the evidence alone, even though the unconditional behavioural half is.",
+    "AF-1117-2 (P3): tests/test_memory_lifecycle.py:361-364 contains a vacuous assertion — self_review is assigned from a conditional whose predicate (proposer actorId == 'review-worker') is false for this fixture, so the approve() call never runs and assertIsNone(self_review) always passes. The genuine self-approval refusal is covered later in the same test via self_proposed/'approval-self', so nothing is lost, but the dead fragment reads as coverage it does not provide.",
+    "AF-1117-3 (P3): packet.json evidence[].scope-note asserts 'changedFiles is empty: this run made no source edit', while the packet's own changedFiles member lists 21 paths (the product diff from the task base). Both statements are separately true under different baselines, but the prose contradicts the field it names and invites misreading of the product base for review."
+  ],
+  "requiredFixes": [],
+  "classifiedFindings": [
+    {
+      "id": "AF-1117-1",
+      "severity": "P2",
+      "summary": "Gate evidence granularity (PASS/SUMMARY only) cannot show whether the OS-enforced deny-write test ran or was skipped by the nested-seatbelt guard; retain per-script skip counts so that half of the read-only criterion is evidence-provable."
+    },
+    {
+      "id": "AF-1117-2",
+      "severity": "P3",
+      "summary": "Vacuous conditional assertion at tests/test_memory_lifecycle.py:361-364 (assertIsNone on a branch that never executes); real self-approval refusal is covered elsewhere in the same test."
+    },
+    {
+      "id": "AF-1117-3",
+      "severity": "P3",
+      "summary": "packet.json scope-note says 'changedFiles is empty' while the packet's changedFiles member lists 21 owned paths; the prose contradicts the field it names."
+    }
+  ],
+  "rationale": "Accepted on evidence, with no P0/P1 finding.\n\nExact-source qualification (worker obligation 1-2). I independently confirmed in the committed worker checkout that HEAD d22d66180d172ad5a2691d6268a7422557a422ed contains the preserved candidate f5d2858285b90158de9c96c1f384bb53f752aa61, that a name-status diff restricted to exactly the 17 contract-owned paths is empty, and that recomputed sha256 digests for all 16 owned regular files match the packet's owned-source-sha256 list and the manifest files[] entries exactly (including the two byte-identical schema-copy pairs 2c1f08ea... and 36dc7057...). The base-refresh merge d22d661 changed only non-owned paths. The worktree is clean.\n\nScope and drift. git merge-base HEAD codex/brain-integration is 95b5f12feb53, identical to the packet baseRef, so there is no drift from the target. The product diff from that base touches 21 paths, every one inside the owned list; no forbidden prefix (.singular-state/, .worktrees/, docs/orchestration/, tools/brain-campaign/) appears. This agrees with the host scope check and secret scan, both recorded passed. No hidden scope expansion into TASK-1115 envelope/admission work is present — the four coupled files and both context-bundle schema copies are exactly the ones the contract enumerates.\n\nGate classification. The host binding is authoritative and states not-rerun-evidence-verified: audit-verification.json is evidenceOnly with workspaceKind evidence-only, hash-binds the worker gate evidence to this head (commandSha256 equals evidenceSourceCommandIdentity; logSha256 7e1bd9d0... equals both the manifest gate-check.log digest and the worker regression.log digest), records sourceIntegrity verified with no changed paths, and lists zero failure and zero infrastructure signals. I did not rerun the gate and I report every verification result as not-rerun-evidence-verified rather than passed. No infrastructure limitation has been converted into a product finding.\n\nTest-first evidence. Test policy is test_after_waiver and the contract's prospective waiver, inherited unchanged from TASK-1116, permits exact-source behavioural qualification only. The packet records the red phase as waived with an explicit statement that no red phase is claimed, no source edit was made and no failing output was fabricated; red.log is a rationale document, not a manufactured failure. That is the correct handling under this contract, and the empty owned-path diff corroborates that no source edit occurred. No supplementary full-suite or 236-script sweep appears in the packet, the manifest commands[] or the gate log.\n\nAcceptance-criteria coverage. I read the qualifying tests rather than trusting their names. tests/test_memory_lifecycle.py (828 lines, 14 cases) covers verified independent approval including credential-subject impersonation refusal, self-approval denial, human-only policy, provenance-bearing retrieval by task B and abstention before approval; replay/reject/supersede/tombstone across restart and index rebuild; authority and source drift failing closed; concurrent capture and bounded checkpoint recovery; interrupted approval unable to resurrect a tombstone; prepared-intent recovery bound to its recorded predecessor revision; derived index refresh failure not undoing the authoritative commit; memory delta revocation validated against both bundle schema copies; behavioural read-only proof for absent, populated and pending-journal stores plus an OS-enforced variant; and ambiguous-legacy and malformed journals failing closed on rebuild. tests/test_context_invocation.py asserts SINGULAR_MEMORY_CREDENTIAL_KEY is absent from the provider child environment and covers config/source drift refusal and campaign-mismatch denial before debit; tests/test_evidence_delivery.py repeats the credential-boundary assertion against a real stub provider. The e2e wrapper additionally enforces that the two memory-record schema copies are byte-identical and that the CLI exposes the governed memory verbs; cli/singular registers memory propose|review|approve|reject|quarantine|supersede|tombstone|checkpoint|show|rebuild. No external memory server or cross-project ingestion is introduced.\n\nPacket binding. The packet is bound to TASK-1117 and RUN-20260914T164608Z-24263, carries the campaign binding recorded in the manifest, reports the declared three-script gate once with exit 0, and states the review accounting (used 2, allowed 4, remaining 2) consistent with the contract.\n\nThe three findings are evidence-granularity and hygiene items. None is an exploitable, data-loss, correctness or contract defect, so none blocks merge; they are P2/P3 backlog. requiredFixes is empty because no blocking item exists.",
+  "reviewPolicy": {
+    "version": 1,
+    "logicalChange": "memory-lifecycle",
+    "round": 3,
+    "maxRounds": 2,
+    "originalVerdict": "accepted",
+    "effectiveVerdict": "accepted",
+    "blocking": [],
+    "backlog": [
+      "AF-1117-1",
+      "AF-1117-2",
+      "AF-1117-3"
+    ],
+    "downgraded": [],
+    "unclassifiedCount": 0,
+    "appliedAt": "2026-09-14T17:00:01Z"
+  }
+}
