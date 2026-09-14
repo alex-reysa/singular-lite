@@ -70,6 +70,66 @@
         "type": "string",
         "enum": ["resolved", "still-open"]
       }
+    },
+    "classifiedFindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "summary"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "severity": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2", "P3"]
+          },
+          "summary": { "type": "string", "minLength": 1 },
+          "trigger": { "type": "string" },
+          "impact": { "type": "string" },
+          "requirement": { "type": "string" },
+          "location": { "type": "string" }
+        }
+      }
+    },
+    "reviewPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "logicalChange",
+        "round",
+        "maxRounds",
+        "originalVerdict",
+        "effectiveVerdict"
+      ],
+      "properties": {
+        "version": { "type": "integer" },
+        "logicalChange": { "type": "string", "minLength": 1 },
+        "round": { "type": "integer" },
+        "maxRounds": { "type": "integer" },
+        "originalVerdict": {
+          "type": "string",
+          "enum": ["accepted", "needs-fix", "blocked", "needs-human"]
+        },
+        "effectiveVerdict": {
+          "type": "string",
+          "enum": ["accepted", "needs-fix", "blocked", "needs-human"]
+        },
+        "blocking": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "backlog": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "downgraded": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "unclassifiedCount": { "type": "integer" },
+        "appliedAt": { "type": "string", "minLength": 1 }
+      }
     }
   }
 }

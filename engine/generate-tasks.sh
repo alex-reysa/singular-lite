@@ -326,7 +326,7 @@ fi
 out="$run_dir/planner-out.md"
 codex_log="$run_dir/planner-codex.log"
 runner_result="$run_dir/planner-runner-result.json"
-codex_runner="${SINGULAR_RUNNER:-${SINGULAR_CODEX_RUNNER:-$SCRIPT_DIR/codex-run.sh}}"
+codex_runner="$(singular_role_runner planner "${SINGULAR_RUNNER:-${SINGULAR_CODEX_RUNNER:-$SCRIPT_DIR/codex-run.sh}}")" || exit 78
 codex_exit=0
 # Planner session-meta hook (default ON): when SINGULAR_PLANNER_SESSION=1, offer
 # the runner the canonical per-node planner session-meta path — mirroring the

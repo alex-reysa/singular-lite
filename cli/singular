@@ -339,6 +339,20 @@ cmd_memory() {
       --engine-home "$home" --repo-root "$root" --cwd "$cwd" -- "$@"
 }
 
+cmd_review_policy() {
+  local home root bash_path
+  home="$(resolve_engine_home)"
+  root="$(repo_root)"
+  bash_path="${BASH:-${SINGULAR_BASH_BIN:-bash}}"
+  [[ -f "$home/engine/review_policy.py" ]] \
+    || die "engine $home has no engine/review_policy.py"
+  SINGULAR_ROOT="$root" SINGULAR_ENGINE_HOME="$home" exec "$bash_path" -c '
+    home="$1"; shift
+    source "$home/engine/lib.sh" >/dev/null
+    exec python3 "$home/engine/review_policy.py" "$@"
+  ' _ "$home" "$@"
+}
+
 cmd_init() {
   local home root; home="$(resolve_engine_home)"; root="$(require_repo)"
   echo "singular init -> $root"
@@ -2429,6 +2443,8 @@ Setup / lifecycle:
   context build|search|get|explain                     bounded local context retrieval
   memory propose|review|approve|reject|quarantine|supersede|tombstone|checkpoint|show|rebuild
                                                       governed project-local memory lifecycle
+  review-policy effective|show|check|record|grant|backfill|backlog
+                                                      programmable review policy (rounds, severities, exceptions)
   test [--status [--json]|--wait|--no-wait|--new-run|--rerun-failures]
                        supervised engine regression run — one live run at a time
                        (default: attach to it), durable manifest + per-test logs
@@ -2506,6 +2522,7 @@ main() {
     manifest)      cmd_manifest "$@" ;;
     context)       cmd_context "$@" ;;
     memory)        cmd_memory "$@" ;;
+    review-policy) cmd_review_policy "$@" ;;
     test)          cmd_test "$@" ;;
     update)        cmd_update "$@" ;;
     migrate)       cmd_migrate "$@" ;;

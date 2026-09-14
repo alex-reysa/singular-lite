@@ -16,10 +16,12 @@ set -euo pipefail
 #
 # Privilege levels (mapped from codex sandbox semantics):
 #   readonly  -> agent may read + run read-only shell, MUST NOT mutate the repo.
-#                Enforced at the orchestration layer: file-write tools are denied
-#                AND any working-tree mutation the run leaves behind is reverted
-#                after the run (git restore guard). This is bulletproof regardless
-#                of Claude's internal sandbox and cannot hang on a network prompt.
+#                Enforced in layers: on macOS, sandbox-exec denies file-write*
+#                under the worktree / SINGULAR_ROOT / SINGULAR_STATE_DIR; file-write
+#                tools are denied; any working-tree mutation the run leaves behind
+#                is reverted after the run (git restore guard). The OS sandbox is
+#                the review-evidence admission surface; tool denial + restore
+#                remain defense in depth.
 #   l2        -> workspace-write + Bash + NETWORK (real-PostgreSQL proof needs
 #                egress). File scope is enforced downstream by scope-check.sh in
 #                l1-drive.sh, identical to the codex path.
@@ -250,6 +252,149 @@ cmd+=(--dangerously-skip-permissions)
 if [[ -n "${SINGULAR_CLAUDE_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
   cmd+=(${SINGULAR_CLAUDE_EXTRA_ARGS})
+fi
+
+# --- OS-enforced containment (sandbox-exec on macOS) ----------------------------
+# TWO profiles, one mechanism:
+#   readonly  -> deny file-write* under the worktree, SINGULAR_ROOT and
+#                SINGULAR_STATE_DIR. The review-evidence admission surface.
+#   l0|l1|l2  -> deny file-write* under SINGULAR_ROOT and SINGULAR_STATE_DIR,
+#                then ALLOW it back under the worktree, TMPDIR and the build
+#                cache. Intended limit: in a LINKED worktree `.git` is a pointer
+#                file and the real git dir lives under SINGULAR_ROOT, so the
+#                worker can run read-only git (status, diff, rev-parse, log,
+#                stash list) but NOT `git add` / `git commit`. That is deliberate
+#                and matches the contract: l1-drive.sh stages the owned delta and
+#                commits itself, outside this sandbox, and the l2 worker prompt
+#                gives the worker no git instructions. Allowing commits would mean
+#                opening .git/objects and .git/refs, i.e. letting a worker rewrite
+#                any branch in the shared repository.
+#                This is the workspace containment the adapters this one
+#                replaces already provide (`grok-run.sh --sandbox workspace`,
+#                `codex-run.sh --sandbox workspace-write`): a writable role may
+#                edit its own candidate and nothing else. Without it a routed
+#                implementer could rewrite the durable review ledger, run
+#                receipts, campaign policy or a frozen runtime tree, and neither
+#                scope-check.sh (which diffs only inside -C <worktree>) nor the
+#                read-only restore guard (readonly-only) would notice.
+# Rule order matters: sandbox-exec takes the LAST matching rule and the worktree
+# normally lives under SINGULAR_ROOT, so every allow must follow the denies. The
+# state dir is denied again after the worktree allow, so a fixture whose worktree
+# contains the state dir does not accidentally re-open it.
+# SINGULAR_CLAUDE_OS_SANDBOX=auto|1|0 (default auto);
+# SINGULAR_CLAUDE_SANDBOX_EXEC defaults to /usr/bin/sandbox-exec. Evidence
+# delivery sets SINGULAR_RUNNER_REQUIRE_OS_READONLY=1 so a missing tool fails
+# closed here at readonly; SINGULAR_RUNNER_REQUIRE_OS_WORKSPACE=1 does the same
+# for a writable level, which is what a campaign sets when it routes an
+# implementer to this adapter.
+if [[ "$readonly_run" == "yes" || "$level" == "l0" || "$level" == "l1" || "$level" == "l2" ]]; then
+  claude_os_sandbox="${SINGULAR_CLAUDE_OS_SANDBOX:-auto}"
+  claude_sandbox_exec="${SINGULAR_CLAUDE_SANDBOX_EXEC:-/usr/bin/sandbox-exec}"
+  sandbox_available="no"
+  [[ -n "$claude_sandbox_exec" && -x "$claude_sandbox_exec" ]] && sandbox_available="yes"
+  apply_sandbox="no"
+  case "$claude_os_sandbox" in
+    1) apply_sandbox="yes" ;;
+    0) apply_sandbox="no" ;;
+    auto) [[ "$sandbox_available" == "yes" ]] && apply_sandbox="yes" ;;
+  esac
+  if [[ "$apply_sandbox" == "yes" && "$sandbox_available" != "yes" ]]; then
+    apply_sandbox="no"
+  fi
+  if [[ "$readonly_run" == "yes" && "${SINGULAR_RUNNER_REQUIRE_OS_READONLY:-}" == "1" && "$apply_sandbox" != "yes" ]]; then
+    echo "claude-run: OS-enforced read-only is required for this invocation but unavailable" >&2
+    exit 78
+  fi
+  if [[ "$readonly_run" != "yes" && "${SINGULAR_RUNNER_REQUIRE_OS_WORKSPACE:-}" == "1" && "$apply_sandbox" != "yes" ]]; then
+    echo "claude-run: OS-enforced workspace containment is required for this invocation but unavailable" >&2
+    exit 78
+  fi
+  if [[ "$apply_sandbox" == "yes" ]]; then
+    singular_claude_sandbox_realpath() {
+      local dir="$1"
+      [[ -n "$dir" && -d "$dir" ]] || return 1
+      ( cd "$dir" && pwd -P )
+    }
+    sandbox_paths=()
+    singular_claude_sandbox_add_path() {
+      local resolved existing
+      resolved="$(singular_claude_sandbox_realpath "$1")" || return 0
+      for existing in "${sandbox_paths[@]+"${sandbox_paths[@]}"}"; do
+        [[ "$existing" == "$resolved" ]] && return 0
+      done
+      sandbox_paths+=("$resolved")
+    }
+    sandbox_preallow_paths=()
+    sandbox_allow_paths=()
+    sandbox_redeny_paths=()
+    singular_claude_sandbox_add_allow() {
+      local resolved existing
+      resolved="$(singular_claude_sandbox_realpath "$1")" || return 0
+      for existing in "${sandbox_allow_paths[@]+"${sandbox_allow_paths[@]}"}"; do
+        [[ "$existing" == "$resolved" ]] && return 0
+      done
+      sandbox_allow_paths+=("$resolved")
+    }
+    # Broad scratch allowances are emitted BEFORE the denies. TMPDIR can contain
+    # the repository itself (every test fixture does exactly that), and because
+    # sandbox-exec takes the last matching rule, a trailing TMPDIR allow would
+    # silently re-open SINGULAR_ROOT. Verified empirically: with the allow last,
+    # a live l2 agent overwrote a file directly under the root.
+    singular_claude_sandbox_add_preallow() {
+      local resolved existing
+      resolved="$(singular_claude_sandbox_realpath "$1")" || return 0
+      for existing in "${sandbox_preallow_paths[@]+"${sandbox_preallow_paths[@]}"}"; do
+        [[ "$existing" == "$resolved" ]] && return 0
+      done
+      sandbox_preallow_paths+=("$resolved")
+    }
+    if [[ "$readonly_run" == "yes" ]]; then
+      sandbox_mode="readonly"
+      singular_claude_sandbox_add_path "$worktree"
+      singular_claude_sandbox_add_path "${SINGULAR_ROOT:-}"
+      singular_claude_sandbox_add_path "${SINGULAR_STATE_DIR:-}"
+    else
+      sandbox_mode="workspace"
+      # Deny the repository and the durable state, allow the candidate workspace.
+      singular_claude_sandbox_add_path "${SINGULAR_ROOT:-}"
+      singular_claude_sandbox_add_path "${SINGULAR_STATE_DIR:-}"
+      singular_claude_sandbox_add_preallow "${TMPDIR:-/tmp}"
+      singular_claude_sandbox_add_preallow "${SINGULAR_GO_BUILD_CACHE:-}"
+      singular_claude_sandbox_add_allow "$worktree"
+      local_state="$(singular_claude_sandbox_realpath "${SINGULAR_STATE_DIR:-}")" || local_state=""
+      [[ -n "$local_state" ]] && sandbox_redeny_paths+=("$local_state")
+    fi
+    if [[ -n "$run_dir" && -d "$run_dir" ]]; then
+      os_readonly_profile="$run_dir/claude-readonly-sandbox.sb"
+    else
+      # BSD/macOS mktemp only substitutes trailing X's, so the profile lives
+      # in a temp directory under the exact name the contract asks for.
+      os_readonly_dir="$(mktemp -d "${TMPDIR:-/tmp}/claude-readonly-sandbox.XXXXXX")"
+      os_readonly_profile="$os_readonly_dir/claude-readonly-sandbox.sb"
+      SINGULAR_RUNNER_CLEANUP_PATHS+=("$os_readonly_dir")
+    fi
+    {
+      printf '(version 1)\n(allow default)\n'
+      for sandbox_path in "${sandbox_preallow_paths[@]+"${sandbox_preallow_paths[@]}"}"; do
+        printf '(allow file-write* (subpath "%s"))\n' "$sandbox_path"
+      done
+      for sandbox_path in "${sandbox_paths[@]+"${sandbox_paths[@]}"}"; do
+        printf '(deny file-write* (subpath "%s"))\n' "$sandbox_path"
+      done
+      if [[ "$readonly_run" != "yes" ]]; then
+        # Give the candidate workspace back, then re-deny the state dir in case a
+        # fixture nests it inside the worktree. Last matching rule wins.
+        for sandbox_path in "${sandbox_allow_paths[@]+"${sandbox_allow_paths[@]}"}"; do
+          printf '(allow file-write* (subpath "%s"))\n' "$sandbox_path"
+        done
+        for sandbox_path in "${sandbox_redeny_paths[@]+"${sandbox_redeny_paths[@]}"}"; do
+          printf '(deny file-write* (subpath "%s"))\n' "$sandbox_path"
+        done
+      fi
+    } >"$os_readonly_profile"
+    cmd=("$claude_sandbox_exec" -f "$os_readonly_profile" "${cmd[@]}")
+    echo "claude-run: $sandbox_mode os-sandbox=sandbox-exec profile=$os_readonly_profile" >&2
+  fi
 fi
 
 # --- Read-only snapshot (for restore-after) -------------------------------------

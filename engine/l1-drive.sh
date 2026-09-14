@@ -33,6 +33,7 @@ unset SINGULAR_ORIGIN_LOCK_CAPABILITY
 # drop-in (e.g. claude-run.sh) to dispatch a different CLI. Same flag surface
 # and same --output-last-message contract is required of any runner.
 SINGULAR_RUNNER_BIN="${SINGULAR_RUNNER:-$SCRIPT_DIR/codex-run.sh}"
+audit_runner="$(singular_role_runner auditor "$SINGULAR_RUNNER_BIN")" || exit 78
 
 task_id=""
 dry_run="no"
@@ -542,6 +543,30 @@ risk_tier="$(printf '%s' "$retry_policy_json" | python3 -c 'import json,sys; pri
 risk_signal="$(printf '%s' "$retry_policy_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["riskSignal"])')"
 risk_source="$(printf '%s' "$retry_policy_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["riskSource"])')"
 max_retries="$(printf '%s' "$retry_policy_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["productRepairMax"])')"
+product_repair_max="$max_retries"
+review_policy_json=""
+review_policy_err="$run_dir/review-policy-effective.err"
+if ! review_policy_json="$(python3 "$SCRIPT_DIR/review_policy.py" effective 2>"$review_policy_err")"; then
+  echo "l1-drive: review policy is invalid; refusing to run paid work" >&2
+  if [[ -s "$review_policy_err" ]]; then
+    cat "$review_policy_err" >&2
+  fi
+  exit 2
+fi
+review_max_rounds="$(printf '%s' "$review_policy_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["maxReviewRounds"])')"
+review_logical_change="$(tf dagNode 2>/dev/null || true)"
+review_logical_change="${review_logical_change#\"}"
+review_logical_change="${review_logical_change%\"}"
+[[ -n "$review_logical_change" && "$review_logical_change" != "null" ]] || review_logical_change="$task_id"
+review_bound=$((review_max_rounds - 1))
+[[ "$review_bound" -lt 0 ]] && review_bound=0
+if [[ "$max_retries" -gt "$review_bound" ]]; then
+  max_retries="$review_bound"
+fi
+singular_append_event "l1.review_policy_bound" \
+  "review policy bounded product repair retries" \
+  "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"logicalChange\":\"$review_logical_change\",\"maxReviewRounds\":$review_max_rounds,\"productRepairMax\":$product_repair_max}" \
+  || true
 bounded_infra_budget() {
   local requested="${1:-1}"
   [[ "$requested" =~ ^[0-9]+$ ]] || requested=1
@@ -769,9 +794,16 @@ inconclusive-infrastructure|not-rerun-evidence-verified), command (non-empty
 string), evidenceRefs (array of non-empty strings), and rationale (non-empty
 string). It MAY also contain integer exitCode. No other verification-result
 members are permitted. Reproduce the host gate classification and never turn
-an infrastructure limitation into a product finding. No additional top-level
-fields are permitted except optional findingsStatus. Emit ONLY that JSON
-object."""
+an infrastructure limitation into a product finding. classifiedFindings[] is
+required for every finding: each item is {{id, severity, summary}} with
+severity P0|P1|P2|P3. P0 is an exploitable or data-loss defect that must
+block merge. P1 is a correctness or contract break that must block merge.
+P2 is a non-blocking defect. P3 is a nit, style note, or suggestion. P0/P1
+items MUST also carry non-blank trigger, impact, and requirement. findings[]
+and requiredFixes[] strings MUST correspond to classified items. The host
+records P2/P3 as non-blocking backlog; do not emit reviewPolicy (host-owned).
+No additional top-level fields are permitted except optional findingsStatus
+and classifiedFindings. Emit ONLY that JSON object."""
 else:
     verdict_contract = f"""Your FINAL message MUST be a single JSON object matching
 `schemas/orchestration/audit-verdict.v0.schema.json`: schema
@@ -1944,7 +1976,8 @@ decision_source_extra="$(singular_ctx_rehydrate_decision_source "$SINGULAR_ROOT"
 # Worker-runner selection (singular_select_l2_runner): generic engine returns the
 # default runner; an enabled module may route specific tasks to an alternate
 # runner (3rd arg). An explicit SINGULAR_RUNNER override always wins.
-l2_runner="$(singular_select_l2_runner "$task_file" "$SINGULAR_RUNNER_BIN" "$SCRIPT_DIR/claude-run.sh")"
+l2_default="$(singular_role_runner implementer "$SINGULAR_RUNNER_BIN")" || exit 78
+l2_runner="$(singular_select_l2_runner "$task_file" "$l2_default" "$SCRIPT_DIR/claude-run.sh")"
 if [[ "$l2_runner" != "$SINGULAR_RUNNER_BIN" ]]; then
   echo "  module-routed L2 worker -> $(basename "$l2_runner")"
   singular_append_event "l1.worker_runner_selected" "worker routed to alternate runner" \
@@ -2707,12 +2740,12 @@ if contract == "v1":
 Required top-level members: schema, taskId, runId, branch, verdict,
 evidenceReviewed, verificationResults, commandsRun, findings, requiredFixes,
 and rationale. No other top-level members are allowed except optional
-findingsStatus. Each verificationResults[] object requires exactly status,
-command, evidenceRefs, and rationale; optional integer exitCode is also
-allowed. status must be one of passed, failed-product,
-inconclusive-infrastructure, or not-rerun-evidence-verified. command and
-rationale must be non-empty strings. evidenceRefs must be an array of
-non-empty strings."""
+findingsStatus, classifiedFindings, and reviewPolicy. Each
+verificationResults[] object requires exactly status, command, evidenceRefs,
+and rationale; optional integer exitCode is also allowed. status must be one
+of passed, failed-product, inconclusive-infrastructure, or
+not-rerun-evidence-verified. command and rationale must be non-empty strings.
+evidenceRefs must be an array of non-empty strings."""
 else:
     required_contract = """Return exactly one audit-verdict.v0 JSON object.
 Required top-level members: schema, taskId, runId, branch, verdict,
@@ -2897,14 +2930,21 @@ run_audit_phase() {
   # warning event + fall back to the base audit prompt.
   local prior_head active_audit_prompt="$run_dir/auditor-active-prompt.md"
   prior_head="$(singular_json_field "$run_dir/reviewer-capsule.json" auditedHeadSha 2>/dev/null || true)"
+  export SINGULAR_REVIEW_ROUND_LABEL="Round $n of $review_max_rounds"
   if singular_render_reaudit_prompt "$active_audit_prompt" "$audit_prompt" "$run_dir" "$n" \
        "$prior_head" "$head_sha" "$worktree" 2>/dev/null; then
     :
   else
     singular_append_event "l1.reaudit_prompt_fallback" "re-audit prompt render failed; using base audit prompt" \
       "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n}" || true
-    cp "$audit_prompt" "$active_audit_prompt" 2>/dev/null || active_audit_prompt="$audit_prompt"
+    if cp "$audit_prompt" "$active_audit_prompt" 2>/dev/null; then
+      # Same n>=2 gate as the renderer: attempt 1 stays byte-identical to the base.
+      [[ "$n" -ge 2 ]] && singular_review_round_policy_append "$active_audit_prompt" 2>/dev/null || true
+    else
+      active_audit_prompt="$audit_prompt"
+    fi
   fi
+  unset SINGULAR_REVIEW_ROUND_LABEL
 
   # Assumption ledger (node assumption-ledger; behind SINGULAR_CTX_PACKET): inject the
   # assembled auditSection (staged at attempt-open) into the per-attempt auditor prompt
@@ -3210,12 +3250,13 @@ PY
   verdict="unknown"
 
   # ---- Session affinity (T-E5): reviewer resume decision (first try only) ----
-  # The auditor runs on SINGULAR_RUNNER_BIN (cross-model independence preserved). It
-  # uses a SEPARATE per-role meta file + role gate, so the reviewer can NEVER be
-  # offered the implementer's session. Lineage head = head_sha (the audited head).
-  # prompt_sha is the BASE auditor prompt (the active prompt is per-attempt delta).
+  # The auditor runs on $audit_runner (role-runner, default SINGULAR_RUNNER_BIN).
+  # It uses a SEPARATE per-role meta file + role gate, so the reviewer can NEVER
+  # be offered the implementer's session. Lineage head = head_sha (the audited
+  # head). prompt_sha is the BASE auditor prompt (the active prompt is per-attempt
+  # delta).
   local audit_runner_basename reviewer_prompt_sha reviewer_resume_id="" reviewer_decision
-  audit_runner_basename="$(basename "$SINGULAR_RUNNER_BIN")"
+  audit_runner_basename="$(basename "$audit_runner")"
   reviewer_prompt_sha="$(singular_prompt_sha "$audit_prompt" 2>/dev/null || true)"
   # Routed through the ctx-* adapter (SINGULAR_CTX_ROUTING; default 1). Step
   # `final-audit` is an independence-required step, so the taint pin binds here in
@@ -3246,6 +3287,29 @@ PY
   # Auditor runner output is durable (0.6.0): the console streams it as a
   # labeled session pane; previously it went to /dev/null.
   local auditor_log="$run_dir/auditor-codex.log"
+  local review_check_file="$run_dir/review-policy-check-attempt-${n}.json"
+  local review_check_err="$run_dir/review-policy-check-attempt-${n}.err"
+  local review_check_rc=0
+  python3 "$SCRIPT_DIR/review_policy.py" check \
+    --logical-change "$review_logical_change" --task "$task_id" \
+    >"$review_check_file" 2>"$review_check_err" || review_check_rc=$?
+  if [[ "$review_check_rc" -eq 4 ]]; then
+    local review_used review_allowed
+    review_used="$(singular_json_field "$review_check_file" used 2>/dev/null || echo 0)"
+    review_allowed="$(singular_json_field "$review_check_file" allowedRounds 2>/dev/null || echo 0)"
+    singular_append_event "review.rounds_exhausted" \
+      "review rounds exhausted; auditor not launched" \
+      "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"logicalChange\":\"$review_logical_change\",\"used\":$review_used,\"allowedRounds\":$review_allowed}" \
+      || true
+    attempt_failure="review-rounds-exhausted"
+    attempt_ctx="$review_check_file"
+    return 1
+  elif [[ "$review_check_rc" -ne 0 ]]; then
+    attempt_failure="audit-infra"
+    attempt_ctx="$review_check_err"
+    [[ -s "$review_check_err" ]] || attempt_ctx="$review_check_file"
+    return 1
+  fi
   for ((audit_try=0; audit_try<=audit_infra_max; audit_try++)); do
     if [[ "$audit_try" -gt 0 ]]; then
       singular_append_event "audit.infra_retry" "auditor infra failure; re-running auditor only" \
@@ -3289,7 +3353,7 @@ PY
     printf -- '--- auditor try %s (attempt %s) ---\n' "$audit_try" "$n" >>"$auditor_log" || true
     audit_capability_profile="${SINGULAR_AUDITOR_CAPABILITY_PROFILE:-audit-core}"
     singular_runner_contract_prepare \
-      "$SINGULAR_RUNNER_BIN" auditor "$audit_capability_profile" "$audit_result_file"
+      "$audit_runner" auditor "$audit_capability_profile" "$audit_result_file"
     local audit_bundle_for_try="$audit_context_bundle"
     if [[ "$audit_try" -gt 0 ]]; then
       audit_bundle_for_try="$run_dir/context-review-target-attempt-${n}-try-${audit_try}.bundle.json"
@@ -3315,7 +3379,7 @@ PY
         --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
         --required packet.json --required audit-verification.json \
         "${audit_context_delivery_args[@]}" -- \
-        "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
+        "$audit_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
         "${audit_run_args[@]}" >>"$auditor_log" 2>&1 &
     audit_pid="$!"
     audit_child_pgid="$(ps -o pgid= -p "$audit_pid" 2>/dev/null | tr -d '[:space:]' || true)"
@@ -3354,7 +3418,7 @@ PY
       rm -f "$audit_context_receipt"
       printf -- '--- auditor resume-fallback (attempt %s) ---\n' "$n" >>"$auditor_log" || true
       singular_runner_contract_prepare \
-        "$SINGULAR_RUNNER_BIN" auditor "$audit_capability_profile" "$audit_result_file"
+        "$audit_runner" auditor "$audit_capability_profile" "$audit_result_file"
       audit_context_delivery_args=(--campaign-binding "$l1_campaign_binding")
       if [[ -f "$audit_context_config" ]]; then
         audit_context_delivery_args+=(
@@ -3374,7 +3438,7 @@ PY
           --ledger "$SINGULAR_STATE_DIR/evidence-deliveries.sqlite3" \
           --required packet.json --required audit-verification.json \
           "${audit_context_delivery_args[@]}" -- \
-          "$SINGULAR_RUNNER_BIN" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
+          "$audit_runner" "${SINGULAR_RUNNER_CONTRACT_ARGS[@]}" \
           --level readonly -C "$worktree" --run-id "$run_id" \
           --prompt-file "$active_audit_prompt" --output-last-message "$audit_record" \
           --session-meta "$session_meta_reviewer" >>"$auditor_log" 2>&1 &
@@ -3553,6 +3617,58 @@ PY
       attempt_ctx="$audit_record"
       return 1
     fi
+    local review_record_file="$run_dir/review-policy-attempt-${n}.json"
+    local review_record_err="$run_dir/review-policy-attempt-${n}.err"
+    local reviewer_model="" reviewer_effort=""
+    if [[ -f "$session_meta_reviewer" ]]; then
+      reviewer_model="$(singular_json_field "$session_meta_reviewer" model 2>/dev/null || true)"
+      reviewer_effort="$(singular_json_field "$session_meta_reviewer" effort 2>/dev/null || true)"
+    fi
+    if ! python3 "$SCRIPT_DIR/review_policy.py" record \
+      --logical-change "$review_logical_change" \
+      --task "$task_id" \
+      --run "$run_id" \
+      --attempt "$n" \
+      --verdict "$audit_record" \
+      --head "$head_sha" \
+      --campaign "$l1_campaign_binding" \
+      --lane native \
+      --reviewer-runner "$(basename "$audit_runner")" \
+      --reviewer-model "$reviewer_model" \
+      --reviewer-effort "$reviewer_effort" \
+      --apply >"$review_record_file" 2>"$review_record_err"
+    then
+      attempt_failure="audit-infra"
+      attempt_ctx="$review_record_err"
+      return 1
+    fi
+    singular_append_event "review.policy_applied" \
+      "review policy recorded a completed verdict round" \
+      "$(python3 - "$review_record_file" "$task_id" "$run_id" "$n" "$review_logical_change" <<'PY'
+import json, sys
+path, task_id, run_id, attempt, logical = sys.argv[1:6]
+try:
+    rec = json.load(open(path, encoding="utf-8"))
+except Exception:
+    rec = {}
+def arr(key):
+    v = rec.get(key) or []
+    return v if isinstance(v, list) else []
+print(json.dumps({
+    "taskId": task_id,
+    "runId": run_id,
+    "attempt": int(attempt),
+    "logicalChange": logical,
+    "round": rec.get("round") or 0,
+    "originalVerdict": rec.get("originalVerdict") or "",
+    "effectiveVerdict": rec.get("effectiveVerdict") or "",
+    "blocking": arr("blocking"),
+    "backlog": arr("backlog"),
+    "downgraded": arr("downgraded"),
+    "unclassifiedCount": int(rec.get("unclassifiedCount") or 0),
+}, separators=(",", ":")))
+PY
+)" || true
     {
       verdict="$(singular_json_field "$audit_record" verdict 2>/dev/null || echo unknown)"
       # Findings ledger + reviewer capsule on every parseable verdict (additive
@@ -3973,6 +4089,18 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
         "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"headSha\":\"$head_sha\",\"auditVerdict\":\"accepted\"}" \
         || true
     fi
+    archive_attempt "$n" "$attempt_failure" "$terminal_action" "$terminal_authority"
+    break
+  fi
+
+  # Review-round exhaustion is a policy terminal. It must not consume product
+  # repair budget and must not call the decider.
+  if [[ "$attempt_failure" == "review-rounds-exhausted" ]]; then
+    terminal_action="escalate-parked"
+    terminal_authority="policy"
+    review_used="$(singular_json_field "${attempt_ctx:-/dev/null}" used 2>/dev/null || echo "?")"
+    review_allowed="$(singular_json_field "${attempt_ctx:-/dev/null}" allowedRounds 2>/dev/null || echo "?")"
+    terminal_rationale="review rounds exhausted for $review_logical_change ($review_used/$review_allowed); unresolved blockers remain blocked; choose reduce-scope, revert, defer or a recorded review-policy exception"
     archive_attempt "$n" "$attempt_failure" "$terminal_action" "$terminal_authority"
     break
   fi

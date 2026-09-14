@@ -70,6 +70,10 @@ chmod +x "$bindir/claude"
 export PATH="$bindir:$PATH"
 export SINGULAR_TARGET_BRANCH="test-target"
 export SINGULAR_CLAUDE_MAX_BUDGET_USD=0   # omit budget flag in tests
+# These cases exercise the post-run restore guard with a mock that writes into
+# the worktree. Disable the OS sandbox so the mock can still mutate; the guard
+# remains the second layer this file is pinning.
+export SINGULAR_CLAUDE_OS_SANDBOX=0
 
 new_repo() {
   local d="$1"; mkdir -p "$d"
