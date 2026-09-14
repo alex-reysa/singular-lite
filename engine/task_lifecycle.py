@@ -1028,19 +1028,84 @@ def authorize_continuation(args: argparse.Namespace) -> None:
         if isinstance(lease.get("continuationAuthorization"), dict):
             raise LifecycleError("one-shot continuation authority already exists")
         terminal = lease.get("terminalDisposition")
-        if not isinstance(terminal, dict) or terminal.get("kind") != "orphan-reservation":
-            raise LifecycleError("continuation requires an exactly reconciled orphan reservation")
-        terminal_expected = {
-            "reservationOwner": args.predecessor_owner,
-            "reservationGeneration": args.predecessor_generation,
-            "reservationRunId": args.predecessor_run,
-            "campaignBinding": args.predecessor_campaign,
-            "reservationBaseSha": args.predecessor_reservation_base,
-            "candidateSourceSha": args.candidate_source,
-            "worktree": expected["worktree"],
-        }
-        if any(terminal.get(key) != value for key, value in terminal_expected.items()):
-            raise LifecycleError("continuation predecessor does not match orphan reconciliation")
+        terminal_kind = terminal.get("kind") if isinstance(terminal, dict) else ""
+        if terminal_kind == "orphan-reservation":
+            # An unlaunched reservation reconciled by exact compare-and-set.
+            # Its record already carries the complete predecessor identity.
+            terminal_expected = {
+                "reservationOwner": args.predecessor_owner,
+                "reservationGeneration": args.predecessor_generation,
+                "reservationRunId": args.predecessor_run,
+                "campaignBinding": args.predecessor_campaign,
+                "reservationBaseSha": args.predecessor_reservation_base,
+                "candidateSourceSha": args.candidate_source,
+                "worktree": expected["worktree"],
+            }
+            if any(terminal.get(key) != value for key, value in terminal_expected.items()):
+                raise LifecycleError("continuation predecessor does not match orphan reconciliation")
+        elif terminal_kind == "outcome-unknown":
+            # A STARTED attempt whose driver exited without publishing a
+            # terminal disposition. finish() records only the identity it holds
+            # -- owner, generation, reservation run, campaign and the executed
+            # worker run -- and then drops the live reservationOwner, so the
+            # orphan reconciler can never match afterwards and this record is
+            # the only durable trace of the predecessor. Validate every field
+            # the record does carry, then DERIVE the rest from the retained
+            # lease and its started attempt instead of trusting the caller.
+            if lease.get("reservationOwner"):
+                raise LifecycleError("continuation cannot preempt an actively owned reservation")
+            terminal_expected = {
+                "reservationOwner": args.predecessor_owner,
+                "reservationGeneration": args.predecessor_generation,
+                "reservationRunId": args.predecessor_run,
+                "campaignBinding": args.predecessor_campaign,
+            }
+            if any(terminal.get(key) != value for key, value in terminal_expected.items()):
+                raise LifecycleError("continuation predecessor does not match the outcome-unknown attempt")
+            attempt = lease.get("attemptLifecycle")
+            if not isinstance(attempt, dict) or attempt.get("state") != "started":
+                raise LifecycleError("outcome-unknown continuation requires the retained started attempt")
+            # The executed worker run and the reservation run are distinct
+            # identities: --predecessor-run is the RESERVATION run, while runId
+            # is the worker the driver actually executed. Bind both, separately.
+            executed_run = str(attempt.get("runId", "") or "")
+            if not executed_run:
+                raise LifecycleError("outcome-unknown attempt has no executed worker run")
+            if (
+                terminal.get("runId") != executed_run
+                or lease.get("runId") != executed_run
+                or attempt.get("reservationRunId") != args.predecessor_run
+                or attempt.get("reservationOwner") != args.predecessor_owner
+                or attempt.get("reservationGeneration") != args.predecessor_generation
+                or attempt.get("campaignBinding") != args.predecessor_campaign
+            ):
+                raise LifecycleError("outcome-unknown attempt is not bound to the continued predecessor")
+            if (
+                lease.get("lastReservationOwner") != args.predecessor_owner
+                or int(lease.get("lastReservationGeneration", 0) or 0)
+                != args.predecessor_generation
+                or lease.get("campaignBinding", "legacy") != args.predecessor_campaign
+            ):
+                raise LifecycleError("outcome-unknown predecessor is not the lease's last reservation")
+            # Derived, because the terminal record does not carry them: the
+            # base the predecessor actually reserved under is the retained
+            # lease's own reservationBaseSha, and its worktree is checked
+            # against the lease immediately below. The candidate source stays
+            # bound separately to the freshly inspected worktree head.
+            if lease.get("reservationBaseSha") != args.predecessor_reservation_base:
+                raise LifecycleError("outcome-unknown reservation base does not match the retained lease")
+            # A retained candidate legitimately advances past its reservation
+            # base by merging the integration target (base refresh), so this
+            # binding is ancestry rather than equality.
+            if not git_is_ancestor(repo, args.predecessor_reservation_base, args.candidate_source):
+                raise LifecycleError(
+                    "outcome-unknown reservation base is not an ancestor of the candidate source"
+                )
+        else:
+            raise LifecycleError(
+                "continuation requires an exactly reconciled orphan reservation "
+                "or a recorded outcome-unknown started attempt"
+            )
         if str(Path(str(lease.get("worktree", ""))).resolve()) != expected["worktree"]:
             raise LifecycleError("continuation lease worktree mismatch")
         if lease.get("branch") != authority.get("branch"):
