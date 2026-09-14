@@ -209,6 +209,10 @@ PY
     if [[ "$call" == "1" ]]; then
       [[ "$(<"$FIRST_AUDIT_COUNTERS/worker-retry-1")" == "0" ]] || exit 96
       grep -q 'seeded committed candidate' "$worktree/internal/widget/parser.go" || exit 97
+    elif [[ "${FIRST_AUDIT_MODE:?}" == "no-output" ]]; then
+      # The one bounded re-emit after a packet-format failure carries no audit
+      # findings; the fixture simply fails to emit a packet again.
+      [[ "$call" == "2" ]] || exit 98
     else
       [[ "$call" == "2" ]] || exit 98
       [[ "$(<"$FIRST_AUDIT_COUNTERS/worker-retry-2")" == "1" ]] || exit 99
@@ -839,21 +843,24 @@ test_no_output_stays_fail_closed() {
   local name=no-output
   make_fixture "$name" no-output 1 normal
   reconcile "$name" dispatch
-  assert_eq "$(calls worker)" "1" "$name worker calls"
+  # A first packet-format failure on an unchanged candidate gets exactly one
+  # re-emit (charged to the product budget); the repeat parks fail-closed with
+  # no audit spend.
+  assert_eq "$(calls worker)" "2" "$name worker calls"
   assert_eq "$(calls auditor)" "0" "$name auditor calls"
   local events
   events="$(cat "$FIXTURE_ROOT/.singular-state/events.ndjson")"
+  assert_contains "$events" '"type":"l1.packet_format_retry_eligible"' \
+    "$name first format failure re-emits once"
   assert_contains "$events" '"type":"l1.unchanged_candidate_parked"' \
     "$name unchanged no-output guard"
   assert_contains "$events" '"failureClass":"worker-no-packet"' \
     "$name output failure classification"
   assert_not_contains "$events" '"type":"worker.infra_retry"' \
     "$name no-output is not infrastructure"
-  assert_not_contains "$events" '"type":"l1.product_repair_budget_consumed"' \
-    "$name no-output did not spend repair"
-  assert_attempt_count 1
-  finish_and_prove_no_redispatch "$name" 1 0
-  assert_terminal_contract blocked worker-no-packet escalate-parked 0
+  assert_attempt_count 2
+  finish_and_prove_no_redispatch "$name" 2 0
+  assert_terminal_contract blocked worker-no-packet escalate-parked 1
   echo "ok: frozen rc-zero no-output remains fail-closed without audit or repair spend"
 }
 

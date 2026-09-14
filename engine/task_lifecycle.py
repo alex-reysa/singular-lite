@@ -1417,9 +1417,19 @@ def finish(args: argparse.Namespace) -> None:
                 status == "planned"
                 and lease.get("productPassStarted") is False
                 and args.reason.startswith("driver-")
+                and not any(
+                    lease.get(key)
+                    for key in (
+                        "attemptHistory", "terminalDispositionHistory",
+                        "candidateHistory", "operatorReentries",
+                    )
+                )
             ):
                 # A driver that never acquired execution ownership leaves only
                 # a disposable scheduler reservation and no attempt history.
+                # A lease that carries history (an unparked task re-reserved
+                # after a failed attempt) is the durable record of that
+                # history and is released, never deleted.
                 lease["_deleteRecord"] = True
                 return
             if status in ACTIVE:

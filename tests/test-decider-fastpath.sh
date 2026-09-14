@@ -941,8 +941,11 @@ PY
 }
 
 # rc==0 but empty/prose worker output is worker-no-packet, not infrastructure.
-# Because it also leaves the exact candidate unchanged, it parks immediately
-# without spending a product repair on another expensive worker pass.
+# It leaves the exact candidate unchanged, which used to park immediately. A
+# format slip from an otherwise successful worker is not a product signal
+# (field run 2026-09-14: one stray "]" deadlocked the queue), so the FIRST
+# such failure gets exactly one bounded re-emit charged to the product budget;
+# a REPEATED one parks the unchanged candidate.
 test_driver_empty_output_is_no_packet_not_infra() {
   with_fixture
   write_generic_task
@@ -955,14 +958,16 @@ test_driver_empty_output_is_no_packet_not_infra() {
   local out rc=0
   out="$("$SCRIPT_DIR/l1-drive.sh" TASK-0001 2>&1)" || rc=$?
   assert_eq "$rc" "3" "empty-output run parks after budget ($out)"
-  assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "1" "no-packet: unchanged candidate suppresses second worker pass"
+  assert_eq "$(cat "$MOCK_COUNTER_DIR/worker-calls")" "2" "no-packet: first format failure gets one re-emit, the repeat parks"
   assert_not_contains "$(cat "$SINGULAR_EVENTS_FILE")" '"worker.infra_retry"' "no-packet: NOT classified as worker-infra"
+  assert_contains "$(cat "$SINGULAR_EVENTS_FILE")" '"l1.packet_format_retry_eligible"' \
+    "no-packet: the one re-emit is explicit"
   local idx
   idx="$(find "$SINGULAR_RUNS_DIR" -name index.json -path '*/attempts/*' | head -1)"
   assert_contains "$(cat "$idx")" '"failureClass": "worker-no-packet"' "no-packet: archived worker-no-packet"
   assert_contains "$(cat "$SINGULAR_EVENTS_FILE")" '"l1.unchanged_candidate_parked"' \
-    "no-packet: unchanged candidate park is explicit"
-  assert_eq "$(singular_lease_field TASK-0001 retryCount)" "0" "no-packet: no product repair consumed"
+    "no-packet: the repeated unchanged-candidate park is explicit"
+  assert_eq "$(singular_lease_field TASK-0001 retryCount)" "1" "no-packet: the re-emit consumed one product repair, no more"
   unset MOCK_WORKER_EMPTY SINGULAR_MAX_RETRIES
   echo "ok: driver rc==0 empty output is worker-no-packet, not worker-infra"
 }

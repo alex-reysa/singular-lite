@@ -3,7 +3,7 @@
   "node": "context-invocations",
   "status": "passed",
   "authoritative": true,
-  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A14:sha256:eb93427a35f186c2f9c5446ee7d44228da9ce17e3eecdbd163ed03e9182c1612:epoch:fc87d8207fc3717bab30e1c7b1b2fd2fdd0f21446017d9f7",
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15:sha256:a1bacf01898f4c06eda9d088873426cbcc0b157001660d6e097cee5dec872786:epoch:10cb89f6b5253f8acf6354afa1973165b9c77230657659f9",
   "evidenceClass": "deterministic-proof",
   "evidence": [
     {
@@ -52,7 +52,7 @@
       "kind": "source-path",
       "ref": "tests/test-decider-fastpath.sh",
       "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
-      "sha256": "6397b3c41e06c05677b5f169f1458f21d9180aeab0ad5584a97a45acca0fd722"
+      "sha256": "962d56ca54103b6bf11ee8aa3dc26e2e49f5e640d856375c0226d1a739fd8f96"
     },
     {
       "kind": "source-path",
@@ -106,7 +106,7 @@
       "kind": "source-path",
       "ref": "engine/l1-drive.sh",
       "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
-      "sha256": "c8dc7f3e93ec846f0000547c2a7ec3f32a6d97fe2820a6f7d65a4907e524cb53"
+      "sha256": "41c90097fc850c13c272b7aad5257917e114bf19ed005189870ae606c47c04f7"
     },
     {
       "kind": "source-path",
@@ -226,13 +226,13 @@
       "kind": "source-path",
       "ref": "engine/task_lifecycle.py",
       "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
-      "sha256": "9ff4860a7dfd077d16c372492eb72179158a65c683a9d9fdc85958b20b7b9318"
+      "sha256": "c61b93b43cf36f8534b0bb5403381cce22682ab78d0e731e10317f7cc076782a"
     },
     {
       "kind": "source-path",
       "ref": "engine/lib.sh",
       "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
-      "sha256": "7a59787aa793bdb6351a4d3247f2358a449b2175054798a49d5d5c77ccbea81c"
+      "sha256": "277b0a91e00a8610e69a6d3e76e1c6cefc753afd391f9568edfee0d56540eb39"
     },
     {
       "kind": "source-path",
@@ -287,12 +287,12 @@
       "exitCode": 0,
       "logRef": "docs/orchestration/gates/evidence/context-invocations.regression.txt",
       "sha256": "34b4c37998ddbab22c0c0a167918a54fee4148b77dea3a619b02078ebeafc0f3",
-      "headSha": "a90b8b447ad8d48833520d378000f7f468280f83"
+      "headSha": "0c8ac9f186b396b0c133cc1c6f8880108b9d9b24"
     },
     {
       "kind": "gate-report",
       "ref": "docs/orchestration/gates/evidence/context-invocations.gate-report.json",
-      "sha256": "44b05323d3c4f0edcb9c435f919ad2fe7b741a8b80a505249ee5e50b688fe74e",
+      "sha256": "e4c4ce9a7da286c3fe1da6277dfd94573fae2edafc7c3325e716b9567a374402",
       "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
     }
   ],
@@ -301,7 +301,7 @@
   ],
   "decidedBy": "l0-gate-promoter",
   "rationale": "Integrated audited end-to-end acceptance for context-invocations plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
-  "recordedAt": "2026-09-14T14:07:24Z",
+  "recordedAt": "2026-09-14T16:39:11Z",
   "verificationClassification": "passed",
   "gateReportRef": "docs/orchestration/gates/evidence/context-invocations.gate-report.json"
 }
