@@ -2,6 +2,20 @@
 
 ## Decision Log
 
+### 2026-09-14T15:15:36Z — TASK-1116 — supersede
+
+- Run: `ORIGIN-20260914T151535Z-11678`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: confirmed host reboot (kern.boottime 2026-09-14T14:57:37Z) destroyed claimed one-shot continuation e284dafe (run RUN-20260914T140920Z-41749) before a worker packet; reconciled outcome-unknown by recover --scan; one-shot replay refused by design; TASK-1117 carries exact candidate f5d28582 (incl. 94e372cb, aa42a826) for exact-source qualification; lease, dispatch, authority, run artifacts and branch retained; assisted provenance; no counter reset
+
+### 2026-09-14T15:08:27Z — TASK-1116 — decide:revalidate-evidence
+
+- Run: `RUN-20260914T140920Z-41749`
+- Branch: `codex/brain-rescue/TASK-1116`
+- Authority: decider
+- Rationale: stale-lease -> revalidate-evidence: No lease evidence or failure logs were provided, so stale ownership cannot be confirmed. Revalidate lease ownership and worker liveness before retrying to avoid duplicate execution.
+
 ### 2026-09-14T14:08:08Z — TASK-1116 — authorize-continuation
 
 - Run: `ORIGIN-20260914T140807Z-36576`
