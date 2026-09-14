@@ -31,3 +31,21 @@ Output:
 - `status` is `passed | failed-product | inconclusive-infrastructure |
   not-rerun-evidence-verified`.
 - Do not add fields outside the selected audit-verdict schema.
+
+## Severity classification
+
+Every finding MUST also appear in `classifiedFindings[]` with `id`,
+`severity` (`P0` | `P1` | `P2` | `P3`), and `summary`. `findings[]` and
+`requiredFixes[]` strings must correspond to those classified items.
+
+Rubric:
+
+- **P0** — exploitable or data-loss defect that must block merge.
+- **P1** — correctness or contract break that must block merge.
+- **P2** — non-blocking defect; the host records it as backlog.
+- **P3** — nit, style note, or suggestion; the host records it as backlog.
+
+P0 and P1 items MUST carry non-blank `trigger`, `impact`, and `requirement`.
+An unsupported blocking claim is downgraded by the host; it does not stay
+blocking. Do not emit `reviewPolicy` — the host stamps that after the
+verdict is recorded.
