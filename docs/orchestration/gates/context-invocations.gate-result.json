@@ -3,7 +3,7 @@
   "node": "context-invocations",
   "status": "passed",
   "authoritative": true,
-  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-GROK-HIGH-ASTRA-LOW-OPUS-MEDIUM-A12:sha256:3b7842e50b6ee5d6d9621fc0bf77dfd098e583ff45193252aae0165fc1f1f6ec:epoch:6526d78886eb64d8cdd2e75c00084de3e82f96634935d6fb",
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A13:sha256:5ebdae340c053f156d36fa1a0979b1194952990952307daa8a259581f59eb49e:epoch:cf0e14944cbdee167c4fade7c0fb78df3e6de53ea1b6bb8f",
   "evidenceClass": "deterministic-proof",
   "evidence": [
     {
@@ -106,7 +106,7 @@
       "kind": "source-path",
       "ref": "engine/l1-drive.sh",
       "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
-      "sha256": "4d5c35eb3af8551cb63be32d91212626e44c02e16d639a0b729470ec9f34bcbf"
+      "sha256": "c8dc7f3e93ec846f0000547c2a7ec3f32a6d97fe2820a6f7d65a4907e524cb53"
     },
     {
       "kind": "source-path",
@@ -232,7 +232,7 @@
       "kind": "source-path",
       "ref": "engine/lib.sh",
       "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
-      "sha256": "2b494d84183c5aa7aab70cce8ca137aa7ef859a44bc00f7069664e6653ebca5e"
+      "sha256": "7a59787aa793bdb6351a4d3247f2358a449b2175054798a49d5d5c77ccbea81c"
     },
     {
       "kind": "source-path",
@@ -287,12 +287,12 @@
       "exitCode": 0,
       "logRef": "docs/orchestration/gates/evidence/context-invocations.regression.txt",
       "sha256": "34b4c37998ddbab22c0c0a167918a54fee4148b77dea3a619b02078ebeafc0f3",
-      "headSha": "8acd455ed85ab9a3a7d368190d1f3ab9c9f4b3e0"
+      "headSha": "536dd885f80beb4025fb172407953c8b41fafa15"
     },
     {
       "kind": "gate-report",
       "ref": "docs/orchestration/gates/evidence/context-invocations.gate-report.json",
-      "sha256": "30a2bc9dbf04a541e66ad03b12acf5e8cf10d601c81217265b207abb86203860",
+      "sha256": "e2c2d0a61ad9aa037f24ccecfd7241afb6e8906c32c90c6c5f36d2c2cb35a1b3",
       "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
     }
   ],
@@ -301,7 +301,7 @@
   ],
   "decidedBy": "l0-gate-promoter",
   "rationale": "Integrated audited end-to-end acceptance for context-invocations plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
-  "recordedAt": "2026-09-14T01:37:52Z",
+  "recordedAt": "2026-09-14T04:35:38Z",
   "verificationClassification": "passed",
   "gateReportRef": "docs/orchestration/gates/evidence/context-invocations.gate-report.json"
 }
