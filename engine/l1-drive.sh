@@ -439,6 +439,24 @@ elif [[ "${#authorized_repair[@]}" -ne 7 && -z "$accepted_checkpoint_mode" ]]; t
   retained_branch_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
     "$worker_branch^{commit}" 2>/dev/null || true)"
   if [[ -n "$retained_branch_head" ]]; then
+    # A retained candidate branch falls behind the target as soon as the
+    # reconciler commits control state there. Refusing it forever ("admitted
+    # base is not an ancestor") stalled two field runs; the supervisor's manual
+    # remedy was always the same merge. Do that merge here, once, recorded as
+    # an event; a real conflict still refuses below.
+    if ! git -C "$SINGULAR_ROOT" merge-base --is-ancestor "$packet_base_ref" \
+        "$retained_branch_head" >/dev/null 2>&1; then
+      refreshed_head="$(singular_refresh_retained_branch "$SINGULAR_ROOT" "$worker_branch" \
+        "$packet_base_ref" "$SINGULAR_WORKTREES_DIR/$task_id" 2>"$SINGULAR_STATE_DIR/tmp/base-refresh-$task_id.err" || true)"
+      if [[ -n "$refreshed_head" ]]; then
+        singular_append_event "l1.base_refreshed" \
+          "retained candidate branch merged onto the current admitted base" \
+          "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"branch\":\"$worker_branch\",\"before\":\"$retained_branch_head\",\"after\":\"$refreshed_head\",\"base\":\"$packet_base_ref\"}" || true
+        retained_branch_head="$refreshed_head"
+      else
+        echo "l1-drive: base refresh of retained branch failed: $(head -c 300 "$SINGULAR_STATE_DIR/tmp/base-refresh-$task_id.err" 2>/dev/null)" >&2
+      fi
+    fi
     admission_lineage_head="$retained_branch_head"
   else
     admission_lineage_head="$(git -C "$SINGULAR_ROOT" rev-parse --verify \
@@ -4127,7 +4145,19 @@ for ((attempt=0; attempt<product_passes_remaining; attempt++)); do
   fi
   case "$attempt_failure" in
     gate-red|worker-no-packet|packet-invalid|no-changes|commit-failed|scope-violation)
-      if [[ "$candidate_unchanged" == "yes" ]]; then
+      # A packet-format failure from an otherwise successful worker is not a
+      # product signal: the candidate is unchanged BECAUSE the task asked for
+      # qualification only, and the worker simply mis-emitted its final
+      # message. Give that exactly one more pass (bounded by the product budget
+      # below); park only when the same format failure repeats.
+      if [[ "$candidate_unchanged" == "yes" \
+          && ( "$attempt_failure" == "worker-no-packet" || "$attempt_failure" == "packet-invalid" ) \
+          && "$prev_failure_class" != "$attempt_failure" ]]; then
+        singular_append_event "l1.packet_format_retry_eligible" \
+          "unchanged candidate after a packet-format failure gets one bounded re-emit" \
+          "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n,\"failureClass\":\"$attempt_failure\",\"candidateSignature\":\"$attempt_end_candidate_signature\"}" \
+          || true
+      elif [[ "$candidate_unchanged" == "yes" ]]; then
         terminal_action="escalate-parked"
         terminal_authority="l1"
         terminal_rationale="no product progress: attempt $n left the exact candidate unchanged after $attempt_failure; another implement/audit pass would evaluate identical source."

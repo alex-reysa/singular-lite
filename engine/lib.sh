@@ -2561,6 +2561,101 @@ if not ok:
         obj = candidates[-1][1]
         ok = True
 
+def repair(s):
+    """Bounded structural repair for LLM output quirks: drop closers that do not
+    match the open bracket (the field-run defect was a string closed by `"]`),
+    close brackets left open at the end, and drop a comma that directly
+    precedes a closer. Strings and escapes are respected; content inside
+    strings is never touched. Returns (text, ops) with ops empty when nothing
+    was changed."""
+    out = []
+    stack = []
+    ops = []
+    in_str = False
+    esc = False
+    for ch in s:
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+        elif ch in "{[":
+            stack.append(ch)
+            out.append(ch)
+        elif ch in "}]":
+            want = "{" if ch == "}" else "["
+            if not stack or stack[-1] != want:
+                ops.append("dropped unmatched %r" % ch)
+                continue
+            stack.pop()
+            j = len(out) - 1
+            while j >= 0 and out[j] in " \t\r\n":
+                j -= 1
+            if j >= 0 and out[j] == ",":
+                del out[j]
+                ops.append("dropped trailing comma")
+            out.append(ch)
+        else:
+            out.append(ch)
+    if in_str:
+        out.append('"')
+        ops.append("closed open string")
+    while stack:
+        opener = stack.pop()
+        j = len(out) - 1
+        while j >= 0 and out[j] in " \t\r\n":
+            j -= 1
+        if j >= 0 and out[j] == ",":
+            del out[j]
+            ops.append("dropped trailing comma")
+        out.append("}" if opener == "{" else "]")
+        ops.append("closed open %r" % opener)
+    return "".join(out), ops
+
+if not ok:
+    # Last resort before declaring "no packet": repair the largest brace span
+    # and try again. The repair is structural only (brackets/commas), so it can
+    # not invent or alter field values; it is logged so the provenance is
+    # visible in the run directory.
+    first = text.find("{")
+    if first != -1:
+        repaired, ops = repair(text[first:])
+        if ops:
+            cand, cok = try_load(repaired)
+            if not cok:
+                # The repaired text may still carry trailing prose after the
+                # object; take the first balanced object of the repaired text.
+                depth = 0
+                in_str = False
+                esc = False
+                for i, c in enumerate(repaired):
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif c == "\\":
+                            esc = True
+                        elif c == '"':
+                            in_str = False
+                    elif c == '"':
+                        in_str = True
+                    elif c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            cand, cok = try_load(repaired[: i + 1])
+                            break
+            if cok and isinstance(cand, dict):
+                obj, ok = cand, True
+                sys.stderr.write("packet repaired: " + "; ".join(ops) + "\n")
+
 if not ok:
     sys.stderr.write("no parseable JSON object found\n")
     sys.exit(2)
@@ -5738,6 +5833,49 @@ os.replace(tmp, path)
 PY
 }
 
+# Merge the admitted base into a retained worker branch so the candidate stays
+# a descendant of the target it will be integrated into. Prints the new head on
+# success, nothing on refusal (conflict, unrelated lineage, dirty checkout).
+# Uses the live checkout when the branch is checked out in a clean worktree
+# (so that worktree and the ref move together); otherwise a plumbing merge
+# (merge-tree/commit-tree/update-ref) that touches no working tree. Owned
+# content is never altered: a base refresh is by construction a merge whose
+# second parent is the target.
+singular_refresh_retained_branch() {
+  local root="$1" branch="$2" base="$3" hint_worktree="${4:-}"
+  local head new_head tree checkout
+  head="$(git -C "$root" rev-parse --verify "refs/heads/$branch^{commit}" 2>/dev/null)" || return 1
+  git -C "$root" rev-parse --verify "$base^{commit}" >/dev/null 2>&1 || return 1
+  if git -C "$root" merge-base --is-ancestor "$base" "$head" >/dev/null 2>&1; then
+    printf '%s\n' "$head"; return 0
+  fi
+  git -C "$root" merge-base "$base" "$head" >/dev/null 2>&1 || {
+    echo "refresh: $branch and $base share no history" >&2; return 1; }
+  checkout="$(git -C "$root" worktree list --porcelain 2>/dev/null \
+    | awk -v b="refs/heads/$branch" '$1=="worktree"{w=$2} $1=="branch" && $2==b {print w}' | head -1)"
+  local msg="merge: refresh the retained $branch candidate onto the admitted base ${base:0:12}"
+  if [[ -n "$checkout" && -d "$checkout" ]]; then
+    if [[ -n "$(git -C "$checkout" status --porcelain 2>/dev/null)" ]]; then
+      echo "refresh: checkout $checkout is dirty; not merging" >&2; return 1
+    fi
+    if ! git -C "$checkout" -c user.name="${SINGULAR_GIT_L1_NAME:-singular L1}" \
+        -c user.email="${SINGULAR_GIT_L1_EMAIL:-l1@singular.local}" \
+        merge --no-ff -q -m "$msg" "$base" >/dev/null 2>&1; then
+      git -C "$checkout" merge --abort >/dev/null 2>&1 || true
+      echo "refresh: merge conflict between $branch and $base" >&2; return 1
+    fi
+    git -C "$checkout" rev-parse HEAD; return 0
+  fi
+  tree="$(git -C "$root" merge-tree --write-tree "$head" "$base" 2>/dev/null)" || {
+    echo "refresh: merge conflict between $branch and $base" >&2; return 1; }
+  tree="${tree%%$'\n'*}"
+  new_head="$(GIT_AUTHOR_NAME="${SINGULAR_GIT_L1_NAME:-singular L1}" GIT_AUTHOR_EMAIL="${SINGULAR_GIT_L1_EMAIL:-l1@singular.local}" \
+    GIT_COMMITTER_NAME="${SINGULAR_GIT_L1_NAME:-singular L1}" GIT_COMMITTER_EMAIL="${SINGULAR_GIT_L1_EMAIL:-l1@singular.local}" \
+    git -C "$root" commit-tree "$tree" -p "$head" -p "$base" -m "$msg")" || return 1
+  git -C "$root" update-ref "refs/heads/$branch" "$new_head" "$head" || return 1
+  printf '%s\n' "$new_head"
+}
+
 # Return a lease to a dispatchable state and give the task its retry budget back.
 #
 # retryCount and productPassStarted form the durable product-budget state.
@@ -5757,12 +5895,35 @@ from datetime import datetime, timezone
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+# Operator re-entry is a successor decision in its own right. The previous
+# attempt's terminal record stays history, not a live guard: reserve() refuses
+# any lease that still carries attemptLifecycle/terminalDisposition without
+# continuation or repair authority, so an unpark that left them in place could
+# never be dispatched again (field run 2026-09-14: 28 silent refusals).
+attempt = data.pop("attemptLifecycle", None)
+if isinstance(attempt, dict):
+    history = data.setdefault("attemptHistory", [])
+    key = lambda x: (x.get("reservationOwner"), x.get("reservationGeneration"), x.get("runId"), x.get("state"))
+    if not any(isinstance(i, dict) and key(i) == key(attempt) for i in history):
+        history.append(attempt)
+terminal = data.pop("terminalDisposition", None)
+if isinstance(terminal, dict):
+    history = data.setdefault("terminalDispositionHistory", [])
+    if terminal not in history:
+        history.append(terminal)
+data.setdefault("operatorReentries", []).append({
+    "at": now,
+    "previousStatus": data.get("status"),
+    "archivedRunId": (attempt or terminal or {}).get("runId", ""),
+    "previousRetryCount": data.get("retryCount", 0),
+})
 data["status"] = "ready"
 data["retryCount"] = 0
 data["productPassStarted"] = False
 data.pop("productPassStartedAt", None)
 data.pop("productPassStartedRunId", None)
-data["updatedAt"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+data["updatedAt"] = now
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
