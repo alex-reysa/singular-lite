@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-14T14:08:08Z — TASK-1116 — authorize-continuation
+
+- Run: `ORIGIN-20260914T140807Z-36576`
+- Branch: `codex/brain-rescue/TASK-1116`
+- Authority: origin
+- Rationale: one-shot continuation e284dafe43c8dc6e9678eb4a918a6d80b4b38ba2b6ba58b8ea022d70f428962a preserves predecessor accounting and partial bytes
+
 ### 2026-09-13T05:58:02Z — TASK-1105 — escalate-parked
 
 - Run: `RUN-20260913T051349Z-29042`
