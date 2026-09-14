@@ -206,11 +206,13 @@ class ContextInvocationTest(unittest.TestCase):
             "SINGULAR_RESERVATION_OWNER": "secret-host-authority",
             "SINGULAR_GIT_LOCK_CAPABILITY": "secret-lock",
             "SINGULAR_CODEX_MODEL": "gpt-fixture",
+            "SINGULAR_MEMORY_CREDENTIAL_KEY": "non-secret-test-sentinel",
             "PATH": "/usr/bin:/bin",
         })
         self.assertNotIn("SINGULAR_RESERVATION_OWNER", child)
         self.assertNotIn("SINGULAR_GIT_LOCK_CAPABILITY", child)
         self.assertNotIn("SINGULAR_CONTEXT_CONFIG_FILE", child)
+        self.assertNotIn("SINGULAR_MEMORY_CREDENTIAL_KEY", child)
         self.assertEqual(child["SINGULAR_RUNNER_ROLE"], "implementer")
         self.assertEqual(child["SINGULAR_TEST_TASK_ID"], "TASK-0001")
         self.assertEqual(child["SINGULAR_CODEX_MODEL"], "gpt-fixture")

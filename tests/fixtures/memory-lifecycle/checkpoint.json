@@ -1,0 +1,5 @@
+{
+  "taskId": "TASK-A",
+  "nextAction": "Use the approved retry discipline in task B.",
+  "completed": ["candidate-proposed", "independent-review-complete"]
+}

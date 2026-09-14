@@ -327,6 +327,18 @@ cmd_context() {
   ' _ "$home" "$root" "$cwd" "$@"
 }
 
+cmd_memory() {
+  local home root cwd
+  home="$(resolve_engine_home)"
+  root="$(require_repo)"
+  cwd="$(pwd -P)"
+  [[ -f "$home/engine/memory_service.py" ]] \
+    || die "engine $home has no engine/memory_service.py"
+  SINGULAR_ROOT="$root" SINGULAR_ENGINE_HOME="$home" \
+    exec python3 "$home/engine/memory_service.py" \
+      --engine-home "$home" --repo-root "$root" --cwd "$cwd" -- "$@"
+}
+
 cmd_review_policy() {
   local home root bash_path
   home="$(resolve_engine_home)"
@@ -2429,6 +2441,8 @@ Setup / lifecycle:
   doctor [--json] [--repair-model-cache]               structured operator preflight
   manifest gen|check|lint|bless                        pinned, opt-in singular-brain producer
   context build|search|get|explain                     bounded local context retrieval
+  memory propose|review|approve|reject|quarantine|supersede|tombstone|checkpoint|show|rebuild
+                                                      governed project-local memory lifecycle
   review-policy effective|show|check|record|grant|backfill|backlog
                                                       programmable review policy (rounds, severities, exceptions)
   test [--status [--json]|--wait|--no-wait|--new-run|--rerun-failures]
@@ -2507,6 +2521,7 @@ main() {
     doctor)        cmd_doctor_v1 "$@" ;;
     manifest)      cmd_manifest "$@" ;;
     context)       cmd_context "$@" ;;
+    memory)        cmd_memory "$@" ;;
     review-policy) cmd_review_policy "$@" ;;
     test)          cmd_test "$@" ;;
     update)        cmd_update "$@" ;;

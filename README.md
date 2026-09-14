@@ -646,6 +646,130 @@ doctor --json` projects the effective service policy and recent bundle details.
 Search, get, effective-config, and explain never write accounting or retrieval
 state.
 
+### Reviewed persistent memory
+
+Persistent memory is opt-in and project-local. Model-authored content always
+enters as an untrusted `proposed` record with a retained source hash. It becomes
+eligible for context retrieval only after a separately identified authority is
+verified against a pinned authority document and, where configured, pinned code
+identity. The authority's subject must differ from the proposer. A consumer
+policy selects allowed scopes, approver roles, retrieval roles, and whether a
+human (rather than an authorized internal reviewer role) is required:
+
+```json
+{
+  "memoryService": {
+    "enabled": true,
+    "storePath": ".singular-memory",
+    "maxContentBytes": 16384,
+    "maxCheckpointBytes": 32768,
+    "credentialKeyId": "host-memory-key-v1",
+    "credentialKeySha256": "sha256:...",
+    "authorities": {
+      "independent-reviewer": {
+        "source": "policy/memory-reviewer.json",
+        "sha256": "sha256:...",
+        "codeIdentity": [
+          {"path": "policy/reviewer.py", "sha256": "sha256:..."}
+        ]
+      }
+    },
+    "consumerPolicies": {
+      "task": {
+        "scopes": ["project"],
+        "approverRoles": ["memory-reviewer"],
+        "humanReviewRequired": false,
+        "contextRoles": ["planner", "implementer"]
+      }
+    }
+  },
+  "contextService": {
+    "enabled": true,
+    "rolePolicy": {"implementer": ["brain", "code", "run", "memory"]}
+  }
+}
+```
+
+Routine policy-authorized internal approval does not interrupt the user.
+Set `humanReviewRequired` only for consumers that require it. The service
+requires every proposal, lifecycle decision, and checkpoint write to carry an
+operation-bound HMAC credential minted by the host. The credential binds the
+authenticated subject, action, operation, target memory, and relevant reason or
+replacement; `SINGULAR_MEMORY_CREDENTIAL_KEY` is host-held and must match the
+configured key hash. Merely naming a configured authority or proposer is never
+sufficient. Human-only consumers additionally require a credential whose
+authenticated subject matches the configured human authority.
+
+The service
+revalidates retained sources, authored artifact bytes, authority documents, and
+configured code identity before trusted retrieval. Missing or drifted identity
+fails closed. Rejection, supersession, and tombstones are durable record states;
+the trusted index is derived and can be rebuilt without restoring retired
+content. Each lifecycle writer takes the existing store lock and drains
+prepared work before reading lifecycle state. New journals bind the exact
+request and first-captured input hashes, expected record revision/hash,
+resulting revision/hash, operation, and response. Recovery applies a successor
+only to its recorded predecessor, acknowledges an exact result or proven
+descendant, and otherwise fails closed. Legacy prepared journals without that
+ancestry are acknowledged only when their exact result is already present.
+Replay therefore cannot reopen rejected, quarantined, superseded, or tombstoned
+memory. Index refresh is derived repair after the authoritative journal/record
+commit; deleting or failing it does not change lifecycle state.
+
+Context readers never acquire or create the writer lock, store directories,
+indexes, caches, or ledgers. They parse and hash the same captured record bytes,
+require the selected revision's journal to be committed, bind record and
+operation membership plus artifact, citations, current policy, authority, and
+code identity, and retry snapshot acquisition only within a fixed bound. An
+absent store is an empty snapshot. Prepared, malformed, conflicting, or
+changing state yields a recovery-required or changed-snapshot refusal and is
+repaired only by a later writer. `tests/test-memory-lifecycle-e2e.sh` proves
+this from observed filesystem state (content, inode, timestamps and directory
+membership) for absent, populated and pending-journal stores on every host, and
+additionally re-runs the same proof under a macOS `sandbox-exec` deny-write
+policy wherever a profile can actually be applied. Seatbelt refuses to nest, so
+on an already-contained host the extra OS-enforced pass records a skip reason
+instead of failing; the behavioural proof still runs.
+
+Search, get, bundle build, CLI publication, and host admission revalidate the
+frozen snapshot at their publication/admission boundary. The guarantee is the
+exact immutable bytes selected at that validated point in time; it does not
+claim synchronization with a retirement after validation through an arbitrary
+consumer's read of the final stdout byte. Operation IDs remain
+conflict-detecting and idempotent, and bounded checkpoints recover solely from
+local retained files:
+
+```bash
+singular memory propose --operation-id capture-1 --task TASK-1234 \
+  --actor implementer-1 --scope project --policy task \
+  --content-file findings/retry.md --source events/task-complete.json \
+  --credential .host-credentials/capture-1.json
+singular memory review --memory-id mem-... --authority independent-reviewer
+singular memory approve --operation-id approve-1 --memory-id mem-... \
+  --authority independent-reviewer --credential .host-credentials/approve-1.json
+singular memory reject --operation-id reject-1 --memory-id mem-... \
+  --authority independent-reviewer --reason "not reusable" \
+  --credential .host-credentials/reject-1.json
+singular memory quarantine --operation-id quarantine-1 --memory-id mem-... \
+  --authority independent-reviewer --reason "citation requires investigation" \
+  --credential .host-credentials/quarantine-1.json
+singular memory supersede --operation-id supersede-1 --memory-id mem-old \
+  --by mem-new --authority independent-reviewer \
+  --credential .host-credentials/supersede-1.json
+singular memory tombstone --operation-id retire-1 --memory-id mem-... \
+  --authority independent-reviewer --reason "policy retirement" \
+  --credential .host-credentials/retire-1.json
+singular memory checkpoint save --operation-id cp-1 --task TASK-1234 \
+  --actor implementer-1 --payload-file checkpoints/task.json \
+  --source events/task-progress.json \
+  --credential .host-credentials/cp-1.json
+singular memory checkpoint recover --task TASK-1234
+singular memory rebuild
+```
+
+The record contract is `singular.orchestration.memory-record.v1`; schema copies
+are published in `schemas/` and `schemas/orchestration/`.
+
 **Note on overrides.** `singular.config.json`’s `env{}` block is applied over the
 process environment, so in a repo that pins a knob there, `VAR=0 singular …` will
 *not* override it — edit the config (or `.singular-state/config.local.sh`) instead.

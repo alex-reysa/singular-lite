@@ -28,6 +28,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'SINGULAR_LOCAL_CONFIG_FILE': '/dev/null',
         'SINGULAR_BASH_BIN': '/opt/homebrew/bin/bash',
         'PYTHONDONTWRITEBYTECODE': '1',
+        'SINGULAR_MEMORY_CREDENTIAL_KEY': 'non-secret-provider-boundary-sentinel',
     })
     def fixture_run(command, **kwargs):
         kwargs.setdefault('env', fixture_env)
@@ -119,7 +120,7 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
     prompt.write_text('Review this task.')
     marker_file = t / 'launched'
     provider = t / 'provider.py'
-    provider.write_text("import pathlib,sys; prompt=pathlib.Path(sys.argv[2]); text=prompt.read_text(); assert 'Complete host-delivered' in text and 'audit-verification.json' in text; pathlib.Path(sys.argv[3]).write_text(str(prompt))")
+    provider.write_text("import os,pathlib,sys; assert 'SINGULAR_MEMORY_CREDENTIAL_KEY' not in os.environ; prompt=pathlib.Path(sys.argv[2]); text=prompt.read_text(); assert 'Complete host-delivered' in text and 'audit-verification.json' in text; pathlib.Path(sys.argv[3]).write_text(str(prompt))")
     launch = host + ['--manifest', str(manifest), '--ledger', str(ledger), '--required', 'packet.json',
                      '--required', 'audit-verification.json', '--', sys.executable, str(provider),
                      '--prompt-file', str(prompt), str(marker_file)]

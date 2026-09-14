@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "singular.orchestration.memory-record.v1",
+  "title": "Singular reviewed persistent memory record",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "memoryId",
+    "status",
+    "trust",
+    "scope",
+    "policyId",
+    "proposal",
+    "proposer",
+    "content",
+    "sources",
+    "codeIdentity",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "schema": { "const": "singular.orchestration.memory-record.v1" },
+    "memoryId": { "type": "string", "pattern": "^mem-[0-9a-f]{32}$" },
+    "status": {
+      "type": "string",
+      "enum": ["proposed", "approved", "rejected", "quarantined", "superseded", "tombstoned"]
+    },
+    "trust": {
+      "type": "string",
+      "enum": ["untrusted", "trusted", "retired", "invalid-source", "invalid-authority"]
+    },
+    "scope": { "type": "string", "minLength": 1 },
+    "policyId": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "transactionId": { "type": "string", "minLength": 1 },
+    "ancestry": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sha256" },
+      "uniqueItems": true
+    },
+    "proposal": {
+      "type": "object",
+      "required": ["operationId", "taskId", "createdAt"],
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1 },
+        "taskId": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "proposer": {
+      "type": "object",
+      "required": ["actorId", "taskId", "credential"],
+      "properties": {
+        "actorId": { "type": "string", "minLength": 1 },
+        "taskId": { "type": "string", "minLength": 1 },
+        "credential": { "$ref": "#/$defs/credential" }
+      }
+    },
+    "content": { "$ref": "#/$defs/artifact" },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "codeIdentity": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "approval": { "$ref": "#/$defs/decision" },
+    "rejection": { "$ref": "#/$defs/decision" },
+    "quarantine": { "$ref": "#/$defs/decision" },
+    "supersession": { "$ref": "#/$defs/decision" },
+    "tombstone": { "$ref": "#/$defs/decision" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "artifact": {
+      "allOf": [
+        { "$ref": "#/$defs/source" },
+        {
+          "type": "object",
+          "required": ["bytes"],
+          "properties": { "bytes": { "type": "integer", "minimum": 0 } }
+        }
+      ]
+    },
+    "credential": {
+      "type": "object",
+      "required": ["path", "sha256", "claimsSha256", "keyId", "subjectId", "subjectType", "claims", "signature"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "claimsSha256": { "$ref": "#/$defs/sha256" },
+        "keyId": { "type": "string", "minLength": 1 },
+        "subjectId": { "type": "string", "minLength": 1 },
+        "subjectType": { "enum": ["human", "internal-role"] },
+        "claims": { "type": "object" },
+        "signature": { "type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["authorityId", "subjectId", "subjectType", "roles", "source", "codeIdentity", "operationId", "decidedAt", "credential"],
+      "properties": {
+        "authorityId": { "type": "string", "minLength": 1 },
+        "subjectId": { "type": "string", "minLength": 1 },
+        "subjectType": { "enum": ["human", "internal-role"] },
+        "roles": { "type": "array", "items": { "type": "string" } },
+        "source": { "$ref": "#/$defs/source" },
+        "codeIdentity": { "type": "array", "items": { "$ref": "#/$defs/source" } },
+        "operationId": { "type": "string", "minLength": 1 },
+        "decidedAt": { "type": "string", "format": "date-time" },
+        "credential": { "$ref": "#/$defs/credential" }
+      }
+    }
+  }
+}

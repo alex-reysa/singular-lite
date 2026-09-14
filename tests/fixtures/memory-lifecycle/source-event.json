@@ -1,0 +1,6 @@
+{
+  "schema": "singular.event.v1",
+  "type": "task.completed",
+  "taskId": "TASK-A",
+  "finding": "A transient capacity response retained the same input bundle."
+}
