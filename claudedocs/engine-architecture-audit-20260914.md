@@ -111,12 +111,33 @@ Regression baseline: `test-orphan-continuation.sh` and
 `test-accept-existing-packet.sh` fail identically on the untouched A14 source
 (pre-existing host failures already on record); everything else run is green.
 
+## 5. Two more deadlocks found while relaunching on A15 (16:40–16:46Z)
+
+| Stall | Root cause | Fix status |
+|---|---|---|
+| Launch failed, lease stuck `planned` (16:40Z) | A STOP-frozen driver exits 0 without finalizing its dispatch record. The reaper then refuses to finish that record once the *next* reconcile has reserved the lease ("stale owner cannot finish successor lease"), counts it as `running`, and the successor cannot bind because the record is still `launched`. Reserve-before-bind deadlock. | Finalized the record by hand via `singular_lifecycle_dispatch_finalize`; reservation released mirroring `finish()`. Engine fix pending: a frozen exit must finalize its record; the reaper must finalize a record whose exit file exists regardless of successor reservations. |
+| Refused ×3 "active/accepted worktree (lease: planned)" → parked (16:44Z) | The retained-worktree guard reads the lease status, and a detached dispatch has *just* set it to `planned` itself. So a retained worktree plus any fresh dispatch is always refused; `unpark` can only work if the worktree was pruned first. | Removed the stale worktree (branch and evidence kept), unparked, fresh dispatch succeeded. Engine fix pending: treat a `planned` lease owned by the driver's own reservation as not-active. |
+
+Positive result from the same relaunch: `l1.base_refreshed` fired and the
+engine moved `codex/brain-rescue/TASK-1117` onto the current target itself
+(575f054a, owned content byte-identical to f5d28582) — the class of stall
+that cost the most hours over the weekend is gone.
+
+Provider note: the Codex account hit its usage limit at 16:32Z (until Sep 19).
+The production runner and intelligence roles were routed to Claude in
+config-A15; no credits were bought.
+
 ## 4. Recommended next simplifications (not done today)
 
 - Reconciler control-state commits should not land on the integration target
   (put them on a `control` ref); that removes the base-drift class entirely.
 - Refusals must count toward the breaker; a task refused N times parks with
   the refusal reason on the lease.
+- A frozen/refused driver exit must finalize its dispatch record, and the
+  reaper must honour an existing exit file even when a successor reservation
+  exists (§5).
+- The retained-worktree guard must not refuse the driver's own `planned`
+  reservation (§5).
 - Collapse `orphan-reservation` / `outcome-unknown` / operator re-entry into
   one `successor` authority minted by any recorded decision.
 - Stop re-evaluating historical imported packets every cycle (26 k
