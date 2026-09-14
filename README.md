@@ -723,7 +723,13 @@ operation membership plus artifact, citations, current policy, authority, and
 code identity, and retry snapshot acquisition only within a fixed bound. An
 absent store is an empty snapshot. Prepared, malformed, conflicting, or
 changing state yields a recovery-required or changed-snapshot refusal and is
-repaired only by a later writer.
+repaired only by a later writer. `tests/test-memory-lifecycle-e2e.sh` proves
+this from observed filesystem state (content, inode, timestamps and directory
+membership) for absent, populated and pending-journal stores on every host, and
+additionally re-runs the same proof under a macOS `sandbox-exec` deny-write
+policy wherever a profile can actually be applied. Seatbelt refuses to nest, so
+on an already-contained host the extra OS-enforced pass records a skip reason
+instead of failing; the behavioural proof still runs.
 
 Search, get, bundle build, CLI publication, and host admission revalidate the
 frozen snapshot at their publication/admission boundary. The guarantee is the

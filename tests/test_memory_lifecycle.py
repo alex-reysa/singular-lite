@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import json
@@ -23,6 +24,7 @@ MEMORY_CLI = ROOT / "engine" / "memory_service.py"
 CONTEXT_CLI = ROOT / "engine" / "context_cli.py"
 PUBLIC_CLI = ROOT / "cli" / "singular"
 CREDENTIAL_KEY = b"fixture-host-held-memory-credential-key"
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
 
 def assert_schema_instance(test: unittest.TestCase, value: object,
@@ -67,6 +69,47 @@ def assert_schema_instance(test: unittest.TestCase, value: object,
 
 def digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@functools.lru_cache(maxsize=1)
+def sandbox_apply_reason() -> str | None:
+    """Report why an OS deny-write proof is unavailable, or None when usable.
+
+    Presence of /usr/bin/sandbox-exec does not imply it can apply a profile:
+    seatbelt refuses to nest, so an already-contained host returns
+    ``sandbox_apply: Operation not permitted``. The behavioural read-only
+    proof below therefore never depends on this probe; only the additional
+    OS-enforced proof does.
+    """
+    if sys.platform != "darwin" or not os.access(SANDBOX_EXEC, os.X_OK):
+        return f"{SANDBOX_EXEC} is unavailable on this platform"
+    probe = subprocess.run([SANDBOX_EXEC, "-p", "(version 1)(allow default)",
+                            "/usr/bin/true"], capture_output=True)
+    if probe.returncode != 0:
+        return "sandbox_apply is not permitted (nested seatbelt)"
+    return None
+
+
+def workspace_state(root: Path) -> dict[str, tuple]:
+    """Capture every mutation an honest reader could make under ``root``.
+
+    Content, inode and both timestamps are recorded so an atomic replace, an
+    in-place rewrite, a truncation and a pure re-touch are all detected, and
+    directory membership is recorded so creations and deletions are too.
+    """
+    state: dict[str, tuple] = {}
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        info = path.lstat()
+        if path.is_dir() and not path.is_symlink():
+            state[relative] = ("dir", info.st_ino, info.st_mtime_ns, info.st_ctime_ns,
+                               tuple(sorted(item.name for item in path.iterdir())))
+        elif path.is_file() and not path.is_symlink():
+            state[relative] = ("file", info.st_ino, info.st_mtime_ns, info.st_ctime_ns,
+                               digest(path))
+        else:
+            state[relative] = ("other", info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+    return state
 
 
 class MemoryLifecycleTest(unittest.TestCase):
@@ -255,22 +298,34 @@ class MemoryLifecycleTest(unittest.TestCase):
             self.fail(proc.stderr)
         return json.loads(proc.stdout)
 
-    def sandbox_context_search(self, *, ok: bool = True) -> subprocess.CompletedProcess[str]:
-        profile = (
-            '(version 1) (allow default) '
-            f'(deny file-write* (subpath "{self.workspace.resolve()}")) '
-            f'(deny file-write* (subpath "{ROOT.resolve()}"))'
-        )
+    def public_context_search(self, *, ok: bool = True,
+                              deny_writes: bool = False,
+                              command: str = "search",
+                              extra: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
+        """Invoke a public read-only retrieval entrypoint.
+
+        ``deny_writes`` additionally contains the reader in an OS policy that
+        denies every write to the project and the engine tree. That containment
+        is an extra proof, not the definition of the contract: the caller
+        asserts the no-write behaviour from observed filesystem state either way.
+        """
+        prefix: list[str] = []
+        if deny_writes:
+            profile = (
+                '(version 1) (allow default) '
+                f'(deny file-write* (subpath "{self.workspace.resolve()}")) '
+                f'(deny file-write* (subpath "{ROOT.resolve()}"))'
+            )
+            prefix = [SANDBOX_EXEC, "-p", profile]
         environment = {
             **os.environ,
             "SINGULAR_ENGINE_HOME": str(ROOT),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         proc = subprocess.run(
-            ["/usr/bin/sandbox-exec", "-p", profile, "bash", str(PUBLIC_CLI),
-             "context", "search", "--config", str(self.config),
-             "--workspace", str(self.workspace), "--role", "implementer",
-             "--query", "transient capacity"],
+            [*prefix, "bash", str(PUBLIC_CLI), "context", command,
+             "--config", str(self.config),
+             "--workspace", str(self.workspace), "--role", "implementer", *extra],
             text=True, capture_output=True, cwd=self.workspace, env=environment,
         )
         if ok:
@@ -278,6 +333,13 @@ class MemoryLifecycleTest(unittest.TestCase):
         else:
             self.assertNotEqual(proc.returncode, 0, proc.stdout)
         return proc
+
+    def sandbox_context_search(self, *, ok: bool = True,
+                               deny_writes: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.public_context_search(
+            ok=ok, deny_writes=deny_writes,
+            extra=("--query", "transient capacity"),
+        )
 
     def test_proposal_requires_verified_independent_approval(self) -> None:
         unauthenticated = self.memory(
@@ -648,10 +710,8 @@ class MemoryLifecycleTest(unittest.TestCase):
         self.assertIn({"ref": ref, "reason": "revoked_since_prior_bundle"},
                       delta["omissions"])
 
-    @unittest.skipUnless(Path("/usr/bin/sandbox-exec").is_file(),
-                         "requires macOS sandbox-exec")
-    def test_public_memory_readers_are_os_enforced_read_only_for_absent_populated_and_pending_store(self) -> None:
-        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
+    def _assert_os_write_policy_denies(self) -> None:
+        """Prove the deny-write profile this fixture uses is actually enforced."""
         victim = self.workspace / "write-policy-victim"
         rename_target = self.workspace / "write-policy-renamed"
         victim.write_text("retain", encoding="utf-8")
@@ -660,7 +720,7 @@ class MemoryLifecycleTest(unittest.TestCase):
             f'(deny file-write* (subpath "{self.workspace.resolve()}"))'
         )
         control = subprocess.run(
-            ["/usr/bin/sandbox-exec", "-p", profile, sys.executable, "-c",
+            [SANDBOX_EXEC, "-p", profile, sys.executable, "-c",
              "import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); q=pathlib.Path(sys.argv[2]); "
              "actions=[lambda:(p.parent/'denied-create').write_text('x'), "
              "lambda:open(p,'r+').close(), lambda:os.rename(p,q), lambda:os.unlink(p)]; "
@@ -670,23 +730,39 @@ class MemoryLifecycleTest(unittest.TestCase):
             text=True, capture_output=True,
         )
         self.assertEqual(control.returncode, 0, control.stderr)
+        victim.unlink()
+
+    def _assert_public_readers_never_write(self, *, deny_writes: bool) -> None:
+        """Absent, populated and pending-journal stores must all stay untouched."""
+        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
         self.assertFalse((self.workspace / ".memory").exists())
-        absent = self.sandbox_context_search()
+        before_absent = workspace_state(self.workspace)
+        absent = self.sandbox_context_search(deny_writes=deny_writes)
         self.assertTrue(json.loads(absent.stdout)["abstained"])
         self.assertFalse((self.workspace / ".memory").exists())
+        self.assertEqual(before_absent, workspace_state(self.workspace))
 
         candidate = self.propose("readonly-populated")
         self.approve(candidate["memory"]["memoryId"], "readonly-approved")
         lock = self.workspace / ".memory" / ".lock"
         self.assertTrue(lock.is_file())
-        before = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
-                  for path in self.workspace.rglob("*") if path.is_file()}
-        populated = self.sandbox_context_search()
+        before = workspace_state(self.workspace)
+        populated = self.sandbox_context_search(deny_writes=deny_writes)
         self.assertFalse(json.loads(populated.stdout)["abstained"])
-        after = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
-                 for path in self.workspace.rglob("*") if path.is_file()}
-        self.assertEqual(before, after)
+        self.assertEqual(before, workspace_state(self.workspace))
 
+        # `get` and `build` are read-only publications too, not just `search`.
+        body_ref = "memory:" + candidate["memory"]["memoryId"]
+        fetched = self.public_context_search(
+            deny_writes=deny_writes, command="get",
+            extra=("--ref", body_ref, "--version",
+                   candidate["memory"]["content"]["sha256"]),
+        )
+        self.assertEqual(json.loads(fetched.stdout)["ref"], body_ref)
+        self.assertEqual(before, workspace_state(self.workspace))
+
+        # A pending journal must fail closed for readers and still not repair,
+        # recover, lock or otherwise write anything on the reader's behalf.
         self.memory(
             "propose", "--operation-id", "readonly-pending", "--task", "TASK-A",
             "--actor", "task-a-worker", "--scope", "project", "--policy", "task",
@@ -695,13 +771,22 @@ class MemoryLifecycleTest(unittest.TestCase):
             extra_env={"SINGULAR_MEMORY_FAIL_AFTER_JOURNAL": "readonly-pending"},
             ok=False,
         )
-        before_pending = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
-                          for path in self.workspace.rglob("*") if path.is_file()}
-        pending = self.sandbox_context_search(ok=False)
+        before_pending = workspace_state(self.workspace)
+        pending = self.sandbox_context_search(ok=False, deny_writes=deny_writes)
         self.assertIn("recovery required", pending.stderr)
-        after_pending = {path.relative_to(self.workspace): (path.stat().st_mtime_ns, digest(path))
-                         for path in self.workspace.rglob("*") if path.is_file()}
-        self.assertEqual(before_pending, after_pending)
+        self.assertEqual(before_pending, workspace_state(self.workspace))
+
+    def test_public_memory_readers_are_read_only_for_absent_populated_and_pending_store(self) -> None:
+        self._assert_public_readers_never_write(deny_writes=False)
+
+    def test_public_memory_readers_are_os_enforced_read_only_for_absent_populated_and_pending_store(self) -> None:
+        reason = sandbox_apply_reason()
+        if reason is not None:
+            # The behavioural contract is proven unconditionally by the sibling
+            # test above; only the OS enforcement layer is host-dependent.
+            raise unittest.SkipTest(f"OS deny-write proof unavailable: {reason}")
+        self._assert_os_write_policy_denies()
+        self._assert_public_readers_never_write(deny_writes=True)
 
     def test_ambiguous_legacy_and_malformed_journals_fail_closed(self) -> None:
         candidate = self.propose("legacy-journal-candidate")
