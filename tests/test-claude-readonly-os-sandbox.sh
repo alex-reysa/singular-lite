@@ -160,7 +160,15 @@ grep -F 'OS-enforced read-only is required for this invocation but unavailable' 
 [[ ! -e "$launched" ]] || fail "require: mock was invoked"
 pass "REQUIRE_OS_READONLY=1 with missing sandbox-exec exits 78 without launch"
 
-# --- l2: mock is not sandboxed and can write
+# --- l2: workspace containment. Writes inside the worktree still succeed, but the
+# repository root and the durable state directory are denied by the OS, matching
+# the containment `grok-run.sh --sandbox workspace` and `codex-run.sh
+# --sandbox workspace-write` already provide. Before this profile existed a routed
+# implementer could rewrite the review ledger, run receipts or a frozen runtime
+# and neither scope-check.sh nor the readonly restore guard would see it.
+if [[ "$sandbox_apply_ok" != "yes" ]]; then
+  pass "l2 workspace containment skipped (sandbox_apply not permitted in this process)"
+else
 repo3="$workroot/l2"
 new_repo "$repo3"
 l2_out="$workroot/l2-last.json"
@@ -169,12 +177,65 @@ run_claude "$repo3" --worktree "$repo3" --level l2 --run-id RUN-os-l2 \
   --prompt-file /dev/null --output-last-message "$l2_out" \
   >"$l2_log" 2>&1 || { tail -40 "$l2_log" >&2; fail "l2 run failed"; }
 l2_denied="$(cat "$l2_out")"
-[[ "$l2_denied" == "0" ]] || fail "l2: expected 0 PermissionError (writes allowed), got '$l2_denied'"
+[[ "$l2_denied" == "0" ]] || fail "l2: expected 0 PermissionError inside the worktree, got '$l2_denied'"
 [[ -f "$repo3/sandbox-create" ]] || fail "l2: mock create did not persist"
 [[ -f "$repo3/rename-dst" ]] || fail "l2: mock rename did not persist"
 [[ ! -f "$repo3/unlink-me" ]] || fail "l2: mock unlink did not persist"
-grep -F 'os-sandbox=sandbox-exec' "$l2_log" >/dev/null \
-  && fail "l2: OS sandbox was applied (argv must stay byte-identical)"
-pass "l2 lets the mock write and does not apply os-sandbox"
+grep -F 'claude-run: workspace os-sandbox=sandbox-exec profile=' "$l2_log" >/dev/null \
+  || fail "l2: workspace os-sandbox was not applied"
+l2_profile="$repo3/.singular-state/runs/RUN-os-l2/claude-readonly-sandbox.sb"
+[[ -f "$l2_profile" ]] || fail "l2: missing sandbox profile $l2_profile"
+repo3_real="$(cd "$repo3" && pwd -P)"
+grep -F "(deny file-write* (subpath \"$repo3_real\"))" "$l2_profile" >/dev/null \
+  || fail "l2: profile does not deny the repository root"
+grep -F "(allow file-write* (subpath \"$repo3_real\"))" "$l2_profile" >/dev/null \
+  || fail "l2: profile does not allow the worktree back"
+# The state-dir deny MUST be the last rule mentioning it: sandbox-exec takes the
+# last matching rule, and the worktree allow would otherwise re-open it.
+[[ "$(grep -n "$repo3_real/.singular-state" "$l2_profile" | tail -1 | cut -d: -f2-)" == *'(deny file-write*'* ]] \
+  || fail "l2: the final rule for the state dir is not a deny"
+# Enforcement, not just profile text: the OS must actually refuse these writes.
+if /usr/bin/sandbox-exec -f "$l2_profile" /usr/bin/touch "$repo3_real/.singular-state/escape-probe" 2>/dev/null; then
+  rm -f "$repo3_real/.singular-state/escape-probe"
+  fail "l2: sandbox profile did not deny a write into the state dir"
+fi
+/usr/bin/sandbox-exec -f "$l2_profile" /usr/bin/touch "$repo3_real/inside-probe" \
+  || fail "l2: sandbox profile denied a write inside the worktree"
+rm -f "$repo3_real/inside-probe"
+pass "l2 applies workspace containment: worktree writable, state dir denied"
+
+# --- l2 with a nested worktree: the real dispatch shape. SINGULAR_ROOT is the
+# repository and the candidate lives in $root/.worktrees/<task>, so the root deny
+# and the worktree allow are distinguishable. This is the case the P1 named: the
+# agent may edit its candidate and nothing else in the repository.
+nested_root="$workroot/nested"
+new_repo "$nested_root"
+mkdir -p "$nested_root/.worktrees/TASK-N" "$nested_root/.singular-state"
+( cd "$nested_root" && git worktree add -q .worktrees/TASK-N -b agent/nested "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null ) || true
+printf 'root\n' >"$nested_root/root-file.txt"
+nested_log="$workroot/nested.log"
+( cd "$nested_root" && \
+    SINGULAR_ROOT="$nested_root" \
+    SINGULAR_STATE_DIR="$nested_root/.singular-state" \
+    SINGULAR_ENGINE_HOME="$ENGINE_HOME" \
+    "$CLAUDE_RUN" --worktree "$nested_root/.worktrees/TASK-N" --level l2 \
+      --run-id RUN-os-nested --prompt-file /dev/null \
+      --output-last-message "$workroot/nested-last.json" ) >"$nested_log" 2>&1 \
+  || { tail -40 "$nested_log" >&2; fail "l2 nested run failed"; }
+nested_profile="$nested_root/.singular-state/runs/RUN-os-nested/claude-readonly-sandbox.sb"
+[[ -f "$nested_profile" ]] || fail "l2 nested: missing sandbox profile $nested_profile"
+nested_real="$(cd "$nested_root" && pwd -P)"
+if /usr/bin/sandbox-exec -f "$nested_profile" /usr/bin/touch "$nested_real/root-file.txt" 2>/dev/null; then
+  fail "l2 nested: a write to the repository root was NOT denied"
+fi
+if /usr/bin/sandbox-exec -f "$nested_profile" /usr/bin/touch "$nested_real/.singular-state/escape" 2>/dev/null; then
+  rm -f "$nested_real/.singular-state/escape"
+  fail "l2 nested: a write to the durable state dir was NOT denied"
+fi
+/usr/bin/sandbox-exec -f "$nested_profile" /usr/bin/touch "$nested_real/.worktrees/TASK-N/candidate.txt" \
+  || fail "l2 nested: a write inside the candidate worktree was denied"
+rm -f "$nested_real/.worktrees/TASK-N/candidate.txt"
+pass "l2 nested worktree: candidate writable, repository root and state dir denied"
+fi
 
 echo "PASS: test-claude-readonly-os-sandbox"
