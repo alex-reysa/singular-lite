@@ -472,6 +472,11 @@ PY
   git -C "$FIXTURE_ROOT" commit -qm 'enable frozen context service'
 }
 
+# The review policy bounds product repairs to maxReviewRounds-1 and defaults
+# to two rounds. These fixtures pin the native risk-tier and recovery
+# semantics (high-risk tasks with two repairs), so they run under three
+# rounds unless a case overrides FROZEN_REVIEW_MAX_ROUNDS. Policy behaviour
+# itself is pinned by test-review-policy.sh and test-first-audit-correction.sh.
 run_engine() {
   local mode="$1"; shift
   (
@@ -506,6 +511,7 @@ run_engine() {
       SINGULAR_REQUIRE_AUDIT=1 \
       SINGULAR_AUDIT_VERIFY=0 \
       SINGULAR_WORKER_INFRA_MAX=1 \
+      SINGULAR_REVIEW_MAX_ROUNDS="${FROZEN_REVIEW_MAX_ROUNDS:-3}" \
       SINGULAR_DECIDER_FAST=1 \
       "$@"
   )

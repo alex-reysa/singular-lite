@@ -415,14 +415,39 @@ def _atomic_write(path: Path, data: dict[str, Any]) -> None:
 
 
 @contextmanager
-def locked_ledger(state_dir: Path) -> Iterator[dict[str, Any]]:
+def locked_ledger(state_dir: Path, *, write: bool = True) -> Iterator[dict[str, Any]]:
+    """Yield the ledger under the fcntl lock.
+
+    ``write=True`` (record/grant/backfill) creates the state dir and rewrites the
+    ledger on exit. ``write=False`` (check/show) takes a shared lock, never
+    creates state, and never rewrites, so read verbs leave no trace and
+    ``updatedAt`` keeps meaning "last recorded change".
+    """
     policy_dir = state_dir / "review-policy"
+    ledger_path = policy_dir / "ledger.json"
+    lock_path = policy_dir / "ledger.lock"
+    if not write:
+        if not lock_path.is_file():
+            yield _load_ledger_unlocked(ledger_path)
+            return
+        try:
+            lock = lock_path.open("r", encoding="utf-8")
+        except OSError as exc:
+            raise LedgerError(f"cannot open review-policy ledger lock: {exc}") from exc
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+            yield _load_ledger_unlocked(ledger_path)
+        finally:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            lock.close()
+        return
     try:
         policy_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise LedgerError(f"cannot create review-policy state dir: {exc}") from exc
-    ledger_path = policy_dir / "ledger.json"
-    lock_path = policy_dir / "ledger.lock"
     try:
         lock = lock_path.open("a+", encoding="utf-8")
     except OSError as exc:
@@ -957,8 +982,8 @@ def _cmd_effective(ns: argparse.Namespace) -> int:
 
 def _cmd_show(ns: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(ns)
-    path = state_dir / "review-policy" / "ledger.json"
-    ledger = _load_ledger_unlocked(path) if path.is_file() else empty_ledger()
+    with locked_ledger(state_dir, write=False) as ledger:
+        pass
     if ns.logical_change:
         entry = (ledger.get("logicalChanges") or {}).get(ns.logical_change)
         _print_json(
@@ -976,8 +1001,9 @@ def _cmd_check(ns: argparse.Namespace) -> int:
     policy = load_policy(os.environ, _resolve_config(ns))
     state_dir = _resolve_state_dir(ns)
     path = state_dir / "review-policy" / "ledger.json"
-    # Take the lock so a concurrent record cannot race the decision.
-    with locked_ledger(state_dir) as ledger:
+    # Shared lock: a concurrent record cannot interleave the read, and a
+    # read verb never creates or rewrites durable state.
+    with locked_ledger(state_dir, write=False) as ledger:
         result = check(ledger, ns.logical_change, ns.task, policy)
     _print_json(result)
     return EXIT_OK if result["allowed"] else EXIT_EXHAUSTED

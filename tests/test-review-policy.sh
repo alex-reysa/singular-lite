@@ -206,6 +206,27 @@ SINGULAR_AUDIT_SCHEMA="$ENGINE_HOME/schemas/audit-verdict.v1.schema.json" \
 bash -c "source '$ENGINE_HOME/engine/lib.sh'; singular_validate_audit_verdict '$tmp/apply.json' TASK-0001 RUN-1" \
   || fail "applied verdict failed schema validation"
 
+# --- backlog verb + read-only check ------------------------------------------
+out="$(rp backlog)"
+assert_eq "$("$PYTHON_BIN" -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["count"], sorted({r["logicalChange"] for r in d["backlog"]}))' <<<"$out")" \
+  "1 ['LC-APPLY']" "backlog lists the non-blocking items recorded since the last ledger reset"
+out="$(rp backlog --logical-change LC-APPLY)"
+assert_eq "$("$PYTHON_BIN" -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["count"], ",".join(r["id"] for r in d["backlog"]))' <<<"$out")" \
+  "1 f-style" "backlog filters by logical change"
+out="$(rp backlog --logical-change LC-NONE)"
+assert_eq "$("$PYTHON_BIN" -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["count"])' <<<"$out")" "0" "backlog filter excludes other changes"
+fresh="$tmp/fresh-state"
+mkdir -p "$fresh"
+out="$(rp --state-dir "$fresh" check --logical-change LC-NEW --task TASK-0001)"
+assert_eq "$("$PYTHON_BIN" -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["allowed"], d["used"])' <<<"$out")" \
+  "True 0" "check on a fresh state dir is allowed"
+[[ ! -e "$fresh/review-policy" ]] || fail "check must not create review-policy state"
+before="$(shasum -a 256 "$STATE/review-policy/ledger.json" | awk '{print $1}')"
+rp check --logical-change BUDGET --task TASK-0001 >/dev/null
+rp show --logical-change BUDGET >/dev/null
+after="$(shasum -a 256 "$STATE/review-policy/ledger.json" | awk '{print $1}')"
+assert_eq "$after" "$before" "check/show never rewrite the ledger"
+
 # --- v0 verdicts: effective verdict applied, no reviewPolicy stamp -----------
 FINDINGS_JSON='["style leftover"]' \
 CLASSIFIED_JSON='[]' \

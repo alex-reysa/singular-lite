@@ -2937,7 +2937,11 @@ run_audit_phase() {
   else
     singular_append_event "l1.reaudit_prompt_fallback" "re-audit prompt render failed; using base audit prompt" \
       "{\"taskId\":\"$task_id\",\"runId\":\"$run_id\",\"attempt\":$n}" || true
-    cp "$audit_prompt" "$active_audit_prompt" 2>/dev/null || active_audit_prompt="$audit_prompt"
+    if cp "$audit_prompt" "$active_audit_prompt" 2>/dev/null; then
+      singular_review_round_policy_append "$active_audit_prompt" 2>/dev/null || true
+    else
+      active_audit_prompt="$audit_prompt"
+    fi
   fi
   unset SINGULAR_REVIEW_ROUND_LABEL
 

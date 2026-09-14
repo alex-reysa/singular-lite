@@ -8688,6 +8688,19 @@ with open(out_path, "w", encoding="utf-8") as f:
 PY
 }
 
+# Append the review-round policy section to an auditor prompt when the driver
+# exported SINGULAR_REVIEW_ROUND_LABEL. A no-op (byte-identical prompt) when
+# the label is empty. Shared by the re-audit renderer and its fallback so the
+# degraded path cannot drop the round label or the classification instruction.
+singular_review_round_policy_append() {
+  local target="$1"
+  [[ -n "${SINGULAR_REVIEW_ROUND_LABEL:-}" ]] || return 0
+  {
+    printf '\n### Review round policy\n\n%s\n\n' "$SINGULAR_REVIEW_ROUND_LABEL"
+    printf '%s\n' "Verify closure of the listed open blocking findings and any regression introduced by the fix diff. Do not re-review unchanged code unless you can state a reproducible P0/P1 trigger. Classify every finding."
+  } >>"$target"
+}
+
 # Re-audit delta prompt (T-E4). Renders <base_audit_prompt> + re-audit context
 # (prior findings/ledger status + fix diff since the auditor's last review +
 # per-id verification targets + a findingsStatus output-contract addition) into
@@ -8703,12 +8716,7 @@ singular_render_reaudit_prompt() {
   local ledger="$run_dir/findings-status.json"
   if [[ "$n" -lt 2 || ! -f "$capsule" || -z "$prior_head" ]]; then
     cp "$base_prompt" "$out_path"
-    if [[ -n "${SINGULAR_REVIEW_ROUND_LABEL:-}" ]]; then
-      {
-        printf '\n### Review round policy\n\n%s\n\n' "$SINGULAR_REVIEW_ROUND_LABEL"
-        printf '%s\n' "Verify closure of the listed open blocking findings and any regression introduced by the fix diff. Do not re-review unchanged code unless you can state a reproducible P0/P1 trigger. Classify every finding."
-      } >>"$out_path"
-    fi
+    singular_review_round_policy_append "$out_path"
     return 0
   fi
 
@@ -8795,12 +8803,7 @@ parts.append(
 with open(out_path, "w", encoding="utf-8") as f:
     f.write("\n".join(parts) + "\n")
 PY
-  if [[ -n "${SINGULAR_REVIEW_ROUND_LABEL:-}" ]]; then
-    {
-      printf '\n### Review round policy\n\n%s\n\n' "$SINGULAR_REVIEW_ROUND_LABEL"
-      printf '%s\n' "Verify closure of the listed open blocking findings and any regression introduced by the fix diff. Do not re-review unchanged code unless you can state a reproducible P0/P1 trigger. Classify every finding."
-    } >>"$out_path"
-  fi
+  singular_review_round_policy_append "$out_path"
 }
 
 # --- Kill switch + circuit breaker ---
