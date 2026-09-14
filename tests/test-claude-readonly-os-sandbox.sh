@@ -160,6 +160,37 @@ grep -F 'OS-enforced read-only is required for this invocation but unavailable' 
 [[ ! -e "$launched" ]] || fail "require: mock was invoked"
 pass "REQUIRE_OS_READONLY=1 with missing sandbox-exec exits 78 without launch"
 
+# --- REQUIRE_OS_WORKSPACE=1 at a WRITABLE level: exit 78, mock never launched.
+# This is what a campaign sets when it routes an implementer to this adapter, so
+# a host without sandbox-exec refuses to run the worker uncontained.
+repo2b="$workroot/require-workspace"
+new_repo "$repo2b"
+launched_ws="$workroot/require-ws-launched"
+require_ws_log="$workroot/require-ws.log"
+set +e
+SINGULAR_RUNNER_REQUIRE_OS_WORKSPACE=1 \
+SINGULAR_CLAUDE_SANDBOX_EXEC=/nonexistent \
+MOCK_LAUNCHED="$launched_ws" \
+  run_claude "$repo2b" --worktree "$repo2b" --level l2 --run-id RUN-os-req-ws \
+    --prompt-file /dev/null --output-last-message "$workroot/require-ws-last.json" \
+    >"$require_ws_log" 2>&1
+require_ws_rc=$?
+set -e
+[[ "$require_ws_rc" -eq 78 ]] || fail "require-workspace: expected exit 78, got $require_ws_rc"
+grep -F 'OS-enforced workspace containment is required for this invocation but unavailable' \
+  "$require_ws_log" >/dev/null || fail "require-workspace: missing unavailable diagnostic"
+[[ ! -e "$launched_ws" ]] || fail "require-workspace: mock was invoked"
+# The same knob that disables the sandbox must also fail closed under REQUIRE.
+set +e
+SINGULAR_RUNNER_REQUIRE_OS_WORKSPACE=1 SINGULAR_CLAUDE_OS_SANDBOX=0 \
+  run_claude "$repo2b" --worktree "$repo2b" --level l2 --run-id RUN-os-req-ws2 \
+    --prompt-file /dev/null --output-last-message "$workroot/require-ws2-last.json" \
+    >/dev/null 2>&1
+require_ws2_rc=$?
+set -e
+[[ "$require_ws2_rc" -eq 78 ]] || fail "require-workspace: OS_SANDBOX=0 must still exit 78, got $require_ws2_rc"
+pass "REQUIRE_OS_WORKSPACE=1 fails closed at a writable level"
+
 # --- l2: workspace containment. Writes inside the worktree still succeed, but the
 # repository root and the durable state directory are denied by the OS, matching
 # the containment `grok-run.sh --sandbox workspace` and `codex-run.sh

@@ -260,7 +260,16 @@ fi
 #                SINGULAR_STATE_DIR. The review-evidence admission surface.
 #   l0|l1|l2  -> deny file-write* under SINGULAR_ROOT and SINGULAR_STATE_DIR,
 #                then ALLOW it back under the worktree, TMPDIR and the build
-#                cache. This is the workspace containment the adapters this one
+#                cache. Intended limit: in a LINKED worktree `.git` is a pointer
+#                file and the real git dir lives under SINGULAR_ROOT, so the
+#                worker can run read-only git (status, diff, rev-parse, log,
+#                stash list) but NOT `git add` / `git commit`. That is deliberate
+#                and matches the contract: l1-drive.sh stages the owned delta and
+#                commits itself, outside this sandbox, and the l2 worker prompt
+#                gives the worker no git instructions. Allowing commits would mean
+#                opening .git/objects and .git/refs, i.e. letting a worker rewrite
+#                any branch in the shared repository.
+#                This is the workspace containment the adapters this one
 #                replaces already provide (`grok-run.sh --sandbox workspace`,
 #                `codex-run.sh --sandbox workspace-write`): a writable role may
 #                edit its own candidate and nothing else. Without it a routed
