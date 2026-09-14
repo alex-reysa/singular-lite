@@ -3,7 +3,7 @@
   "node": "context-invocations",
   "status": "passed",
   "authoritative": true,
-  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A13:sha256:d2fb19a0d1933ff772478d8656101a47afefa5cb7adda4c3e759f2b86b9ab5d2:epoch:7b5f81a4ec8db4f5bbd7d9f098b7493d3ee4aa2c08d8d67e",
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A14:sha256:eb93427a35f186c2f9c5446ee7d44228da9ce17e3eecdbd163ed03e9182c1612:epoch:fc87d8207fc3717bab30e1c7b1b2fd2fdd0f21446017d9f7",
   "evidenceClass": "deterministic-proof",
   "evidence": [
     {
@@ -226,7 +226,7 @@
       "kind": "source-path",
       "ref": "engine/task_lifecycle.py",
       "description": "Explicit context-invocations implementation or acceptance-test input for the promoted gate.",
-      "sha256": "678507dc8dc1da16c4cbd5cffa48fb48c8dd11668da20cd18df37ad84c75e035"
+      "sha256": "9ff4860a7dfd077d16c372492eb72179158a65c683a9d9fdc85958b20b7b9318"
     },
     {
       "kind": "source-path",
@@ -287,12 +287,12 @@
       "exitCode": 0,
       "logRef": "docs/orchestration/gates/evidence/context-invocations.regression.txt",
       "sha256": "34b4c37998ddbab22c0c0a167918a54fee4148b77dea3a619b02078ebeafc0f3",
-      "headSha": "1cc22ef6913769793981d0ce666e719a7d92c7d1"
+      "headSha": "a90b8b447ad8d48833520d378000f7f468280f83"
     },
     {
       "kind": "gate-report",
       "ref": "docs/orchestration/gates/evidence/context-invocations.gate-report.json",
-      "sha256": "24b128139779e9aca6a34b702b09edc3ef7672d3af45f070303612e9a84b99c1",
+      "sha256": "44b05323d3c4f0edcb9c435f919ad2fe7b741a8b80a505249ee5e50b688fe74e",
       "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
     }
   ],
@@ -301,7 +301,7 @@
   ],
   "decidedBy": "l0-gate-promoter",
   "rationale": "Integrated audited end-to-end acceptance for context-invocations plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
-  "recordedAt": "2026-09-14T06:16:23Z",
+  "recordedAt": "2026-09-14T14:07:24Z",
   "verificationClassification": "passed",
   "gateReportRef": "docs/orchestration/gates/evidence/context-invocations.gate-report.json"
 }
