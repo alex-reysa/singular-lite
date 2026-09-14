@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-14T16:44:31Z — TASK-1117 — escalate-parked
+
+- Run: `RUN-20260914T164429Z-13549`
+- Branch: `n/a`
+- Authority: l1-driver
+- Rationale: repeated dispatch refusal x3: active/accepted worktree (lease: planned)
+
 ### 2026-09-14T15:40:04Z — TASK-1117 — unpark
 
 - Run: `ORIGIN-20260914T154004Z-36616`
