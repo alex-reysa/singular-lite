@@ -1,6 +1,6 @@
 {
   "schemaVersion": "v2",
-  "engineVersion": "0.21.0",
+  "engineVersion": "0.22.0",
   "targetBranch": "agent/integration",
   "gateCommand": "false # replace with your real gate, e.g. npm test && npm run build",
   "runner": "claude-run.sh",

@@ -7,6 +7,137 @@ and the plugin negotiate on `schemaVersion`.
 
 ---
 
+## [0.22.0] — 2026-09-15 — A brain, and the red tape cut
+
+0.21 made the factory fast. This release gives it a memory and a knowledge
+service, and then removes the ceremony that a three-day field campaign showed
+was stalling the factory more than protecting it. Everything below landed
+through the engine's own reviewed integration path on the `codex/brain-integration`
+line (campaign BRAIN-RESCUE-20260910, runtimes A9–A15); the last lifecycle
+fixes were applied directly under operator authority and are marked as such.
+`schemaVersion` stays **v2**; new schemas are additive.
+
+### The brain: vendored knowledge, bounded context, reviewed memory
+
+- **B1 — Package and ingest (`singular manifest gen|check|lint|bless`).** The
+  upstream `singular-brain` generator is vendored byte-for-byte under
+  `vendor/singular-brain` and consumed through a validated adapter for
+  `singular-brain.manifest.v1`. Paths resolve against declared roots with
+  symlink containment; stale, superseded, malformed, duplicate, quarantined,
+  wrong-root and missing-source entries are classified, not guessed; live
+  source hashes are kept distinct from review hashes. Node stays optional
+  when brain is unconfigured. Proof: `tests/test-brain-ingestion-e2e.sh`.
+- **B2 — Context service (`singular context build|search|get|explain`).** A
+  local Python library (`engine/context_service.py`, `engine/brain_documents.py`)
+  builds one immutable, atomically published bundle from brain documents,
+  selected worktree code and run records: full-source and excerpt hashes,
+  locations, selection reasons, budget usage and omissions. Mandatory task
+  constraints and open obligations outrank optional material and an
+  aggregate budget fails explicitly when they cannot fit. Search/get/explain
+  are read-only by construction and are proven so under an OS deny-write
+  policy. Proof: `tests/test-context-service-e2e.sh`.
+- **B3 — Invocation coverage.** Planner and worker first attempts and retries
+  receive the service's bundle regardless of the session router's choice;
+  resumes receive a documented delta; auditors stay fresh and receive only
+  policy-selected references, never a worker-authored conclusion
+  (`engine/evidence_delivery.py` brokers what each role may see). Feature-off
+  behaviour is unchanged. Proof: `tests/test-context-invocation-e2e.sh`.
+- **B4 — Reviewed memory (`singular memory propose|review|approve|reject|
+  quarantine|supersede|tombstone|checkpoint|show|rebuild`).** Model-written
+  content starts *proposed* and is never trusted automatically; approval
+  authority is verified, not a caller label. One transaction and snapshot
+  contract: writers drain prepared journals before reading lifecycle state,
+  journals bind expected and resulting record revisions, recovery applies a
+  successor only to its recorded predecessor and fails closed on ambiguity,
+  retirement is monotonic, derived index refresh follows the authoritative
+  commit, and an index rebuild can never resurrect a tombstone. Memory
+  sources participate in delta revocation and both context-bundle schema
+  copies; the memory credential key never reaches provider children.
+  Proof: `tests/test-memory-lifecycle-e2e.sh`, `tests/test_memory_lifecycle.py`
+  (14 cases). Independently audited on exact source by claude-opus-5 with
+  no blocking finding (AF-1117-1..3 are P2/P3 backlog).
+- **B5 — Evaluation harness.** Not in this release; TASK-1106 is queued
+  behind it (see "Known limits").
+
+### Providers: per-role runners, OS-enforced containment, a review policy
+
+- **Per-role runners** (`roleRunners` in `singular.config.json`): implementer,
+  auditor, planner, decider, critic, supervisor and integrator each select
+  their adapter. The field campaign ran claude-opus-5/high implementers,
+  claude-opus-5/medium auditors and gpt-6-astra/low intelligence roles.
+- **claude-run.sh** now contains *writable* levels too: an l1/l2 worker runs
+  under `sandbox-exec` with the repository root and the durable state
+  directory denied and only its worktree, TMPDIR and build cache allowed;
+  `SINGULAR_RUNNER_REQUIRE_OS_WORKSPACE=1` fails closed (exit 78) when the
+  OS sandbox is unavailable. Read-only levels stay read-only by policy, and
+  the auditor's model/effort are configured explicitly
+  (`SINGULAR_CLAUDE_MODEL/EFFORT`, level-keyed `SINGULAR_CLAUDE_L2_*`) rather
+  than inferred from prompt filenames, which the evidence broker rewrites.
+- **Programmable review policy** (`engine/review_policy.py`,
+  `singular review-policy effective|show|check|record|grant|backfill|backlog`):
+  bounded rounds per logical change (default 2), blocking severities
+  (P0/P1), P2/P3 to a durable backlog, task-bound exceptions with hashed
+  evidence, and a ledger that is never reset — historical rounds are
+  backfilled, not forgotten.
+
+### Lifecycle: the recoveries a real campaign needed
+
+- **Owner-generation reservations** (`engine/task_lifecycle.py`,
+  `engine/lifecycle.sh`): reserve, bind-dispatch, record-attempt, finish,
+  finalize and reconcile are compare-and-set on `reservationOwner@generation`
+  and campaign binding, so a stale reaper, a crashed driver or a second
+  scheduler can never overwrite live work. Accepted candidates are retained
+  with hashed packet/audit/verification identity; `singular recover candidate
+  --action repair|regate` authorizes a bounded successor.
+- **Continuation authority**: `singular recover orphan-reservation` and
+  `singular recover continuation` turn an unlaunched reservation or a started
+  attempt that ended *outcome-unknown* (driver interrupted) into exactly one
+  additional worker invocation, with the partial bytes snapshot-bound and the
+  reservation base checked by ancestry (0.22.0 closes the outcome-unknown
+  case; before it, an interrupted attempt could not be continued at all).
+- **Campaign freeze**: `singular campaign start --id … --replace` binds an
+  immutable runtime, config and gate epoch; every driver, auditor and
+  integrator verifies that binding at entry and refuses on drift. Gates are
+  re-published per epoch (`promote-gate`), and the doctor reports role
+  routing, sandbox posture and frontier health.
+
+### Cut the red tape (A15, operator-applied, 2026-09-14)
+
+A 48-hour audit (`claudedocs/engine-architecture-audit-20260914.md`) found
+that every stall of the campaign was the lifecycle layer refusing its own
+legitimate state — one stray `"]` in a *successful* worker's packet deadlocked
+the queue — while the product guards never false-positived. So:
+
+- **Packet extraction repairs shape, not content.** `singular_extract_json`
+  drops unmatched closers, closes unclosed brackets and trailing commas as a
+  last resort, never touches string content, and logs `packet repaired: …`.
+  The real field packet is a fixture (`tests/test-worker-packet-repair.sh`).
+- **`singular unpark` yields a dispatchable lease.** The prior attempt is
+  archived into `attemptHistory`/`terminalDispositionHistory` with an
+  `operatorReentries[]` record, so `reserve()` admits the re-entry; a refused
+  planned reservation whose lease carries history is released, never deleted
+  (`tests/test-operator-reentry.sh`).
+- **The engine refreshes retained branches itself.** A retained worker branch
+  that fell behind the admitted base (the reconciler's own control-state
+  commits do this every cycle) is merged forward by
+  `singular_refresh_retained_branch` — event `l1.base_refreshed`; conflicts
+  still refuse (`tests/test-retained-base-refresh.sh`).
+- **A format slip is not a product failure.** The first
+  `worker-no-packet`/`packet-invalid` on an unchanged candidate gets one
+  re-emit (`l1.packet_format_retry_eligible`); a repeat parks as before.
+
+### Known limits
+
+- Two lifecycle deadlocks are documented but not yet fixed in the engine
+  (audit §5): a STOP-frozen driver does not finalize its dispatch record, and
+  the retained-worktree guard refuses the driver's own `planned` reservation.
+  Both have operator workarounds recorded in the campaign state.
+- The full regression on this tree reports the same pre-existing host
+  failures as 0.21.0's line (`test-accept-existing-packet`,
+  `test-orphan-continuation`, `test-per-try-artifacts`); the exact counts of
+  this cut's run are in the release commit message.
+- B5 (evaluation harness and operational documentation) is not included.
+
 ## [0.21.0] — 2026-09-05 — Throughput without assumption
 
 The 0.20 line finished the governance work: every decision in a run is bound,
