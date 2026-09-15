@@ -1,0 +1,12 @@
+{
+  "durationMs": 240000,
+  "logBytes": 4096,
+  "outcome": "passed",
+  "phase": "integration",
+  "rawExitCode": 0,
+  "recordedAt": "2026-09-10T10:20:00Z",
+  "runId": "ORIGIN-EVAL-1",
+  "schema": "singular.orchestration.gate-report.v0",
+  "taskId": "TASK-E001",
+  "workspaceKind": "integration"
+}

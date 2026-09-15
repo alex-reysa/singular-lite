@@ -1,0 +1,13 @@
+{
+  "capabilityProfile": "implement-core",
+  "contractVersion": 1,
+  "exitCode": 1,
+  "failureClass": "timeout",
+  "outcome": "timed-out",
+  "provider": "fixture",
+  "recordedAt": "2026-09-10T11:20:00Z",
+  "role": "implementer",
+  "runId": "RUN-EVAL-B",
+  "schema": "singular.orchestration.runner-result.v0",
+  "usage": null
+}

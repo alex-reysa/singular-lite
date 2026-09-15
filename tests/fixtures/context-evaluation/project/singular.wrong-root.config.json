@@ -1,0 +1,44 @@
+{
+  "contextManifest": {
+    "expectedScope": "knowledge",
+    "format": "singular-brain.manifest.v1",
+    "manifest": "brain/generated/KNOWLEDGE.json",
+    "select": [
+      "notes/legacy-migration-policy.md",
+      "notes/long-runbook.md",
+      "notes/migration-policy.md",
+      "notes/revoked-access.md"
+    ],
+    "sourceId": "eval-brain",
+    "sourceRoot": "src"
+  },
+  "contextService": {
+    "budgetBytes": 65536,
+    "codePaths": [
+      "src/selected.py"
+    ],
+    "enabled": true,
+    "projectId": "context-evaluation-fixture",
+    "revision": "eval-fixture-revision-1",
+    "rolePolicy": {
+      "auditor": [
+        "brain",
+        "code",
+        "run"
+      ],
+      "implementer": [
+        "brain",
+        "code",
+        "run"
+      ],
+      "review-target": [
+        "brain",
+        "code",
+        "run"
+      ]
+    },
+    "runRecordPaths": [
+      "runs/RUN-fixture/runner-result.json"
+    ]
+  }
+}

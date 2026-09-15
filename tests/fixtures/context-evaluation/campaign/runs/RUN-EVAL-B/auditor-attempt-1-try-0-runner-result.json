@@ -1,0 +1,17 @@
+{
+  "capabilityProfile": "audit-core",
+  "contractVersion": 1,
+  "exitCode": 0,
+  "failureClass": "none",
+  "outcome": "succeeded",
+  "provider": "fixture",
+  "recordedAt": "2026-09-10T11:40:00Z",
+  "role": "auditor",
+  "runId": "RUN-EVAL-B",
+  "schema": "singular.orchestration.runner-result.v0",
+  "usage": {
+    "cachedInputTokens": 100000,
+    "inputTokens": 150000,
+    "outputTokens": 2000
+  }
+}

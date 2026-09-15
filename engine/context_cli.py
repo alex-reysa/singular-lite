@@ -16,10 +16,16 @@ try:
         ContextError, ContextOverflow, ContextService, publish_bundle,
         resolve_context_config,
     )
+    from engine.context_evaluation import (
+        EvaluationError, analyze_campaign, evaluate_corpus,
+    )
 except ImportError:  # installed execution from engine/
     from context_service import (  # type: ignore
         ContextError, ContextOverflow, ContextService, publish_bundle,
         resolve_context_config,
+    )
+    from context_evaluation import (  # type: ignore
+        EvaluationError, analyze_campaign, evaluate_corpus,
     )
 
 
@@ -80,6 +86,26 @@ def _commands() -> argparse.ArgumentParser:
         "effective-config", help="show effective context invocation policy and provenance"
     )
     common(effective)
+
+    # B5 evaluation surfaces. Both are pure readers: they take their inputs as
+    # explicit paths, never resolve a context configuration, and never write
+    # into the state directories they measure.
+    evaluate = subparsers.add_parser(
+        "evaluate", help="replay a labeled retrieval corpus and compare known metrics"
+    )
+    evaluate.add_argument("--corpus", required=True)
+    evaluate.add_argument("--output")
+
+    campaign = subparsers.add_parser(
+        "campaign-report",
+        help="analyse retained campaign events and provider sidecars",
+    )
+    campaign.add_argument("--events", required=True)
+    campaign.add_argument("--runs", required=True)
+    campaign.add_argument("--interventions")
+    campaign.add_argument("--checkpoint")
+    campaign.add_argument("--observations")
+    campaign.add_argument("--output")
     return parser
 
 
@@ -105,6 +131,23 @@ def _publish_prompt(prompt: str, destination: Path) -> None:
                 pass
 
 
+def _resolve(raw: str | None, cwd: Path) -> Path | None:
+    """Resolve a caller-supplied path against the invocation directory."""
+    if raw is None:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    return candidate
+
+
+def _publish_json(payload: dict, destination: Path) -> None:
+    _publish_prompt(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n",
+        destination,
+    )
+
+
 def _config(args: argparse.Namespace, repo_root: Path, cwd: Path) -> Path:
     return resolve_context_config(
         repo_root,
@@ -127,6 +170,30 @@ def main(argv: list[str] | None = None) -> int:
         if raw and raw[0] == "--":
             raw = raw[1:]
     args = _commands().parse_args(raw)
+    if args.command in {"evaluate", "campaign-report"}:
+        try:
+            if args.command == "evaluate":
+                result = evaluate_corpus(_resolve(args.corpus, cwd))
+            else:
+                result = analyze_campaign(
+                    events=_resolve(args.events, cwd),
+                    runs=_resolve(args.runs, cwd),
+                    interventions=_resolve(args.interventions, cwd),
+                    checkpoint=_resolve(args.checkpoint, cwd),
+                    observations=_resolve(args.observations, cwd),
+                )
+        except EvaluationError as exc:
+            print(f"context evaluation: {exc}", file=sys.stderr)
+            return 2
+        output = _resolve(args.output, cwd)
+        if output is not None:
+            _publish_json(result, output)
+        json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        sys.stdout.write("\n")
+        # A measured deviation from the corpus' own declared metrics is a
+        # reportable result, not a usage error: the report is published either
+        # way and the distinct exit code keeps it out of the success path.
+        return 4 if result.get("status") == "deviated" else 0
     try:
         role = args.role or os.environ.get("SINGULAR_RUNNER_ROLE") or "assistant"
         workspace = Path(args.workspace).expanduser() if args.workspace else repo_root

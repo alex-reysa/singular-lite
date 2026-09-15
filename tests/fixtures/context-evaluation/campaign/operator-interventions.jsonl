@@ -1,0 +1,3 @@
+{"action": "Recorded a host observation only; no task, engine or campaign mutation.", "at": "2026-09-10T10:30:00Z", "duringQualifyingSequence": false, "owner": "root", "unattendedCredit": false}
+{"action": "Released a dangling reservation by hand after the reserve-before-bind refusal.", "at": "2026-09-10T11:50:00Z", "duringQualifyingSequence": true, "owner": "root", "rescuesOrAdvancesRequiredTransition": true, "unattendedCredit": false}
+{"action": "Preserved the failed attempt and stopped the sequence for direct supervision.", "owner": "root", "recordedAt": "2026-09-10T11:55:00Z", "unattendedCredit": false}

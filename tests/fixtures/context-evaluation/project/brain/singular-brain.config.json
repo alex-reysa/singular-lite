@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scopes": [
+    {
+      "name": "knowledge",
+      "base": ".",
+      "output": "generated/KNOWLEDGE.md",
+      "jsonOutput": "generated/KNOWLEDGE.json",
+      "title": "Context evaluation labeled corpus",
+      "rootLabel": "evaluation-fixture",
+      "staleHint": "regenerate the evaluation corpus",
+      "header": ["<!-- GENERATED — DO NOT EDIT. -->"],
+      "tokenWarnThreshold": 16000,
+      "exhaustive": false,
+      "freshness": {"enabled": true, "sidecar": "generated/.knowledge-freshness.json"},
+      "folders": [
+        {
+          "dir": "notes",
+          "title": "Notes",
+          "character": "durable",
+          "purpose": "Labeled retrieval corpus documents",
+          "scan": "flat"
+        }
+      ],
+      "exclude": [],
+      "tables": []
+    }
+  ]
+}

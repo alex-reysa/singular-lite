@@ -1,0 +1,291 @@
+{
+  "schema": "singular.context.evaluation-corpus.v1",
+  "corpusVersion": "1",
+  "title": "B5 labeled retrieval corpus",
+  "project": "project",
+  "brainConfig": "brain/singular-brain.config.json",
+  "configs": {
+    "default": "singular.config.json",
+    "wrong-root": "singular.wrong-root.config.json",
+    "escaping-code": "singular.escaping-code.config.json"
+  },
+  "refs": {
+    "current": "brain:eval-brain:knowledge:notes/migration-policy.md",
+    "superseded": "brain:eval-brain:knowledge:notes/legacy-migration-policy.md",
+    "revoked": "brain:eval-brain:knowledge:notes/revoked-access.md",
+    "long": "brain:eval-brain:knowledge:notes/long-runbook.md",
+    "code": "code:src/selected.py",
+    "run": "run:runs/RUN-fixture/runner-result.json",
+    "task": "task:task.md"
+  },
+  "requiredLabels": [
+    "exact-fact",
+    "lexical-fact",
+    "paraphrased-fact",
+    "long-document",
+    "contradictory-sources",
+    "wrong-version",
+    "wrong-root",
+    "wrong-role",
+    "revoked-source",
+    "missing-knowledge",
+    "budget-omission",
+    "mandatory-priority"
+  ],
+  "cases": [
+    {
+      "id": "exact-reference-fact",
+      "label": "exact-fact",
+      "operation": "search",
+      "role": "implementer",
+      "query": "COBALT-LATCH-4417",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": ["brain:eval-brain:knowledge:notes/migration-policy.md"],
+        "mustNotInclude": [
+          "brain:eval-brain:knowledge:notes/legacy-migration-policy.md",
+          "brain:eval-brain:knowledge:notes/revoked-access.md"
+        ],
+        "budgetOmissions": 0
+      }
+    },
+    {
+      "id": "lexical-fact",
+      "label": "lexical-fact",
+      "operation": "search",
+      "role": "implementer",
+      "query": "reversible database migration",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": ["brain:eval-brain:knowledge:notes/migration-policy.md"],
+        "mustNotInclude": ["brain:eval-brain:knowledge:notes/legacy-migration-policy.md"],
+        "budgetOmissions": 0
+      }
+    },
+    {
+      "id": "paraphrased-fact-retrieved",
+      "label": "paraphrased-fact",
+      "operation": "search",
+      "role": "implementer",
+      "query": "rollback latch requirement for migrations",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": [
+          "brain:eval-brain:knowledge:notes/migration-policy.md",
+          "code:src/selected.py",
+          "run:runs/RUN-fixture/runner-result.json"
+        ],
+        "mustNotInclude": ["brain:eval-brain:knowledge:notes/legacy-migration-policy.md"],
+        "budgetOmissions": 0
+      }
+    },
+    {
+      "id": "paraphrased-fact-below-lexical-threshold",
+      "label": "paraphrased-fact",
+      "operation": "search",
+      "role": "implementer",
+      "query": "undo mechanism semantics",
+      "limit": 5,
+      "maxBytes": 2000,
+      "note": "exact-lexical.v1 abstains below half token coverage; this is a documented retrieval limit, not proof the knowledge is absent",
+      "expect": {"outcome": "abstention"}
+    },
+    {
+      "id": "long-document-late-fact-search",
+      "label": "long-document",
+      "operation": "search",
+      "role": "implementer",
+      "query": "AURORA-TAIL-731",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": ["brain:eval-brain:knowledge:notes/long-runbook.md"],
+        "minStartByte": 4000,
+        "budgetOmissions": 0
+      }
+    },
+    {
+      "id": "long-document-late-section-page",
+      "label": "long-document",
+      "operation": "get",
+      "role": "implementer",
+      "ref": "brain:eval-brain:knowledge:notes/long-runbook.md",
+      "version": "sha256:5eaf500bb730e829c18939f42148b8bcb8abf3154bf87f8208cfbf64ebccaf2e",
+      "section": "Late Operations",
+      "maxBytes": 600,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": ["brain:eval-brain:knowledge:notes/long-runbook.md"],
+        "mustContain": ["AURORA-TAIL-731"],
+        "minStartByte": 4000
+      }
+    },
+    {
+      "id": "contradictory-sources-prefer-current",
+      "label": "contradictory-sources",
+      "operation": "search",
+      "role": "implementer",
+      "query": "rollback latch identifier",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": ["brain:eval-brain:knowledge:notes/migration-policy.md"],
+        "mustNotInclude": ["brain:eval-brain:knowledge:notes/legacy-migration-policy.md"],
+        "budgetOmissions": 0
+      }
+    },
+    {
+      "id": "wrong-version-read-refused",
+      "label": "wrong-version",
+      "operation": "get",
+      "role": "implementer",
+      "ref": "brain:eval-brain:knowledge:notes/migration-policy.md",
+      "version": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "maxBytes": 600,
+      "expect": {"outcome": "refusal", "reasonContains": "wrong-version"}
+    },
+    {
+      "id": "revoked-source-not-retrieved",
+      "label": "revoked-source",
+      "operation": "search",
+      "role": "implementer",
+      "query": "REVOKED-TOKEN-8821",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {"outcome": "abstention"}
+    },
+    {
+      "id": "revoked-source-read-refused",
+      "label": "revoked-source",
+      "operation": "get",
+      "role": "implementer",
+      "ref": "brain:eval-brain:knowledge:notes/revoked-access.md",
+      "version": "sha256:9372f20b3066c32fb7822ce733abda924c2dd8606d9e6c719fcd2840e136b7b9",
+      "maxBytes": 600,
+      "expect": {"outcome": "refusal", "reasonContains": "ineligible source reference"}
+    },
+    {
+      "id": "wrong-role-run-record-withheld",
+      "label": "wrong-role",
+      "operation": "search",
+      "role": "auditor",
+      "query": "RUNRECORD-5150",
+      "limit": 5,
+      "maxBytes": 2000,
+      "note": "the configured auditor policy is deliberately permissive; the service still strips run sources from every review role",
+      "expect": {"outcome": "abstention"}
+    },
+    {
+      "id": "permitted-role-run-record-retrieved",
+      "label": "wrong-role",
+      "operation": "search",
+      "role": "implementer",
+      "query": "RUNRECORD-5150",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": ["run:runs/RUN-fixture/runner-result.json"],
+        "budgetOmissions": 0
+      }
+    },
+    {
+      "id": "wrong-root-source-unreachable",
+      "label": "wrong-root",
+      "config": "wrong-root",
+      "operation": "search",
+      "role": "implementer",
+      "query": "COBALT-LATCH-4417",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {"outcome": "abstention"}
+    },
+    {
+      "id": "wrong-root-escaping-code-path-refused",
+      "label": "wrong-root",
+      "config": "escaping-code",
+      "operation": "search",
+      "role": "implementer",
+      "query": "COBALT-LATCH-4417",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {"outcome": "refusal", "reasonContains": "containment"}
+    },
+    {
+      "id": "missing-knowledge-abstains",
+      "label": "missing-knowledge",
+      "operation": "search",
+      "role": "implementer",
+      "query": "QUASAR-NOT-PRESENT-0000",
+      "limit": 5,
+      "maxBytes": 2000,
+      "expect": {"outcome": "abstention"}
+    },
+    {
+      "id": "aggregate-budget-omissions",
+      "label": "budget-omission",
+      "operation": "search",
+      "role": "implementer",
+      "query": "rollback latch requirement for migrations",
+      "limit": 5,
+      "maxBytes": 300,
+      "expect": {
+        "outcome": "results",
+        "mustInclude": ["brain:eval-brain:knowledge:notes/migration-policy.md"],
+        "budgetOmissions": 2
+      }
+    },
+    {
+      "id": "mandatory-contract-and-obligation-first",
+      "label": "mandatory-priority",
+      "operation": "build",
+      "role": "implementer",
+      "task": "task.md",
+      "phase": "implement",
+      "budgetBytes": 20000,
+      "query": "rollback latch",
+      "expect": {
+        "outcome": "results",
+        "mustInclude": [
+          "task:task.md",
+          "run:runs/RUN-fixture/runner-result.json#obligation-1",
+          "brain:eval-brain:knowledge:notes/migration-policy.md",
+          "code:src/selected.py"
+        ],
+        "mustNotInclude": [
+          "brain:eval-brain:knowledge:notes/legacy-migration-policy.md",
+          "brain:eval-brain:knowledge:notes/revoked-access.md"
+        ],
+        "budgetOmissions": 0
+      }
+    },
+    {
+      "id": "mandatory-overflow-refused",
+      "label": "mandatory-priority",
+      "operation": "build",
+      "role": "implementer",
+      "task": "task.md",
+      "phase": "implement",
+      "budgetBytes": 100,
+      "expect": {"outcome": "refusal", "reasonContains": "mandatory-overflow"}
+    }
+  ],
+  "expectedMetrics": {
+    "cases": 18,
+    "inclusion": {"expected": 14, "included": 14},
+    "incorrectSelections": 0,
+    "budgetOmissions": 2,
+    "abstentions": 5,
+    "refusals": 4,
+    "resultCases": 9,
+    "failures": 0
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "durationMs": 180000,
+  "logBytes": 4096,
+  "outcome": "failed",
+  "phase": "worker",
+  "rawExitCode": 1,
+  "recordedAt": "2026-09-10T11:38:00Z",
+  "runId": "RUN-EVAL-B",
+  "schema": "singular.orchestration.gate-report.v0",
+  "taskId": "TASK-E002",
+  "workspaceKind": "worker"
+}
