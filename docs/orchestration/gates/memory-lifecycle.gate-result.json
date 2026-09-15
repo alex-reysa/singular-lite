@@ -1,0 +1,109 @@
+{
+  "schema": "singular.orchestration.gate-result.v1",
+  "node": "memory-lifecycle",
+  "status": "passed",
+  "authoritative": true,
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15B:sha256:33424c14601909eaf783e10b28c97c7c26b080fd29f51da9c0947ee180a35beb:epoch:6009cbe667ac807f93bd70eb9d712d1fac3554c3a71fa2a0",
+  "evidenceClass": "deterministic-proof",
+  "evidence": [
+    {
+      "kind": "source-path",
+      "ref": "tests/test-memory-lifecycle-e2e.sh",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "1cd434bf9ab6da3bf07fec7c70e8d7a5660c005ea0133c69e5f95bd18085b898"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/run.sh",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "b8bf1a2333426e6c6565292d43153e6edb1c15cd8d5da59434a44f3f9604fe47"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test_memory_lifecycle.py",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "6b99d6cd921f65f2689513ccc3637c32c535efcd7e1c99c05514f36a1ac50136"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/fixtures/memory-lifecycle",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "d95ac9db539718a3737e98267b2b461bdfd71db2cda98c220a9ebc2a3dae0f7f"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/memory_service.py",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "5dbd3341b4a04a8bf8fdfab7e2d056c737bd35a1d80dddecdc3616d7f555c325"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/context_service.py",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "1c90a38f07ca00d5c1e9decb8bc105f055da3987f97400d4936b6e84fe9e9b99"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/context_cli.py",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "6f083de75f7ba5c6d356bd2747eee37d4586dce92c73e412f51bbde623c49621"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/brain_documents.py",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "aef4b4d6f90306ff0acb04660aad06fc67ad76d45e225661de0f42699df9afb2"
+    },
+    {
+      "kind": "source-path",
+      "ref": "cli/singular",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "fb55bc95be667d2392cfa5299925a43fb76ac1beb054143bfa0d73bd338606ac"
+    },
+    {
+      "kind": "source-path",
+      "ref": "schemas/memory-record.v1.schema.json",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "2c1f08ea5c74e7eb8ad97592636122f7e80b1aea136d29f613059afd550727d9"
+    },
+    {
+      "kind": "source-path",
+      "ref": "schemas/orchestration/memory-record.v1.schema.json",
+      "description": "Explicit memory-lifecycle implementation or acceptance-test input for the promoted gate.",
+      "sha256": "2c1f08ea5c74e7eb8ad97592636122f7e80b1aea136d29f613059afd550727d9"
+    },
+    {
+      "kind": "task-set",
+      "ref": "memory-lifecycle-integrated-tasks",
+      "description": "Integrated task slices cited by the memory-lifecycle gate-result candidate.",
+      "taskIds": [
+        "TASK-1117"
+      ],
+      "sha256": "954640833399963aec5949b6c5e2b8dd7ad610384ac0f1d2660e41585557ea3c"
+    },
+    {
+      "kind": "command-log",
+      "ref": "memory-lifecycle-regression",
+      "description": "Authoritative registered acceptance command captured on the exact promoted tree during integration or L0 gate promotion.",
+      "command": "bash tests/run.sh test-memory-lifecycle-e2e.sh",
+      "exitCode": 0,
+      "logRef": "docs/orchestration/gates/evidence/memory-lifecycle.regression.txt",
+      "sha256": "dd480b79c4098317e169718b185985926011df7c6c62dda5be4c245bc747349c",
+      "headSha": "1bb41fd0be546376cc171fa77c70a915c6973b22"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "docs/orchestration/gates/evidence/memory-lifecycle.gate-report.json",
+      "sha256": "78cb15c960e1df16878cf1aad86d7217b3d3be94fb97d6535b9b0669df2c701a",
+      "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
+    }
+  ],
+  "upstreamGates": [
+    "context-invocations"
+  ],
+  "decidedBy": "l0-gate-promoter",
+  "rationale": "Integrated audited end-to-end acceptance for memory-lifecycle plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
+  "recordedAt": "2026-09-15T19:17:40Z",
+  "verificationClassification": "passed",
+  "gateReportRef": "docs/orchestration/gates/evidence/memory-lifecycle.gate-report.json"
+}
