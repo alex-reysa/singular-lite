@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-15T12:31:01Z — TASK-1106 — unpark
+
+- Run: `ORIGIN-20260915T123100Z-18771`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: both worker attempts hit the Claude session limit (resets 8:10pm Zurich) – no product signal; account restored 2026-09-15; fresh dispatch
+
 ### 2026-09-14T17:22:32Z — TASK-1106 — escalate-parked
 
 - Run: `RUN-20260914T170342Z-79862`
