@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-15T13:13:34Z — TASK-1106 — accept
+
+- Run: `RUN-20260915T123131Z-45424`
+- Branch: `codex/brain-rescue/TASK-1106`
+- Authority: origin
+- Rationale: auditor accepted; regression gate green; scope clean
+
 ### 2026-09-15T12:31:01Z — TASK-1106 — unpark
 
 - Run: `ORIGIN-20260915T123100Z-18771`

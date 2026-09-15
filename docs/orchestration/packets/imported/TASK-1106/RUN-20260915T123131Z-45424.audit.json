@@ -1,0 +1,130 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1106",
+  "runId": "RUN-20260915T123131Z-45424",
+  "branch": "codex/brain-rescue/TASK-1106",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json (RUN-20260915T123131Z-45424): artifact list, file hashes, command excerpts; gate/scope/secret checks recorded passed",
+    "packet.json sha256:64ddcf079ec8594281a642156727a15b19885fc8501979970d75e3e5c63c40a0 (baseRef e24484ec, headSha 8f1fb8a7, 36 changed files, all inside owned entries)",
+    "audit-verification.json sha256:1e1d586c189b6f2b04af61b8382bad94fb5da903971bd1bf7ee82fa6be3a5e9e (outcome not-rerun-evidence-verified, sourceIntegrity verified, changedPaths [], evidenceSourceOutcome passed)",
+    "worker-evidence/red.log (bounded read via evidence-show.sh): cycle 1 ModuleNotFoundError engine.context_evaluation; cycle 2 KeyError 'providers' plus mixed-provider-semantics errors; cycle 3 nested/archived sidecar coverage failures",
+    "worker-evidence/green.log and worker-evidence/regression.log excerpts (24 unittests ok; SUMMARY 5 passed, 0 failed)",
+    "git diff e24484e..8f1fb8a --stat in the worker worktree (36 files, +3081/-1)",
+    "engine/context_evaluation.py (corpus loader, _run_case/_score_case, evaluate_corpus, analyze_campaign, _retained dedup, typed unknown emission)",
+    "engine/context_cli.py (evaluate / campaign-report subparsers) and the cli/singular help-surface diff",
+    "tests/test-context-evaluation-e2e.sh (foreign-cwd launcher path, exit 0/4/2 paths, campaign fixture comparison, document assertions)",
+    "tests/fixtures/context-evaluation/corpus.json (18 cases, 12 required labels, declared expectedMetrics)",
+    "docs/brain-build-plan/context-findings.md and docs/brain-build-plan/context-adoption.md (full read)",
+    "README.md B5 section diff",
+    "Independent read-only re-verification: the 12 sidecar identities named by .singular-state/rescue-20260910/native-observations-before-A6.json re-hashed against the documented repositoryRoot; checkpoint unattended block; docs/orchestration/rescue-tasks/TASK-1114.md status and gate",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15:sha256:a1bacf01898f4c06eda9d088873426cbcc0b157001660d6e097cee5dec872786:epoch:10cb89f6b5253f8acf6354afa1973165b9c77230657659f9",
+    "reviewed-head-sha:8f1fb8a7e28ee441bb11ec230946a48ae990333e"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "test -f tests/test-context-evaluation-e2e.sh && test -f tests/test-brain-ingestion-e2e.sh && test -f tests/test-context-service-e2e.sh && test -f tests/test-context-invocation-e2e.sh && test -f tests/test-memory-lifecycle-e2e.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-context-evaluation-e2e.sh test-brain-ingestion-e2e.sh test-context-service-e2e.sh test-context-invocation-e2e.sh test-memory-lifecycle-e2e.sh",
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-check.log",
+        "gate-report.json",
+        "worker-evidence/regression.log"
+      ],
+      "exitCode": 0,
+      "rationale": "Host classified the declared task gate as not-rerun-evidence-verified: the worker's gate evidence (commandSha256 173a68e1..., logSha256 238078c9..., SUMMARY 5 passed 0 failed) is hash-bound to committed head 8f1fb8a7 with sourceIntegrity verified and zero changed paths. I did not rerun it in the original worktree per the host binding, and I reproduce the host classification rather than upgrading it to passed."
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_context_evaluation",
+      "evidenceRefs": [
+        "worker-evidence/red.log",
+        "worker-evidence/green.log",
+        "packet.json"
+      ],
+      "exitCode": 0,
+      "rationale": "strict_test_first evidence verified from the bound logs rather than rerun: red.log records three distinct failing cycles of this exact command against the committed test module (cycle 1 ModuleNotFoundError engine.context_evaluation before the engine existed; cycle 2 KeyError 'providers' and mixed-provider-semantics errors; cycle 3 nested/archived sidecar coverage), and green.log records the same command with 24 tests and 0 failures. The red evidence names assertions that exist in the committed tree, so the test-first ordering is supported by evidence rather than asserted."
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "bash tests/test-context-evaluation-e2e.sh",
+      "evidenceRefs": [
+        "worker-evidence/green.log",
+        "worker-evidence/regression.log",
+        "tests/test-context-evaluation-e2e.sh"
+      ],
+      "exitCode": 0,
+      "rationale": "The B5 completion test is bound to head via its manifest file hash and passes inside the verified regression gate. I read the committed script and confirmed it asserts what the acceptance criteria require: corpus metrics equal to the declared expectedMetrics with recall 1.0, zero incorrect selections and no missing labels; exit 4 on a drifted corpus with the report still published; exit 2 on a malformed corpus; campaign analysis matching the fixture expectation including unknown kinds and planner observedOutputTokens None; an absent optional input becoming an absent-input unknown while an absent event stream exits 2; plus the two B5 documents and the launcher/README surfaces."
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "python3 engine/context_cli.py campaign-report --events .singular-state/events.ndjson --runs .singular-state/runs --interventions .singular-state/rescue-20260910/autonomous-recovery-20260912/operator-interventions.jsonl --checkpoint .singular-state/rescue-20260910/checkpoint.json --observations .singular-state/rescue-20260910/native-observations-before-A6.json",
+      "evidenceRefs": [
+        "packet.json",
+        "docs/brain-build-plan/context-findings.md",
+        ".singular-state/rescue-20260910/native-observations-before-A6.json",
+        ".singular-state/rescue-20260910/checkpoint.json"
+      ],
+      "exitCode": 0,
+      "rationale": "Not rerun, because events.ndjson is a live append-only stream (a fact the findings document itself discloses), so a rerun would legitimately read a superset. Instead I independently re-derived the load-bearing provenance claims read-only: the 12 sidecar SHA-256 identities named by native-observations-before-A6.json resolve against the documented repositoryRoot and re-hash as 12 verified, 0 missing, 0 mismatched exactly as claimed; checkpoint unattended.currentConsecutiveIntegrations is 0 against the required 3 as documented; and docs/orchestration/rescue-tasks/TASK-1114.md is status ready with a gate requiring tests/test-incremental-reconcile.sh, which is absent from the tree, corroborating the PENDING report of the TASK-1015 obligation rather than a fabricated completion."
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "git diff e24484ecd732769f898829e5432ba037f2c749e6..8f1fb8a7e28ee441bb11ec230946a48ae990333e --stat (scope) plus host scope-check-result.json and secret-scan-result.json",
+      "evidenceRefs": [
+        "scope-check-result.json",
+        "secret-scan-result.json",
+        "committed.diff",
+        "evidence-manifest.json"
+      ],
+      "exitCode": 0,
+      "rationale": "Host scope and secret checks are recorded passed and I confirmed the committed diff independently: all 36 changed paths fall under the nine owned entries; nothing touches .singular-state/, .worktrees/, docs/orchestration/ or tools/brain-campaign/; the only edit outside the new B5 files is the help-surface line in cli/singular, which is an owned file and is required by the e2e assertion. No branch drift: head 8f1fb8a7 sits directly on the declared base e24484e."
+    }
+  ],
+  "commandsRun": [
+    "git log --oneline -3; git rev-parse HEAD; git diff e24484ecd732769f898829e5432ba037f2c749e6 HEAD --stat",
+    "cat .singular-state/runs/RUN-20260915T123131Z-45424/evidence-manifest.json",
+    "sed -n 1,520p engine/context_evaluation.py",
+    "head -100 engine/context_cli.py; git diff e24484e HEAD -- cli/singular",
+    ".singular-state/runtime/0.21.0-brain-rescue-20260910-A15/engine/evidence-show.sh <manifest> worker-evidence/red.log 5200",
+    "sed -n 1,400p docs/brain-build-plan/context-findings.md",
+    "sed -n 1,243p docs/brain-build-plan/context-adoption.md",
+    "cat tests/test-context-evaluation-e2e.sh",
+    "python3 -c '<read corpus.json labels and expectedMetrics>'; git diff e24484e HEAD -- README.md",
+    "python3 -c '<re-hash the 12 sidecars named by native-observations-before-A6.json against repositoryRoot>'",
+    "python3 -c '<read checkpoint.json unattended block>'; grep Status docs/orchestration/rescue-tasks/TASK-1114.md; ls tests/test-incremental-reconcile.sh",
+    "find tests/fixtures/context-evaluation/project/brain -type f; python3 -c '<read singular-brain.config.json and singular.config.json contextManifest>'"
+  ],
+  "findings": [
+    "F1 (P3): The README B5 example invokes `singular context evaluate --corpus tests/fixtures/context-evaluation/corpus.json` against the in-tree fixture, but the fixture deliberately ships sources without the generated brain/generated/KNOWLEDGE.json manifest, which the vendored singular-brain generator produces at evaluation time. Both context-findings.md and context-adoption.md show the correct sequence (copy the fixture to a scratch directory, run the vendored generator, then evaluate); the README snippet omits that step, so a reader copying it verbatim gets a deviated rather than a matching run. Documentation-only inconsistency; the tested path and both B5 documents are correct."
+  ],
+  "requiredFixes": [],
+  "findingsStatus": {
+    "blocking": 0,
+    "nonBlocking": 1,
+    "summary": "One non-blocking P3 documentation nit (README B5 snippet omits the fixture manifest regeneration step). No P0/P1 finding; nothing blocks merge."
+  },
+  "classifiedFindings": [
+    {
+      "id": "F1",
+      "severity": "P3",
+      "summary": "README B5 evaluate example omits the vendored-generator manifest regeneration step that context-findings.md and context-adoption.md correctly include, so the snippet is not runnable verbatim against the in-tree fixture."
+    }
+  ],
+  "rationale": "Scope: the committed diff (36 files, +3081/-1 over base e24484e at head 8f1fb8a7) stays entirely inside the nine owned entries; no forbidden path under .singular-state/, .worktrees/, docs/orchestration/ or tools/brain-campaign/ is touched, and the host scope and secret checks are recorded passed. Test-first: red.log holds three genuine failing cycles of the committed unittest command (missing engine module, missing per-provider breakdown, missing nested/archived sidecar coverage), each naming assertions present in the committed tests, followed by a 24-test green and a 5/5 regression, so the strict_test_first obligation is evidenced rather than asserted. Gate: the host classified the declared task gate as not-rerun-evidence-verified by hash-binding the worker's own gate evidence to the committed head with sourceIntegrity verified and zero changed paths; I reproduce that classification exactly and reran nothing in the original worktree, so no infrastructure limitation is converted into a product finding. Acceptance criteria: (1) the corpus declares and covers all twelve required labels across 18 cases and the harness computes inclusion/recall (14/14, 1.0), incorrect selections (0), budget omissions (2), abstentions (5) and refusals (4) against the corpus' own declared metrics, with deviation exiting 4 and unusable input exiting 2; (2) campaign-report measures integrated/unfinished tasks, retries and refused work, bytes per accepted review, ready-to-dispatch wait, worker and integration gate durations, control-plane work, and provider input/cached/output tokens by role and by provider, keeps failed/setup work and interventions included, and emits absent counters as typed unknowns rather than zeros, with the _retained helper deduplicating archived attempt copies by content while still scanning staged invocations; (3) context-adoption.md documents pinned installation, opt-in activation, the immutable runtime adoption sequence and rollback, the memory approval policy (candidate-not-truth, distinct approver, tombstone/supersession) and project-local scope, and both documents separate measured readings from labeled inference and disclaim causal improvement and general reliability from a small sample; (4) all five B1-B5 behavioral fixtures pass in the bound gate log. Provenance was not taken on trust: I independently re-hashed the 12 sidecars named by the native snapshot (12 verified, 0 missing, 0 mismatched), confirmed the checkpoint's unattended counter at 0 of 3, and confirmed TASK-1114 is status ready with an as-yet-absent gate test, corroborating the PENDING rather than fabricated TASK-1015 obligation report. TASK-1110 is recorded as direct maintenance and not native autonomy credit, and the events.ndjson live-stream caveat is disclosed in the document itself rather than hidden. The only defect I can substantiate is the P3 README snippet inconsistency, which does not block merge.",
+  "reviewPolicy": {
+    "version": 1,
+    "logicalChange": "context-evaluation",
+    "round": 1,
+    "maxRounds": 2,
+    "originalVerdict": "accepted",
+    "effectiveVerdict": "accepted",
+    "blocking": [],
+    "backlog": [
+      "F1"
+    ],
+    "downgraded": [],
+    "unclassifiedCount": 0,
+    "appliedAt": "2026-09-15T13:13:33Z"
+  }
+}

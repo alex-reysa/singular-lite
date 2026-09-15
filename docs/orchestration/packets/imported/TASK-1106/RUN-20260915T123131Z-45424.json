@@ -1,0 +1,219 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "PKT-TASK-1106-20260915T131500Z",
+  "runId": "RUN-20260915T123131Z-45424",
+  "taskId": "TASK-1106",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "e24484ecd732769f898829e5432ba037f2c749e6",
+  "branch": "codex/brain-rescue/TASK-1106",
+  "headSha": "8f1fb8a7e28ee441bb11ec230946a48ae990333e",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1106",
+  "ownedFiles": [
+    "engine/context_evaluation.py",
+    "engine/context_cli.py",
+    "cli/singular",
+    "tests/test-context-evaluation-e2e.sh",
+    "tests/test_context_evaluation.py",
+    "tests/fixtures/context-evaluation/",
+    "docs/brain-build-plan/context-findings.md",
+    "docs/brain-build-plan/context-adoption.md",
+    "README.md"
+  ],
+  "changedFiles": [
+    "README.md",
+    "cli/singular",
+    "docs/brain-build-plan/context-adoption.md",
+    "docs/brain-build-plan/context-findings.md",
+    "engine/context_cli.py",
+    "engine/context_evaluation.py",
+    "tests/fixtures/context-evaluation/campaign/events.ndjson",
+    "tests/fixtures/context-evaluation/campaign/expected.json",
+    "tests/fixtures/context-evaluation/campaign/operator-interventions.jsonl",
+    "tests/fixtures/context-evaluation/campaign/runs/ORIGIN-EVAL-1/gate-check.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-A/attempts/1/gate-check.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-A/auditor-attempt-1-try-0-runner-result.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-A/gate-check.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-A/implementer-attempt-1-try-0-runner-result.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-A/l1-staging/eval-node/plan-critic-try-0-runner-result.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-B/attempts/1/gate-check.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-B/attempts/1/implementer-attempt-1-try-0-runner-result.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-B/auditor-attempt-1-try-0-runner-result.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-B/gate-check.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-B/implementer-attempt-1-try-0-runner-result.json",
+    "tests/fixtures/context-evaluation/campaign/runs/RUN-EVAL-B/implementer-attempt-1-try-1-runner-result.json",
+    "tests/fixtures/context-evaluation/corpus.json",
+    "tests/fixtures/context-evaluation/project/brain/notes/legacy-migration-policy.md",
+    "tests/fixtures/context-evaluation/project/brain/notes/long-runbook.md",
+    "tests/fixtures/context-evaluation/project/brain/notes/migration-policy.md",
+    "tests/fixtures/context-evaluation/project/brain/notes/revoked-access.md",
+    "tests/fixtures/context-evaluation/project/brain/notes/revoked-access.md.quarantined",
+    "tests/fixtures/context-evaluation/project/brain/singular-brain.config.json",
+    "tests/fixtures/context-evaluation/project/runs/RUN-fixture/runner-result.json",
+    "tests/fixtures/context-evaluation/project/singular.config.json",
+    "tests/fixtures/context-evaluation/project/singular.escaping-code.config.json",
+    "tests/fixtures/context-evaluation/project/singular.wrong-root.config.json",
+    "tests/fixtures/context-evaluation/project/src/selected.py",
+    "tests/fixtures/context-evaluation/project/task.md",
+    "tests/test-context-evaluation-e2e.sh",
+    "tests/test_context_evaluation.py"
+  ],
+  "commands": [
+    {
+      "cmd": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_context_evaluation",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "final green: 24 tests, 0 failures. Three earlier red cycles of this same command are preserved in .singular-evidence/red.log (cycle 1 ModuleNotFoundError engine.context_evaluation; cycle 2 3 errors for providers/byProvider and reviewContextCoverageComplete; cycle 3 1 failure + 2 errors for nested/archived sidecar coverage)."
+    },
+    {
+      "cmd": "bash tests/test-context-evaluation-e2e.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "B5 completion test green: corpus metrics match, exit-4 deviation path and exit-2 malformed path verified, campaign analysis matches the fixture expectation, unknown semantics preserved, launcher help and both B5 documents checked."
+    },
+    {
+      "cmd": "test -f tests/test-context-evaluation-e2e.sh && test -f tests/test-brain-ingestion-e2e.sh && test -f tests/test-context-service-e2e.sh && test -f tests/test-context-invocation-e2e.sh && test -f tests/test-memory-lifecycle-e2e.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-context-evaluation-e2e.sh test-brain-ingestion-e2e.sh test-context-service-e2e.sh test-context-invocation-e2e.sh test-memory-lifecycle-e2e.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "declared task gate; B1-B5 behavioral fixtures all pass: SUMMARY 5 passed, 0 failed."
+    },
+    {
+      "cmd": "python3 engine/context_cli.py campaign-report --events \"/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/events.ndjson\" --runs \"/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/runs\" --interventions \"/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/autonomous-recovery-20260912/operator-interventions.jsonl\" --checkpoint \"/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/checkpoint.json\" --observations \"/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.singular-state/rescue-20260910/native-observations-before-A6.json\"",
+      "exitCode": 0,
+      "logRef": "docs/brain-build-plan/context-findings.md",
+      "rationale": "read-only analysis of the actual retained campaign evidence; produced every measured figure in the findings report. Writes nothing into .singular-state/."
+    }
+  ],
+  "tests": [
+    {
+      "name": "tests/test_context_evaluation.py",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "tests/test-context-evaluation-e2e.sh",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "tests/test_context_evaluation.py",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "tests/test-context-evaluation-e2e.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "tests/test-brain-ingestion-e2e.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "name": "tests/test-context-service-e2e.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "name": "tests/test-context-invocation-e2e.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression.log"
+    },
+    {
+      "name": "tests/test-memory-lifecycle-e2e.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "red-log",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "green-log",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "regression-log",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "labeled-corpus",
+      "ref": "tests/fixtures/context-evaluation/corpus.json"
+    },
+    {
+      "kind": "measured-metrics",
+      "ref": "18 labeled cases; inclusion/recall 14/14 = 1.0; incorrect selections 0; budget omissions 2; abstentions 5; refusals 4; result cases 9; failures 0; all 12 required labels covered (exact, lexical, paraphrased, long-document, contradictory, wrong-version, wrong-root, wrong-role, revoked, missing-knowledge, budget-omission, mandatory-priority)"
+    },
+    {
+      "kind": "measured-campaign",
+      "ref": "events sha256:786d488faf37e31790d450145b434ad55772820b28e1f6078170bf980fdea19f, 57451 lines, 0 unparseable; 87 distinct provider sidecars (68 archived copies collapsed); 45 distinct gate reports (22 collapsed); 24 dispatched / 8 integrated / 11 accepted / 16 unfinished; retries 5 worker + 2 evidence + 37 attempts archived + 13 product-repair + 28 reservation refusals + 15 failed provider invocations; ready-to-dispatch wait 126 obs, 9.0-1349.0 s; gates worker 34 obs 3279395 ms, integration 11 obs 6011599 ms; control plane 928 reconciles, 26234 recovery actions (26227 of one standing strategy), 26226 campaign mismatches; reviews accepted 11 / needs-fix 14 / blocked 2, 16877.9 bytes per accepted review over incomplete bundle coverage; 84 interventions, 0 claiming unattended credit"
+    },
+    {
+      "kind": "raw-identity-verification",
+      "ref": "native-observations-before-A6.json names 12 provider sidecars with SHA-256; all 12 resolved against the documented campaign source root and re-hashed: 12 verified, 0 missing, 0 mismatched"
+    },
+    {
+      "kind": "explicit-unknowns",
+      "ref": "14 unknowns in 6 kinds: runner-result-without-usage 8, mixed-provider-token-semantics 2 (implementer and auditor span codex and claude, whose cachedInputTokens semantics differ, so per-role totals are not comparable and byProvider is the measured figure), review-context-coverage 1 (5 retained review bundles cover 11 accepted reviews), provider-monetary-cost 1, provider-served-tier 1, context-occupancy 1"
+    },
+    {
+      "kind": "findings-document",
+      "ref": "docs/brain-build-plan/context-findings.md"
+    },
+    {
+      "kind": "adoption-document",
+      "ref": "docs/brain-build-plan/context-adoption.md"
+    },
+    {
+      "kind": "retained-obligation",
+      "ref": "Original TASK-1015 incremental reconciliation reported PENDING, not complete: only the TASK-1112 subset (merge 414deeace06b27f798fa2acd6281393ba8b684ca, engine/reconcile_index.py) is integrated; the discovery/scaling obligations are carried by docs/orchestration/rescue-tasks/TASK-1114.md (status ready, depends on TASK-1106) and tests/test-incremental-reconcile.sh does not exist. No measured evidence is claimed for it."
+    },
+    {
+      "kind": "provenance-boundary",
+      "ref": "Direct supervision, local fixtures and uninterrupted native transitions kept distinct. Checkpoint unattended.currentConsecutiveIntegrations = 0 of 3 required; TASK-1110 recorded as direct maintenance, never native autonomy credit; TASK-1116/TASK-1117 recorded as assisted. Selected-run totals are not total project usage; cumulative tokens are neither context occupancy nor money; the only retained monetary figures are the four quoted from the checkpoint and no campaign-wide external maintenance/review total exists."
+    },
+    {
+      "kind": "cli-surface",
+      "ref": "singular context evaluate --corpus PATH [--output PATH] (exit 0 match, 4 measured deviation with report still published, 2 unusable inputs); singular context campaign-report --events PATH --runs DIR [--interventions|--checkpoint|--observations|--output PATH] (exit 2 when events or runs absent; declared-but-absent optional input becomes an absent-input unknown). Both are pure readers."
+    },
+    {
+      "kind": "scope-check",
+      "ref": "Only owned files changed. Nothing written into .singular-state/, .worktrees/, docs/orchestration/ or tools/brain-campaign/. No generated manifest committed into tests/fixtures/context-evaluation/; the real vendored singular-brain producer regenerates it into a scratch copy at evaluation time. No git commands run for version control."
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260915T123131Z-45424/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15:sha256:a1bacf01898f4c06eda9d088873426cbcc0b157001660d6e097cee5dec872786:epoch:10cb89f6b5253f8acf6354afa1973165b9c77230657659f9"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260915T123131Z-45424/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260915T123131Z-45424/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260915T123131Z-45424/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-15T13:15:00Z"
+}
