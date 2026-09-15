@@ -1,0 +1,128 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1114",
+  "runId": "RUN-20260915T204151Z-16170",
+  "branch": "codex/brain-rescue/TASK-1114",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json (compact manifest, RUN-20260915T204151Z-16170)",
+    "packet.json (state packet, sha256:38aaa3ecf6409e2a52119b63f0ea0104d60cb1e7b76694c1da595cb0460bb276)",
+    "audit-verification.json (host verification: outcome=not-rerun-evidence-verified, evidenceOnly=true, workspaceKind=evidence-only, headSha de588048edb5, treeSha a4bfe15f, sourceIntegrity.status=verified, changedPaths=[], unexpectedFailures=[], infrastructureSignals=[])",
+    "gate-report.json / gate-check.json (gate check recorded passed)",
+    "gate-check.log (sha256:41fb103ee8671cd265375b984b43c46dff2f717854f448cb339e02a1d744e800, 'SUMMARY: 5 passed, 0 failed')",
+    "scope-check-result.json and scope-check.log ('scope check: 8 changed path(s), all allowed')",
+    "secret-scan-result.json and secret-scan.log ('secret-scan: clean')",
+    "worker-evidence/red.log and worker-evidence/red-baseline.sh (differential baseline reproducer against base engine tree ada2f1d0785a)",
+    "worker-evidence/green.log and worker-evidence/regression.log",
+    "committed diff ada2f1d0785a..de588048edb5 (8 files, all owned paths)",
+    "engine/reconcile_index.py at HEAD (event cursor, fair sweep, dependency identity, plan/commit split, receipts, status)",
+    "engine/reconcile.sh, engine/integrate.sh, engine/ops.sh, engine/lib.sh diffs against ada2f1d0785a",
+    "tests/test-incremental-reconcile.sh and tests/test-ops-health.sh at HEAD",
+    "docs/incremental-reconciliation.md at HEAD",
+    "TASK-1114 task contract and the 2026-09-15 supervisor provenance (test_after_waiver, gate-member removal rationale)",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15B:sha256:33424c14601909eaf783e10b28c97c7c26b080fd29f51da9c0947ee180a35beb:epoch:6009cbe667ac807f93bd70eb9d712d1fac3554c3a71fa2a0",
+    "reviewed-head-sha:de588048edb5dcc7c36e5ac350b9994805c3747a"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "test -f tests/test-incremental-reconcile.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-incremental-reconcile.sh test-task-lifecycle.sh test-dynamic-dispatch.sh test-integration-exact-tree.sh test-ops-health.sh",
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-report.json",
+        "gate-check.log",
+        "evidence-manifest.json"
+      ],
+      "rationale": "Host classification is not-rerun-evidence-verified: audit-verification.json records evidenceOnly=true, workspaceKind=evidence-only, rawExitCode 0, and hash-binds the worker gate evidence (logSha256 41fb103e...44e800, evidenceBindingSha256 6fc49efb..., evidenceSourceCommandIdentity identical to commandSha256 585df539...) to headSha de588048edb5 with sourceIntegrity.status=verified and no changed paths. unexpectedFailures and infrastructureSignals are empty. I did not rerun the gate in this read-only worktree and I reproduce the host classification verbatim rather than upgrading it to passed.",
+      "exitCode": 0
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "bash .singular-evidence/red-baseline.sh",
+      "evidenceRefs": [
+        "worker-evidence/red.log",
+        "worker-evidence/red-baseline.sh",
+        "packet.json"
+      ],
+      "rationale": "red.log is genuine differential evidence rather than a claimed test-first red phase: the script extracts the pre-implementation base tree read-only via git archive and runs the same pinned fixture, failing phase 1 with 'FAIL: no instrumented historical validation in the baseline cycle' and phase 2 with 'reconcile_index.py: error: unrecognized arguments: --audits ... --max-sweep-bytes ...' (base reconcile_index.py 272 lines vs 1129 at HEAD). Under the supervisor's 2026-09-15 test_after_waiver policy no red phase is claimed for this qualification run; I verified the reproducer exists and is hash-bound to the evidence rather than rerunning it.",
+      "exitCode": 1
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "scope check and secret scan on de588048edb5",
+      "evidenceRefs": [
+        "scope-check-result.json",
+        "scope-check.log",
+        "secret-scan-result.json",
+        "secret-scan.log"
+      ],
+      "rationale": "Both host checks are recorded passed ('scope check: 8 changed path(s), all allowed'; 'secret-scan: clean'). I independently confirmed scope from the repository: git diff --name-only ada2f1d0785a..de588048edb5 yields exactly the eight owned paths (engine/reconcile_index.py, engine/reconcile.sh, engine/integrate.sh, engine/lib.sh, engine/ops.sh, tests/test-incremental-reconcile.sh, tests/test-ops-health.sh, docs/incremental-reconciliation.md) and no forbidden path.",
+      "exitCode": 0
+    }
+  ],
+  "commandsRun": [
+    "git log --oneline -3",
+    "git diff --name-only ada2f1d0785a..de588048edb5",
+    "git diff --stat ada2f1d0785a..de588048edb5",
+    "git diff ada2f1d0785a..de588048edb5 -- engine/reconcile.sh engine/integrate.sh engine/ops.sh",
+    "git diff ada2f1d0785a..de588048edb5 -- engine/lib.sh",
+    "git diff ada2f1d0785a..de588048edb5 -- tests/test-ops-health.sh",
+    "git show ada2f1d0785a:tests/test-incremental-reconcile.sh | sed -n '1,30p'",
+    "wc -l engine/reconcile_index.py; sed -n '1,120p;120,470p;620,900p;900,1060p' engine/reconcile_index.py",
+    "grep -n 'full_scan_every|FULL_SCAN' engine/reconcile_index.py engine/reconcile.sh engine/lib.sh",
+    "sed -n '312,360p' engine/reconcile.sh",
+    "sed -n '495,560p;690,1010p' tests/test-incremental-reconcile.sh",
+    "grep -n 'assert|FAIL:' tests/test-incremental-reconcile.sh",
+    "grep -niE 'savings|faster|speedup|improvement|token|threshold' docs/incremental-reconciliation.md",
+    "sed -n '54,126p' docs/incremental-reconciliation.md",
+    "cat .singular-state/runs/RUN-20260915T204151Z-16170/{evidence-manifest.json,scope-check-result.json,secret-scan-result.json,scope-check.log,secret-scan.log,gate-check.log}"
+  ],
+  "findings": [
+    "F1 (P2): engine/reconcile_index.py commit()/_settle() re-observe the retained artifacts of every task integrate.sh merely examined, not only those it published, because engine/integrate.sh emits the historical-validation receipt before the 'status == accepted' test; for such a task a silent, event-less change racing the acknowledgement window has its content identity overwritten at commit and is then discoverable only via the event-stream backstop or the periodic canonical rediscovery, not via the next sweep.",
+    "F2 (P3): the commit() docstring ('never re-observe at acknowledgement time') and the _settle() docstring ('only what this transaction itself published') contradict the code, which does re-observe settled entries and settles examined rather than published tasks. docs/incremental-reconciliation.md states the real behaviour correctly, so the inconsistency is confined to the Python docstrings.",
+    "F3 (P3): packet.json attributes the command 'bash tests/test-incremental-reconcile.sh' to logRef .singular-evidence/green.log, but that log contains only the five-test tests/run.sh summary and no single-file output; the packet discloses this ('Included in the gate run recorded in green.log'), and green.log, regression.log and the host's gate-check.log are byte-identical (sha256 41fb103e...44e800), consistent with deterministic summary output.",
+    "F4 (P3): tests/test-incremental-reconcile.sh hardcodes /opt/homebrew/bin/bash and /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 with no fallback or skip guard. The pattern is pre-existing at base ada2f1d0785a and is extended by the new real-entrypoint section; the fixture will fail outright on any host without those exact paths."
+  ],
+  "requiredFixes": [],
+  "classifiedFindings": [
+    {
+      "id": "F1",
+      "severity": "P2",
+      "summary": "commit()/_settle() re-observe every task integrate.sh examined, not only those it published, narrowing the plan-versus-acknowledgement race guarantee for examined-but-unpublished tasks to the event backstop and periodic rediscovery."
+    },
+    {
+      "id": "F2",
+      "severity": "P3",
+      "summary": "commit() and _settle() docstrings contradict the implemented re-observation behaviour; the markdown documentation is accurate."
+    },
+    {
+      "id": "F3",
+      "severity": "P3",
+      "summary": "packet.json points the single-file test command at green.log, which holds only the aggregate gate summary; the packet discloses the substitution."
+    },
+    {
+      "id": "F4",
+      "severity": "P3",
+      "summary": "Hardcoded /opt/homebrew/bin/bash and framework python3.12 paths (pre-existing at base, extended here) make the fixture non-portable off this host."
+    }
+  ],
+  "rationale": "Scope is clean and independently confirmed: the committed range ada2f1d0785a..de588048edb5 touches exactly the eight owned paths and no forbidden path; the host scope check and secret scan both passed. Branch, headSha (de588048edb5), treeSha and campaign binding in audit-verification.json match the packet, with sourceIntegrity verified and zero changed paths, so the evidence is bound to the exact candidate I reviewed. I reproduce the host gate classification exactly as not-rerun-evidence-verified and do not restate it as passed. Acceptance criteria are met on evidence read in the source rather than on packet assertions. AC-1: red-baseline.sh is a real differential reproducer against the base engine tree with concrete failure strings, and the fixture is extended in place (INCREMENTAL_ENGINE_HOME resolves the engine under test once, before the unit section) rather than forked into a parallel harness; the canonical-versus-indexed comparison over the pinned corpus compares the integrator's own skip/FAILED/INTEGRATED decisions including missing-branch, malformed and nonterminal packets. AC-2: _read_events consumes a persistent byte cursor under --max-events; _sweep advances an independent resumable frontier pass under separate directory, directory-entry and byte limits, and _hash_entry charges a full fixed block before reading it so the byte ceiling is real; tests assert entriesScanned and bytesHashed stay within declared limits. AC-3: the revisit bound is documented as ceil(remainingEntries/maxSweepEntries)+ceil(deferredBytes/maxSweepBytes)+1, reported per plan, and tested for non-starvation under continuous arrivals; silent same-size replacement, deletion, restoration and missing-to-present transitions are covered, with identity a digest over ordered block digests and size rather than mtime. AC-4: shared identity (target head, policy, campaign) and per-candidate identity (branch head including packed refs, commit/tree availability) are digested separately, so an unrelated local change dirties only its own entry while a true shared change invalidates the affected set with work still bounded. AC-5/AC-6: plan writes only a pending proposal; commit runs at the existing end-of-actuation boundary and only when the canonical scan exited 0; missing, corrupt, outdated-schema and forged indexes all fail open to full canonical discovery via _safe_plan, FORGED_KEYS are stripped and never honoured, integrate.sh ignores --dirty-tasks outside a reconcile cycle, and the index-disabled path is preserved and compared; the fixture exercises truncation, rotation, duplicate events, cursor discontinuity, index loss/corruption, forged entries and interruption before acknowledgement with exactly one gate run and one publication surviving. AC-7: diagnostics are deduplicated by (reason, dependency identity) with new/resolved transitions, and ops health exposes index health, backlog bytes, sweep pass, remaining work and pendingAcknowledgement while keeping authority discovery-only. AC-8: receipts are emitted at the real expensive boundaries inside the production integrator, and the second and third unchanged real --actuate cycles record zero historical validations and zero final authority checks, repeated over a complete sweep on a fixture with no eligible dispatch work. AC-9: the receipt separates sweep, rebuild, canonical and control-plane sections with platform and uncertainty fields, feeds TASK-1106's existing evaluator rather than a new service, and the test asserts the absence of savings/token/usd/threshold claims. AC-10/AC-11: documentation covers comparison, recovery, activation and fallback, and both docs and the packet's nextAction explicitly leave the fresh independent audit, the host-run exact-merged-tree integration gate and the complete canonical host suite open, claiming no B1 completion, runtime adoption or operational improvement, with TASK-1009 at 3a47a736 and the prior recovery records untouched. The four findings are non-blocking: F1 is a narrow residual race whose worst case is delayed, not permanent, concealment because periodic canonical rediscovery withdraws any selection and the event cursor is not advanced past the racing arrival; F2 through F4 are documentation and portability notes, and F4 is pre-existing at base. No P0 or P1 defect survived verification, so I accept on this evidence while recording F1-F4 as backlog.",
+  "reviewPolicy": {
+    "version": 1,
+    "logicalChange": "reconciliation-discovery",
+    "round": 1,
+    "maxRounds": 2,
+    "originalVerdict": "accepted",
+    "effectiveVerdict": "accepted",
+    "blocking": [],
+    "backlog": [
+      "F1",
+      "F2",
+      "F3",
+      "F4"
+    ],
+    "downgraded": [],
+    "unclassifiedCount": 0,
+    "appliedAt": "2026-09-15T20:59:18Z"
+  }
+}
