@@ -7,6 +7,28 @@ and the plugin negotiate on `schemaVersion`.
 
 ---
 
+## [0.22.1] — 2026-09-15 — B5: evaluation harness and campaign analysis
+
+Completes the brain campaign. TASK-1106 was accepted by the fresh
+claude-opus-5 audit at 13:13Z and integrated (`8ed75c3`) minutes after 0.22.0
+was cut — the auto-integration had been refused for 100 minutes because the
+release edits sat uncommitted in the live target checkout ("working tree has
+non-control-state changes"), which is now a documented operating rule.
+
+- **B5 — Evaluation and operational documentation.** A deterministic labeled
+  retrieval corpus and harness (`singular context evaluate`) over contracts,
+  prior failures, wrong versions, stale docs, missing knowledge, long
+  documents and role restrictions, reporting inclusion/recall within budget,
+  incorrect selections, omissions and abstention with missing-data semantics
+  preserved; a campaign analysis command over events and runner-result
+  sidecars (invocations and tokens by role and model, retries, time to
+  integration, failure causes, missing observations); adoption/rollback
+  instructions and a findings report from the retained campaign
+  observations (`docs/brain-build-plan/context-findings.md`,
+  `context-adoption.md`). Proof: `tests/test-context-evaluation-e2e.sh`,
+  plus the five-script task gate and the exact-tree integration gate.
+- No engine change relative to 0.22.0.
+
 ## [0.22.0] — 2026-09-15 — A brain, and the red tape cut
 
 0.21 made the factory fast. This release gives it a memory and a knowledge
