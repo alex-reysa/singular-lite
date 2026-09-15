@@ -17,6 +17,14 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# The engine tree under test. INCREMENTAL_ENGINE_HOME points the whole fixture
+# -- the unit section below as well as the real reconcile --actuate /
+# integrate.sh section further down -- at another checkout of the engine, which
+# is how the pre-implementation baseline is compared against this one on the
+# same pinned corpus. Unset (every ordinary run, including the gate) means this
+# checkout, byte for byte as before.
+engine_source="${INCREMENTAL_ENGINE_HOME:-$ROOT}"
+
 # INCREMENTAL_RECONCILE_SKIP_UNIT=1 runs only the real reconcile --actuate /
 # integrate.sh section, so that behavioral evidence can be captured on its own.
 if [[ "${INCREMENTAL_RETROSPECTIVE_BASELINE:-0}" != 1 && "${INCREMENTAL_RECONCILE_SKIP_UNIT:-0}" != 1 ]]; then
@@ -62,7 +70,7 @@ SWEEP_BYTES=$((8 * 1024 * 1024))
 HASH_BLOCK=$((1024 * 1024))
 
 plan() {
-  "$PYTHON" "$ROOT/engine/reconcile_index.py" plan \
+  "$PYTHON" "$engine_source/engine/reconcile_index.py" plan \
     --index "$index" --tasks "$tasks" --packets "$packets" --leases "$leases" \
     --audits "$audits" --events "$events" --repo "$repo" \
     --max-events "$MAX_EVENTS" --max-sweep-entries "$SWEEP_ENTRIES" \
@@ -71,10 +79,10 @@ plan() {
     --target-head "$1" --policy "$2" --campaign "$3" --full-scan-every "$4"
 }
 commit_index() {
-  "$PYTHON" "$ROOT/engine/reconcile_index.py" commit --index "$index" >/dev/null
+  "$PYTHON" "$engine_source/engine/reconcile_index.py" commit --index "$index" >/dev/null
 }
 status_index() {
-  "$PYTHON" "$ROOT/engine/reconcile_index.py" status --index "$index"
+  "$PYTHON" "$engine_source/engine/reconcile_index.py" status --index "$index"
 }
 # J <json> <python-assertions>: assertion bodies read `doc`; failures print it.
 J() {
@@ -493,7 +501,6 @@ actual_repo="$tmp/actual-repo"
 actual_orch="$actual_repo/docs/orchestration"
 actual_state="$actual_repo/.singular-state"
 fixture_engine="$tmp/fixture-engine"
-engine_source="${INCREMENTAL_ENGINE_HOME:-$ROOT}"
 canonical_count="$tmp/canonical-count"
 validation_count="$tmp/validation-count"
 dispatch_count="$tmp/dispatch-count"
@@ -758,13 +765,21 @@ if [[ "${INCREMENTAL_RETROSPECTIVE_BASELINE:-0}" == 1 ]]; then
   # The uncorrected source acknowledges before its control-state commit. Run a
   # second still-missing cycle to stabilize that target identity, then restore
   # only the packed ref. The following public --actuate call must rediscover it.
+  #
+  # How many canonical passes that stabilizing cycle costs is a property of the
+  # uncorrected source, not of this fixture: a source that already withholds the
+  # canonical pass on an unchanged corpus spends none. Record the observed count
+  # and keep going, so the baseline always reaches the restoration probe below
+  # instead of stopping at an incidental difference in stabilization cost.
   baseline_stabilize="$(run_actual 2>&1)"
-  [[ "$(count_lines "$canonical_count")" == 2 ]] \
+  baseline_scans="$(count_lines "$canonical_count")"
+  echo "# retrospective baseline: canonical passes after stabilization: $baseline_scans"
+  [[ "$baseline_scans" == 1 || "$baseline_scans" == 2 ]] \
     || { echo "$baseline_stabilize" >&2; exit 1; }
   git -C "$actual_repo" branch agent/core/TASK-2201-incremental "$actual_head"
   git -C "$actual_repo" pack-refs --all --prune
   baseline_restored="$(run_actual 2>&1)"
-  if [[ "$(count_lines "$canonical_count")" == 2 \
+  if [[ "$(count_lines "$canonical_count")" == "$baseline_scans" \
       && "$(count_lines "$validation_count")" == 0 \
       && "$baseline_restored" == *"integrated_this_run=0"* ]]; then
     echo "FAIL: restored packed candidate ref was not rediscovered by actual reconcile --actuate" >&2

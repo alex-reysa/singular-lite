@@ -224,6 +224,43 @@ unrelated load. The receipt states counts for the corpus it observed. It
 asserts no performance target, no rate, no expected improvement, and no token
 or monetary figure.
 
+## Comparing against another engine tree
+
+The comparison in "Discovery selection" is between the indexed and the
+index-disabled path of *this* engine. A second comparison is sometimes needed:
+the same pinned corpus against a *different* checkout of the engine — the
+pre-implementation baseline, or a candidate under review.
+
+`tests/test-incremental-reconcile.sh` takes the engine under test from
+`INCREMENTAL_ENGINE_HOME`. Unset — every ordinary run, including the gate — it
+is this checkout. Set, both the unit section and the real
+`reconcile.sh --actuate` / `integrate.sh` section run against that tree instead,
+on the corpus this fixture pins:
+
+```
+# the real entrypoint section only
+INCREMENTAL_RECONCILE_SKIP_UNIT=1 INCREMENTAL_ENGINE_HOME=/path/to/other-tree \
+  bash tests/test-incremental-reconcile.sh
+
+# the whole fixture
+INCREMENTAL_ENGINE_HOME=/path/to/other-tree \
+  bash tests/test-incremental-reconcile.sh
+```
+
+Against the base tree `ada2f1d0785a` the first form stops at
+`FAIL: no instrumented historical validation in the baseline cycle` — that
+engine pays the expensive boundaries without measuring them — and the second
+form stops at `reconcile_index.py: error: unrecognized arguments: --audits ...
+--events ... --max-events ... --max-sweep-entries ... --max-sweep-dirs ...
+--max-sweep-bytes ... --hash-block-bytes ...`, because the bounded event,
+directory-entry and content-byte work limits do not exist there.
+
+`INCREMENTAL_RETROSPECTIVE_BASELINE=1` narrows the real-entrypoint section to
+one probe: restore a candidate ref behind the acknowledged cursor, pack it, and
+see whether the next public `--actuate` rediscovers it. How many canonical
+passes the preceding stabilizing cycle costs is a property of the engine under
+test, not of the probe, so that count is reported rather than asserted.
+
 ## What this task's evidence does and does not establish
 
 `tests/test-incremental-reconcile.sh` exercises the real
