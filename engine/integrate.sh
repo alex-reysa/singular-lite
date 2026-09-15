@@ -32,6 +32,10 @@ task_filter=""
 dry_run="no"
 from_reconcile="no"
 run_id=""
+# Discovery selection only. The file names task identities a bounded discovery
+# pass observed as dirty; it grants nothing. Every candidate it does name still
+# goes through the complete uncached canonical eligibility and authority path.
+dirty_tasks_file=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,9 +43,24 @@ while [[ $# -gt 0 ]]; do
     --dry-run) dry_run="yes"; shift ;;
     --from-reconcile) from_reconcile="yes"; shift ;;
     --run-id) run_id="$2"; shift 2 ;;
+    --dirty-tasks) dirty_tasks_file="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+if [[ -n "$dirty_tasks_file" && ( "$from_reconcile" != "yes" || ! -f "$dirty_tasks_file" ) ]]; then
+  # A selection is only honoured from a reconcile cycle that actually produced
+  # one; otherwise fall back to full canonical discovery.
+  dirty_tasks_file=""
+fi
+
+# Measured expensive boundaries. These record what the integrator actually did,
+# at the points where the cost is paid, so a receipt cannot be satisfied by
+# counting canonical invocations or final gate calls alone.
+integration_receipt_record() {
+  [[ -n "${SINGULAR_INTEGRATION_RECEIPT_FILE:-}" ]] || return 0
+  printf '{"kind":"%s","taskId":"%s","runId":"%s"}\n' "$1" "$2" "${run_id:-}" \
+    >>"$SINGULAR_INTEGRATION_RECEIPT_FILE" 2>/dev/null || true
+}
 
 # Direct integration is an authoritative mutation entrypoint. Verify before
 # creating state, taking the origin lock, or staging a merge.
@@ -327,6 +346,15 @@ run_dir="$(singular_run_dir "$run_id")"; mkdir -p "$run_dir"
 for d in "${dirs[@]}"; do
   [[ -d "$d" ]] || continue
   task_id="$(basename "$d")"
+  # Bounded discovery selection: a task no observation named as dirty is not
+  # examined this cycle. The index is not authoritative -- a selection is only
+  # offered from a complete, quiet, acknowledged observation, and the periodic
+  # canonical rediscovery withdraws it, so nothing stays hidden.
+  if [[ -z "$task_filter" && -n "$dirty_tasks_file" ]] \
+    && ! grep -qxF -- "$task_id" "$dirty_tasks_file" 2>/dev/null; then
+    skipped=$((skipped + 1))
+    continue
+  fi
   # Early-skip terminal leases: never re-process already-integrated work.
   # The hundreds of integrated tasks were re-scanned every cycle (find over
   # all imported packets) and paid python+git merge-base cost before the
@@ -341,6 +369,10 @@ for d in "${dirs[@]}"; do
   # newest accepted packet for this task (exclude audit sidecars)
   packet="$(find "$d" -maxdepth 1 -name '*.json' -not -name '*.audit.json' -type f 2>/dev/null | sort | tail -1)"
   [[ -n "$packet" ]] || continue
+
+  # Everything from here on is historical eligibility validation: packet and
+  # audit parsing, lease and campaign reads, git object and ancestry queries.
+  integration_receipt_record historical-validation "$task_id"
 
   status="$(singular_json_field "$packet" status 2>/dev/null || echo "")"
   [[ "$status" == "accepted" ]] || { continue; }
@@ -790,6 +822,8 @@ PY
   fi
 
   gate_ec=0
+  # The uncached final authority check over the exact staged merge tree.
+  integration_receipt_record final-authority-check "$task_id"
   singular_run_in_worktree_env "$integration_gate_worktree" env \
     SINGULAR_ROOT="$integration_gate_worktree" \
     SINGULAR_STATE_DIR="$SINGULAR_STATE_DIR" \

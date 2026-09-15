@@ -206,4 +206,75 @@ assert excluded["b"]["reason"] == "deps-not-gated", excluded
 assert excluded["b"]["unmetDeps"] == ["a"], excluded
 PY
 
+# 4. Existing ops health exposes reconciliation discovery state: index health,
+# event backlog, sweep progress and remaining work, with actual counters. Cache
+# state is reported, never treated as authority.
+index_file="$root/.singular-state/reconcile-index.json"
+absent="$(run_env bash "$SCRIPT_DIR/ops.sh" health --json)"
+python3 - "$absent" <<'PYEOF'
+import json, sys
+doc = json.loads(sys.argv[1])
+index = doc["reconcileIndex"]
+assert index["present"] is False, index
+assert index["healthy"] is False, index
+assert index["authority"] == "discovery-only", index
+assert index["reason"] == "missing-index", index
+PYEOF
+assert_contains "$absent" '"reconcileIndex"' "health exposes reconcile index state"
+
+python3 - "$index_file" <<'PYEOF'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).parent.mkdir(parents=True, exist_ok=True)
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "schema": "singular.orchestration.reconcile-index.v2",
+    "authority": "discovery-only",
+    "cycle": 7,
+    "lastFullCycle": 7,
+    "baselinePass": 2,
+    "shared": {},
+    "sharedDigest": "0" * 64,
+    "events": {"offset": 10, "size": 42, "inode": 1, "headDigest": "1" * 64},
+    "sweep": {"pass": 3, "started": True, "frontier": ["tasks|"],
+              "entryCursor": "TASK-0002.md", "passEntries": 4},
+    "entries": {
+        "tasks/TASK-0001.md": {"identity": [1, 2, 3, 4], "content": "2" * 64,
+                               "pass": 3, "taskId": "TASK-0001"},
+        "tasks/TASK-0002.md": {"identity": [1, 3, 3, 4], "content": "3" * 64,
+                               "pass": 2, "taskId": "TASK-0002"},
+    },
+    "diagnostics": {},
+}), encoding="utf-8")
+PYEOF
+present="$(run_env bash "$SCRIPT_DIR/ops.sh" health --json)"
+python3 - "$present" <<'PYEOF'
+import json, sys
+doc = json.loads(sys.argv[1])
+index = doc["reconcileIndex"]
+assert index["present"] is True, index
+assert index["healthy"] is True, index
+assert index["authority"] == "discovery-only", index
+assert index["cycle"] == 7, index
+assert index["entries"] == 2, index
+assert index["eventBacklogBytes"] == 32, index
+assert index["sweep"]["pass"] == 3, index
+assert index["sweep"]["remainingEntries"] == 1, index
+assert index["sweep"]["passComplete"] is False, index
+PYEOF
+text_health="$(run_env bash "$SCRIPT_DIR/ops.sh" health)"
+assert_contains "$text_health" "reconcile:" "text health reports discovery index"
+assert_contains "$text_health" "backlog=32" "text health reports actual event backlog"
+
+printf '{broken\n' >"$index_file"
+broken="$(run_env bash "$SCRIPT_DIR/ops.sh" health --json)"
+python3 - "$broken" <<'PYEOF'
+import json, sys
+doc = json.loads(sys.argv[1])
+index = doc["reconcileIndex"]
+assert index["healthy"] is False, index
+assert index["reason"] == "corrupt-index", index
+assert doc["ok"] is False, doc["attention"]
+assert any("reconciliation discovery index" in item for item in doc["attention"]), doc["attention"]
+PYEOF
+rm -f "$index_file"
+
 echo "PASS: test-ops-health"

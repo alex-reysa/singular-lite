@@ -930,14 +930,17 @@ except Exception:
     || echo '{"diagnostics":{"total":0,"groups":0,"counts":{},"items":[]},"humanGates":{"total":0,"approved":0,"blocking":0,"states":{},"blockedNodes":[],"items":[],"errors":["health detail collection failed"]},"lifecycle":{"active":[],"activeCount":0,"phaseCounts":{},"implementersActive":0,"candidates":[],"preservedAttempts":[],"unknownRecords":[{"kind":"projector","record":"health_details.py","status":"unknown"}]}}')"
   lifecycle_json="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]).get("lifecycle",{}),separators=(",",":")))' "$health_details_json" 2>/dev/null || echo '{}')"
   effective_configuration_json="$(singular_effective_configuration_json 2>/dev/null || echo '{}')"
-  local head_sha
+  local head_sha reconcile_index_json
   head_sha="$(git -C "$SINGULAR_ROOT" rev-parse --short HEAD 2>/dev/null || echo null)"
+  # Discovery cache state is reported, never treated as authority: integrate.sh
+  # remains the only canonical eligibility and acceptance authority.
+  reconcile_index_json="$(singular_reconcile_index_status_json 2>/dev/null || echo '{}')"
 
   python3 - "$gates_json" "$frontier_json" "$ready_count" "$active_count" "$l1_active" "$l1_stale" \
     "$backoff_json" "$breaker_n" "${SINGULAR_MAX_CONSEC_FAILS:-5}" "$stop_present" "$lock_present" \
     "$auto_pid" "$auto_state" "$disk_free" "${SINGULAR_MIN_DISK_GB:-2}" "$wt_count" "$console_url" \
     "${SINGULAR_TARGET_BRANCH:-}" "$head_sha" "$lifecycle_json" "$resource_json" \
-    "$health_details_json" "$effective_configuration_json" "$json" <<'PY'
+    "$health_details_json" "$effective_configuration_json" "$reconcile_index_json" "$json" <<'PY'
 import hashlib
 import json
 import sys
@@ -946,7 +949,7 @@ from datetime import datetime, timezone
 (gates_raw, frontier, ready, active, l1a, l1s, backoff_raw, breaker, breaker_max,
  stop, lock, auto_pid, auto_state, disk, min_disk, wt, console_url,
  target, head, lifecycle_raw, resource_raw, health_details_raw,
- effective_configuration_raw, as_json) = sys.argv[1:25]
+ effective_configuration_raw, reconcile_index_raw, as_json) = sys.argv[1:26]
 
 
 def num(x):
@@ -983,6 +986,27 @@ try:
     effective_configuration = json.loads(effective_configuration_raw)
 except Exception:
     effective_configuration = {}
+try:
+    reconcile_index = json.loads(reconcile_index_raw)
+    if not isinstance(reconcile_index, dict):
+        raise ValueError
+except Exception:
+    reconcile_index = {}
+reconcile_index.setdefault("schema", "singular.orchestration.reconcile-index-status.v1")
+reconcile_index.setdefault("authority", "discovery-only")
+reconcile_index.setdefault("present", False)
+reconcile_index.setdefault("healthy", False)
+reconcile_index.setdefault("reason", "status-unavailable")
+reconcile_index.setdefault("cycle", 0)
+reconcile_index.setdefault("baselinePass", 0)
+reconcile_index.setdefault("entries", 0)
+reconcile_index.setdefault("eventBacklogBytes", 0)
+reconcile_index.setdefault("pendingAcknowledgement", False)
+if not isinstance(reconcile_index.get("sweep"), dict):
+    reconcile_index["sweep"] = {
+        "pass": 0, "remainingEntries": 0, "passComplete": True,
+        "frontierDirectories": 0,
+    }
 
 attention = []
 if frontier == "unavailable":
@@ -1006,6 +1030,16 @@ elif auto_state == "unknown":
     attention.append(
         "autonomate liveness unknown (permission denied or inconclusive); "
         "verify process ownership before starting another loop"
+    )
+# An absent index -- or one written by a superseded discovery schema -- is a
+# safe cold start, not a fault. A present, current-schema index that cannot be
+# read at all is: retained discovery state was damaged or forged.
+if (reconcile_index.get("present") and not reconcile_index.get("healthy")
+        and reconcile_index.get("reason") != "outdated-index"):
+    attention.append(
+        "reconciliation discovery index is unusable "
+        f"({reconcile_index.get('reason')}); reconcile falls back to full "
+        "canonical discovery until it is rebuilt"
     )
 if resources and resources.get("effectiveSlots") == 0:
     attention.append("adaptive scheduler has zero affordable worktree slots")
@@ -1033,6 +1067,7 @@ doc = {
     "candidates": lifecycle.get("candidates", []),
     "effectiveConfiguration": effective_configuration,
     "resources": resources,
+    "reconcileIndex": reconcile_index,
     "diagnostics": health_details.get("diagnostics", {}),
     "humanGates": health_details.get("humanGates", {}),
     "backoff": backoff,
@@ -1103,6 +1138,17 @@ else:
                 f"events={pressure.get('events')} "
                 f"recovery={pressure.get('quietSuccesses')}/{pressure.get('recoverQuiet')}"
             )
+    index = doc["reconcileIndex"]
+    print(
+        "reconcile:  index "
+        + ("healthy" if index["healthy"] else str(index["reason"]))
+        + f" cycle={index['cycle']} entries={index['entries']}"
+        + f" backlog={index['eventBacklogBytes']}B"
+        + f" sweep=pass{index['sweep'].get('pass')}"
+        + f" remaining={index['sweep'].get('remainingEntries')}"
+        + f" complete={index['sweep'].get('passComplete')}"
+        + f" pendingAck={index['pendingAcknowledgement']} (discovery-only)"
+    )
     if doc["lifecycle"]["phaseCounts"]:
         print(f"phases:     {doc['lifecycle']['phaseCounts']}")
     for candidate in doc["candidates"]:
