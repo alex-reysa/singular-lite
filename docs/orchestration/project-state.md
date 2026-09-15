@@ -8,13 +8,12 @@ singular self-hosted context-evolution build — COMPLETE (0.4.0, 2026-07-13). S
 Durable semantic state (cycle heartbeat and process telemetry live under `.singular-state`).
 
 Target branch: `codex/brain-integration`
-Imported packets: 124
+Imported packets: 125
 Tasks: 17
-Gates passed: 32/32
+Gates passed: 33/33
 
 Task statuses:
-- accepted: 1
-- integrated: 8
+- integrated: 9
 - ready: 1
 - superseded: 7
 <!-- singular:reconcile-snapshot:end -->
