@@ -2,6 +2,20 @@
 
 ## Decision Log
 
+### 2026-09-15T17:10:18Z — TASK-1114 — escalate-infra
+
+- Run: `RUN-20260915T145735Z-93279`
+- Branch: `codex/brain-rescue/TASK-1114`
+- Authority: policy
+- Rationale: environment failure (worker-infra), not a product defect: the workspace could not run the gate. Repair the environment, then `singular unpark TASK-1114`.
+
+### 2026-09-15T17:10:18Z — TASK-1114 — decide:escalate-infra
+
+- Run: `RUN-20260915T145735Z-93279`
+- Branch: `codex/brain-rescue/TASK-1114`
+- Authority: policy
+- Rationale: fast-path: worker-infra -> escalate-infra
+
 ### 2026-09-15T14:57:29Z — TASK-1106 — integrate
 
 - Run: `ORIGIN-20260915T145533Z-67142`
