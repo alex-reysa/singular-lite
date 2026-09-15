@@ -1,0 +1,9 @@
+{
+  "schema": "singular.orchestration.runner-result.v0",
+  "runId": "RUN-EVAL-FIXTURE",
+  "role": "implementer",
+  "outcome": "failed",
+  "failureClass": "provider-exit",
+  "marker": "RUNRECORD-5150",
+  "finding": "[open] Verify the rollback latch identifier before the migration window."
+}

@@ -1,0 +1,124 @@
+{
+  "controlPlane": {
+    "campaignMismatches": 0,
+    "controlStateCommitted": 1,
+    "controlStateDeferred": 0,
+    "reconcileCompleted": 2,
+    "reconcileStarted": 2,
+    "recoveryActions": 1,
+    "reservationRefusals": 1
+  },
+  "gateDurations": {
+    "byWorkspaceKind": {
+      "integration": {
+        "maxMs": 240000,
+        "minMs": 240000,
+        "observations": 1,
+        "totalMs": 240000
+      },
+      "worker": {
+        "maxMs": 180000,
+        "minMs": 60000,
+        "observations": 3,
+        "totalMs": 360000
+      }
+    },
+    "workerCompletedToGateCompletedSeconds": {
+      "observations": 2,
+      "totalSeconds": 300.0
+    }
+  },
+  "interventions": {
+    "duringQualifyingSequence": 1,
+    "records": 3,
+    "rescuesOrAdvancesRequiredTransition": 1,
+    "unattendedCredit": 0
+  },
+  "note": "Known metrics of the deterministic campaign fixture. Absent counters must stay unknown, never zero.",
+  "providerUsageByRole": {
+    "auditor": {
+      "observedCachedInputTokens": 300000,
+      "observedInputTokens": 400000,
+      "observedOutputTokens": 5000,
+      "sidecars": 2,
+      "sidecarsWithUsage": 2,
+      "sidecarsWithoutUsage": 0
+    },
+    "implementer": {
+      "observedCachedInputTokens": 900000,
+      "observedInputTokens": 1000000,
+      "observedOutputTokens": 20000,
+      "sidecars": 3,
+      "sidecarsWithUsage": 2,
+      "sidecarsWithoutUsage": 1
+    },
+    "plan-critic": {
+      "observedCachedInputTokens": 20000,
+      "observedInputTokens": 30000,
+      "observedOutputTokens": 900,
+      "sidecars": 1,
+      "sidecarsWithUsage": 1,
+      "sidecarsWithoutUsage": 0
+    },
+    "planner": {
+      "observedCachedInputTokens": null,
+      "observedInputTokens": null,
+      "observedOutputTokens": null,
+      "sidecars": 0,
+      "sidecarsWithUsage": 0,
+      "sidecarsWithoutUsage": 0
+    }
+  },
+  "readyToDispatchWaitSeconds": {
+    "maxSeconds": 45.0,
+    "minSeconds": 30.0,
+    "observations": 2,
+    "totalSeconds": 75.0
+  },
+  "retries": {
+    "attemptsArchived": 1,
+    "evidenceInfraRetries": 1,
+    "failedProviderInvocations": 1,
+    "productRepairConsumed": 0,
+    "reservationRefusals": 1,
+    "workerInfraRetries": 1
+  },
+  "reviews": {
+    "acceptedReviews": 1,
+    "bytesPerAcceptedReview": 17000.0,
+    "reviewContextPromptBytes": 17000,
+    "verdicts": {
+      "accepted": 1,
+      "needs-fix": 1
+    }
+  },
+  "runs": {
+    "archivedDuplicateGateReports": 1,
+    "archivedDuplicateSidecars": 1,
+    "gateReports": 4,
+    "sidecars": 6
+  },
+  "schema": "singular.context.campaign-analysis-expectation.v1",
+  "tasks": {
+    "accepted": [
+      "TASK-E001"
+    ],
+    "dispatched": [
+      "TASK-E001",
+      "TASK-E002"
+    ],
+    "integrated": [
+      "TASK-E001"
+    ],
+    "unfinished": [
+      "TASK-E002"
+    ]
+  },
+  "unknownKinds": [
+    "missing-runner-result-sidecar",
+    "runner-result-without-usage",
+    "provider-monetary-cost",
+    "provider-served-tier",
+    "context-occupancy"
+  ]
+}

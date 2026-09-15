@@ -1,0 +1,12 @@
+{
+  "durationMs": 120000,
+  "logBytes": 4096,
+  "outcome": "passed",
+  "phase": "worker",
+  "rawExitCode": 0,
+  "recordedAt": "2026-09-10T10:12:00Z",
+  "runId": "RUN-EVAL-A",
+  "schema": "singular.orchestration.gate-report.v0",
+  "taskId": "TASK-E001",
+  "workspaceKind": "worker"
+}

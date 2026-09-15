@@ -1,0 +1,17 @@
+{
+  "capabilityProfile": "implement-core",
+  "contractVersion": 1,
+  "exitCode": 0,
+  "failureClass": "none",
+  "outcome": "succeeded",
+  "provider": "fixture",
+  "recordedAt": "2026-09-10T10:09:00Z",
+  "role": "implementer",
+  "runId": "RUN-EVAL-A",
+  "schema": "singular.orchestration.runner-result.v0",
+  "usage": {
+    "cachedInputTokens": 540000,
+    "inputTokens": 600000,
+    "outputTokens": 12000
+  }
+}

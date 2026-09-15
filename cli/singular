@@ -2440,7 +2440,9 @@ Setup / lifecycle:
   init                 scaffold singular.config.json + docs/orchestration in this repo
   doctor [--json] [--repair-model-cache]               structured operator preflight
   manifest gen|check|lint|bless                        pinned, opt-in singular-brain producer
-  context build|search|get|explain                     bounded local context retrieval
+  context build|search|get|explain|evaluate|campaign-report
+                       bounded local context retrieval, the labeled retrieval
+                       evaluation, and analysis of retained campaign evidence
   memory propose|review|approve|reject|quarantine|supersede|tombstone|checkpoint|show|rebuild
                                                       governed project-local memory lifecycle
   review-policy effective|show|check|record|grant|backfill|backlog

@@ -646,6 +646,59 @@ doctor --json` projects the effective service policy and recent bundle details.
 Search, get, effective-config, and explain never write accounting or retrieval
 state.
 
+### Retrieval evaluation and campaign analysis (B5)
+
+Two read-only evaluation surfaces sit on top of the same service. Neither needs
+a provider, and neither writes into the state directories it measures.
+
+```bash
+singular context evaluate --corpus tests/fixtures/context-evaluation/corpus.json \
+  --output /tmp/evaluation-report.json
+singular context campaign-report \
+  --events .singular-state/events.ndjson \
+  --runs .singular-state/runs \
+  --interventions .../operator-interventions.jsonl \
+  --checkpoint .../checkpoint.json --observations .../observations.json
+```
+
+`evaluate` replays a declared labeled corpus
+(`singular.context.evaluation-corpus.v1`) through the real service and reports
+inclusion/recall within the byte budget, incorrect selections, budget omissions,
+abstentions and refusals per case and in aggregate, then compares them with the
+metrics the corpus itself declares. Labels cover exact, lexical and paraphrased
+facts, long documents, contradictory sources, wrong versions, wrong roots,
+wrong roles, revoked sources, missing knowledge, budget omission and mandatory
+priority. The corpus fixture's manifest is produced by the vendored
+singular-brain generator, so the evaluation runs against real manifest output
+rather than invented JSON. Exit 0 means the measured metrics match the declared
+ones; exit 4 means a measured deviation (the report is still published); exit 2
+means the inputs are unusable.
+
+`campaign-report` reads retained orchestration events, runner-result provider
+sidecars, host gate reports and the operator intervention log. Run artifacts are
+scanned recursively and deduplicated by content, so staged planner/critic
+invocations and superseded earlier-attempt gate runs are included while the
+byte-identical copies the engine retains under `attempts/<n>/` are collapsed;
+both collapsed counts appear under `inputs.runs`. It reports
+integrated and unfinished tasks, retries and refused work, ready-to-dispatch
+wait, gate durations by workspace, control-plane work, bytes per accepted
+review, and provider input/cached/output tokens by role and by provider.
+Failed and setup work stays included. Every counter the evidence does not
+contain is listed under `unknowns` with its kind and reference — an absent or
+usage-free sidecar, an accepted review with no retained context bundle, a role
+spanning providers whose cached-input semantics differ, and the standing
+unknowns for monetary cost, provider-observed service tier and context
+occupancy. Absent counters are never defaulted to zero, cumulative tokens are
+never presented as context occupancy or money, and interventions are counted
+separately from uninterrupted native delivery. Every input is recorded with its
+path and SHA-256 so a report can be re-derived. Exit 2 if the event stream or
+runs directory is absent; a declared-but-absent optional input becomes an
+`absent-input` unknown instead.
+
+The measured findings are in `docs/brain-build-plan/context-findings.md`;
+installation, activation, immutable runtime adoption, rollback and the memory
+approval policy are in `docs/brain-build-plan/context-adoption.md`.
+
 ### Reviewed persistent memory
 
 Persistent memory is opt-in and project-local. Model-authored content always
