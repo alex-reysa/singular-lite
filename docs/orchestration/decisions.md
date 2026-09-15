@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-15T19:11:26Z — TASK-1114 — unpark
+
+- Run: `ORIGIN-20260915T191126Z-9966`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: two 3600s worker timeouts with no source edits (exploration-heavy engine task); relaunching under a longer worker wall clock; partial doc + evidence preserved in wu9/TASK-1114-timeouts
+
 ### 2026-09-15T17:10:18Z — TASK-1114 — escalate-infra
 
 - Run: `RUN-20260915T145735Z-93279`
