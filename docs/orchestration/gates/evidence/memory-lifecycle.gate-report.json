@@ -1,0 +1,29 @@
+{
+  "command": "bash tests/run.sh test-memory-lifecycle-e2e.sh",
+  "commandSha256": "e9c951f12d4c4ef3c5355b4504f8794580fe8954da533ed0bd2f88750c6731b8",
+  "durationMs": 0,
+  "evidenceBindingSha256": "766f0632811f9162594bbbeb53181bb15d79a6740bb00bd1412887b2dc930a61",
+  "evidenceOnly": false,
+  "expectedFailures": [],
+  "failureSignals": [],
+  "headSha": "1bb41fd0be546376cc171fa77c70a915c6973b22",
+  "infrastructureSignals": [],
+  "logBytes": 64,
+  "logPath": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/docs/orchestration/gates/evidence/memory-lifecycle.regression.txt",
+  "logRef": "docs/orchestration/gates/evidence/memory-lifecycle.regression.txt",
+  "logSha256": "dd480b79c4098317e169718b185985926011df7c6c62dda5be4c245bc747349c",
+  "outcome": "passed",
+  "phase": "integration",
+  "rawExitCode": 0,
+  "recordedAt": "2026-09-15T19:17:41Z",
+  "resolvedExpectedFailures": [],
+  "runId": "ORIGIN-20260915T191732Z-51585",
+  "schema": "singular.orchestration.gate-report.v0",
+  "sourceIntegrity": {
+    "changedPaths": [],
+    "status": "not-checked"
+  },
+  "taskId": "TASK-1117",
+  "unexpectedFailures": [],
+  "workspaceKind": "integration"
+}
