@@ -2,6 +2,27 @@
 
 ## Decision Log
 
+### 2026-09-15T20:41:28Z — TASK-1114 — unpark
+
+- Run: `ORIGIN-20260915T204128Z-11389`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: adopted worker candidate e1b8e02a committed with supervisor provenance; test_after_waiver exact-source qualification; two pre-existing-failing gate members dropped from the contract; packet createdAt slip x2 exhausted the repair budget before gate/audit
+
+### 2026-09-15T20:37:55Z — TASK-1114 — escalate-parked
+
+- Run: `RUN-20260915T191656Z-45156`
+- Branch: `codex/brain-rescue/TASK-1114`
+- Authority: policy
+- Rationale: product repair budget exhausted for normal-risk task after 1 of 1 allowed repairs; audit and merged-tree gate authority remain unchanged.
+
+### 2026-09-15T20:23:42Z — TASK-1114 — decide:retry
+
+- Run: `RUN-20260915T191656Z-45156`
+- Branch: `codex/brain-rescue/TASK-1114`
+- Authority: policy
+- Rationale: fast-path: worker-no-packet -> retry
+
 ### 2026-09-15T19:11:26Z — TASK-1114 — unpark
 
 - Run: `ORIGIN-20260915T191126Z-9966`
