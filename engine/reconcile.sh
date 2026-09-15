@@ -156,6 +156,9 @@ integrations_this_run=0
 integration_failures=0
 canonical_integration_scans_this_run=0
 integration_index_ack_pending="no"
+integration_index_dirty_file=""
+integration_index_receipt=""
+integration_index_selection="full"
 gates_promoted_this_run=0
 planner_failures_this_run=0
 planner_backoff_active_this_run=0
@@ -263,27 +266,61 @@ if [[ "$mode" == "actuate" ]]; then
     integration_target_head="$(git -C "$SINGULAR_ROOT" rev-parse "$SINGULAR_TARGET_BRANCH")"
     integration_campaign="$(singular_campaign_binding 2>/dev/null || printf unknown)"
     if [[ "${SINGULAR_RECONCILE_INDEX:-1}" == "1" ]]; then
+      integration_index_receipt="$run_dir/reconcile-index-receipt.json"
+      integration_index_dirty_file="$run_dir/reconcile-dirty-tasks.txt"
+      # Discovery observes through a bounded event cursor and an independent
+      # fair sweep with declared directory-entry and content-byte limits. It
+      # proposes; only the acknowledgement below advances any watermark.
       integration_index_plan="$(python3 "$SCRIPT_DIR/reconcile_index.py" plan \
         --index "$SINGULAR_RECONCILE_INDEX_FILE" \
         --tasks "$SINGULAR_TASKS_DIR" \
         --packets "$SINGULAR_ORCH_DIR/packets/imported" \
         --leases "$SINGULAR_LEASES_DIR" \
+        --events "$SINGULAR_EVENTS_FILE" \
         --repo "$SINGULAR_ROOT" \
+        --receipt "$integration_index_receipt" \
         --target-head "$integration_target_head" \
         --policy "$SINGULAR_DEFAULT_GATE_CMD" \
         --campaign "$integration_campaign" \
+        --max-events "$SINGULAR_RECONCILE_MAX_EVENTS" \
+        --max-sweep-entries "$SINGULAR_RECONCILE_SWEEP_ENTRIES" \
+        --max-sweep-dirs "$SINGULAR_RECONCILE_SWEEP_DIRS" \
+        --max-sweep-bytes "$SINGULAR_RECONCILE_SWEEP_BYTES" \
+        --hash-block-bytes "$SINGULAR_RECONCILE_HASH_BLOCK_BYTES" \
+        --dirty-event-prefixes "$SINGULAR_RECONCILE_DIRTY_EVENT_PREFIXES" \
         --full-scan-every "$SINGULAR_RECONCILE_FULL_SCAN_EVERY" 2>/dev/null || true)"
       integration_scan_required="$(printf '%s' "$integration_index_plan" | python3 -c \
         'import json,sys; print("yes" if json.load(sys.stdin).get("runCanonical") else "no")' \
         2>/dev/null || printf yes)"
+      # A filtered canonical selection is offered only from a complete, quiet,
+      # acknowledged observation; anything else falls back to full discovery.
+      : >"$integration_index_dirty_file"
+      integration_index_selection="$(printf '%s' "$integration_index_plan" | python3 -c '
+import json, sys
+plan = json.load(sys.stdin)
+dirty = [t for t in plan.get("dirtyTasks") or [] if isinstance(t, str)]
+if plan.get("dirtyComplete") and dirty:
+    open(sys.argv[1], "w", encoding="utf-8").write("\n".join(dirty) + "\n")
+    print("selective")
+else:
+    print("full")
+' "$integration_index_dirty_file" 2>/dev/null || printf full)"
+      printf '%s\n' "$integration_index_plan" \
+        >"$run_dir/reconcile-index-plan.json" 2>/dev/null || true
+      singular_reconcile_index_report "$integration_index_plan" "$run_id" || true
     fi
     if [[ "$integration_scan_required" == "yes" ]]; then
       canonical_integration_scans_this_run=$((canonical_integration_scans_this_run + 1))
       echo "actuation: auto-integration (pre-dispatch)"
       integration_gates_before="$(singular_authoritative_gate_snapshot_json)"
       integration_scan_rc=0
-      integ_out="$(singular_with_origin_lock_capability \
-        "$SCRIPT_DIR/integrate.sh" --from-reconcile --run-id "$run_id" 2>&1)" \
+      integration_scan_args=(--from-reconcile --run-id "$run_id")
+      if [[ "$integration_index_selection" == "selective" ]]; then
+        integration_scan_args+=(--dirty-tasks "$integration_index_dirty_file")
+      fi
+      integ_out="$(SINGULAR_INTEGRATION_RECEIPT_FILE="${SINGULAR_INTEGRATION_RECEIPT_FILE:-$run_dir/integration-receipt.ndjson}" \
+        singular_with_origin_lock_capability \
+        "$SCRIPT_DIR/integrate.sh" "${integration_scan_args[@]}" 2>&1)" \
         || integration_scan_rc=$?
       printf '%s\n' "$integ_out" | sed 's/^/  integ: /'
       integrations_this_run="$(printf '%s\n' "$integ_out" | sed -n 's/^integrated_this_run=//p' | tail -1)"
@@ -300,6 +337,22 @@ if [[ "$mode" == "actuate" ]]; then
       fi
     else
       echo "actuation: auto-integration discovery unchanged; canonical historical validation skipped"
+      # Nothing needed publishing, so this cycle's observation is already
+      # consistent with the published state and may be acknowledged. Sweep and
+      # event progress would otherwise never advance on a quiet corpus.
+      if [[ "${SINGULAR_RECONCILE_INDEX:-1}" == "1" ]]; then
+        integration_index_ack_pending="yes"
+      fi
+    fi
+    if [[ "${SINGULAR_RECONCILE_INDEX:-1}" == "1" ]]; then
+      singular_reconcile_index_receipt \
+        "$integration_index_receipt" \
+        "${SINGULAR_INTEGRATION_RECEIPT_FILE:-$run_dir/integration-receipt.ndjson}" \
+        "${SINGULAR_RECONCILE_RECEIPT_FILE:-$run_dir/reconcile-receipt.json}" \
+        "$canonical_integration_scans_this_run" \
+        "$integrations_this_run" \
+        "$integration_failures" \
+        "$integration_index_selection" || true
     fi
   fi
 
@@ -848,16 +901,51 @@ if [[ "$integration_index_ack_pending" == "yes" ]]; then
     echo "test interruption before reconcile index acknowledgement" >&2
     exit 97
   fi
+  # Promote exactly the snapshot plan observed. Only the target/policy/campaign
+  # identity this actuation itself published under the origin lock is taken at
+  # acknowledgement time; entry, event-cursor and sweep watermarks stay as
+  # observed, so a change that arrived mid-transaction is still discoverable.
+  # The task identities this cycle's canonical pass actually validated are the
+  # only retained artifacts this transaction could have rewritten; they are
+  # re-observed at acknowledgement so the transaction's own published effects
+  # are not rediscovered forever. Everything else stays exactly as observed.
+  integration_index_settled="$run_dir/reconcile-settled-tasks.txt"
+  python3 - "${SINGULAR_INTEGRATION_RECEIPT_FILE:-$run_dir/integration-receipt.ndjson}" \
+    "$run_id" "$integration_index_settled" <<'SETTLED' 2>/dev/null || true
+import json
+import sys
+
+source, run, destination = sys.argv[1:4]
+tasks = []
+try:
+    with open(source, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(record, dict) or record.get("runId") != run:
+                continue
+            task = record.get("taskId")
+            if isinstance(task, str) and task and task not in tasks:
+                tasks.append(task)
+except OSError:
+    tasks = []
+with open(destination, "w", encoding="utf-8") as handle:
+    handle.write("".join(f"{task}\n" for task in tasks))
+SETTLED
   python3 "$SCRIPT_DIR/reconcile_index.py" commit \
     --index "$SINGULAR_RECONCILE_INDEX_FILE" \
     --tasks "$SINGULAR_TASKS_DIR" \
     --packets "$SINGULAR_ORCH_DIR/packets/imported" \
     --leases "$SINGULAR_LEASES_DIR" \
     --repo "$SINGULAR_ROOT" \
+    --settled-tasks "$integration_index_settled" \
+    --hash-block-bytes "$SINGULAR_RECONCILE_HASH_BLOCK_BYTES" \
     --target-head "$(git -C "$SINGULAR_ROOT" rev-parse "$SINGULAR_TARGET_BRANCH")" \
     --policy "$SINGULAR_DEFAULT_GATE_CMD" \
     --campaign "$(singular_campaign_binding 2>/dev/null || printf unknown)" \
-    --full-scan-every "$SINGULAR_RECONCILE_FULL_SCAN_EVERY" >/dev/null 2>&1 || true
+    >/dev/null 2>&1 || true
 fi
 
 echo "singular origin reconcile ($mode)"

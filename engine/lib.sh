@@ -394,6 +394,20 @@ SINGULAR_AUTO_INTEGRATE="${SINGULAR_AUTO_INTEGRATE:-1}"      # direct reconcile/
 SINGULAR_RECONCILE_INDEX="${SINGULAR_RECONCILE_INDEX:-1}"
 SINGULAR_RECONCILE_FULL_SCAN_EVERY="${SINGULAR_RECONCILE_FULL_SCAN_EVERY:-20}"
 SINGULAR_RECONCILE_INDEX_FILE="${SINGULAR_RECONCILE_INDEX_FILE:-$SINGULAR_STATE_DIR/reconcile-index.json}"
+# Declared discovery work limits. Each is a hard per-cycle ceiling: events
+# consumed from the retained stream, retained directory entries examined,
+# directories opened, content bytes hashed, and the fixed hash block that makes
+# an oversized artifact resumable instead of an unbounded single-cycle read.
+SINGULAR_RECONCILE_MAX_EVENTS="${SINGULAR_RECONCILE_MAX_EVENTS:-512}"
+SINGULAR_RECONCILE_SWEEP_ENTRIES="${SINGULAR_RECONCILE_SWEEP_ENTRIES:-512}"
+SINGULAR_RECONCILE_SWEEP_DIRS="${SINGULAR_RECONCILE_SWEEP_DIRS:-64}"
+SINGULAR_RECONCILE_SWEEP_BYTES="${SINGULAR_RECONCILE_SWEEP_BYTES:-8388608}"
+SINGULAR_RECONCILE_HASH_BLOCK_BYTES="${SINGULAR_RECONCILE_HASH_BLOCK_BYTES:-1048576}"
+# Event families that report an arrival of retained work. Consequence events
+# reconcile and integrate emit about their own canonical pass are excluded, so
+# a cycle cannot dirty itself forever; the independent sweep remains the
+# completeness guarantee. Empty keeps reconcile_index.py's default list.
+SINGULAR_RECONCILE_DIRTY_EVENT_PREFIXES="${SINGULAR_RECONCILE_DIRTY_EVENT_PREFIXES:-}"
 # Decider fast-path (T-F1): when 1 (default), singular_decider_fast_action resolves
 # clear-cut failure classes by policy without paying a model decider round-trip;
 # set 0 to force every failure through decide.sh (the historical behavior).
@@ -975,6 +989,132 @@ singular_decider_fast_action() {
       # proof-skip-detected, and any unlisted class -> the model decides.
       return 0 ;;
   esac
+}
+
+# --- reconciliation discovery index (discovery-only; never authoritative) ---
+
+# Non-authoritative health projection over retained index state. Reads no
+# corpus: the sweep and event cursors are reported as they were acknowledged.
+singular_reconcile_index_status_json() {
+  python3 "$SINGULAR_LIB_DIR/reconcile_index.py" status \
+    --index "$SINGULAR_RECONCILE_INDEX_FILE" 2>/dev/null && return 0
+  # A transient projector failure must not read as a different condition from
+  # one call to the next: an absent index has exactly one representation, so
+  # health stays stable for the overwhelmingly common cold-start case.
+  if [[ ! -e "$SINGULAR_RECONCILE_INDEX_FILE" ]]; then
+    printf '%s' '{"schema":"singular.orchestration.reconcile-index-status.v1","authority":"discovery-only","present":false,"healthy":false,"reason":"missing-index","cycle":0,"baselinePass":0,"entries":0,"eventBacklogBytes":0,"pendingAcknowledgement":false,"sweep":{"pass":0,"remainingEntries":0,"passComplete":true,"frontierDirectories":0}}'
+    return 0
+  fi
+  printf '%s' '{"schema":"singular.orchestration.reconcile-index-status.v1","authority":"discovery-only","present":true,"healthy":false,"reason":"status-unavailable","cycle":0,"baselinePass":0,"entries":0,"eventBacklogBytes":0,"pendingAcknowledgement":false,"sweep":{"pass":0,"remainingEntries":0,"passComplete":true,"frontierDirectories":0}}'
+}
+
+# Emit only changed and resolved discovery conditions. reconcile_index.py
+# already suppresses an unchanged (reason, dependency identity) pair, so an
+# unchanged condition never repeats itself into the retained event stream.
+singular_reconcile_index_report() {
+  local plan="$1" run="$2" line
+  [[ -n "$plan" ]] || return 0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    singular_append_event "reconcile.index_diagnostic" \
+      "reconciliation discovery diagnostic" "$line" || true
+  done < <(printf '%s' "$plan" | python3 -c '
+import json, sys
+try:
+    plan = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+if not isinstance(plan, dict):
+    raise SystemExit(0)
+events = plan.get("events") if isinstance(plan.get("events"), dict) else {}
+sweep = plan.get("sweep") if isinstance(plan.get("sweep"), dict) else {}
+for item in plan.get("diagnostics") or []:
+    if not isinstance(item, dict):
+        continue
+    print(json.dumps({
+        "runId": sys.argv[1],
+        "reason": item.get("reason"),
+        "state": item.get("state"),
+        "identity": item.get("identity"),
+        "dirtyTasks": len(plan.get("dirtyTasks") or []),
+        "eventBacklogBytes": events.get("backlogBytes"),
+        "sweepPass": sweep.get("pass"),
+        "remainingEntries": sweep.get("remainingEntries"),
+    }, separators=(",", ":")))
+' "$run" 2>/dev/null || true)
+}
+
+# Fold the measured canonical boundaries into the discovery receipt. Sweep,
+# rebuild, canonical validation and unrelated control-plane activity stay in
+# separate sections; no comparison target or rate is asserted here.
+singular_reconcile_index_receipt() {
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$SINGULAR_EVENTS_FILE" <<'PY'
+import json
+import os
+import sys
+
+(plan_receipt, integration_receipt, destination, scans,
+ integrated, failed, selection, event_stream) = sys.argv[1:9]
+
+
+def number(raw):
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+try:
+    doc = json.load(open(plan_receipt, encoding="utf-8"))
+    assert isinstance(doc, dict)
+except Exception:
+    doc = {
+        "schema": "singular.orchestration.reconcile-index-receipt.v1",
+        "authority": "discovery-only", "cycle": 0,
+        "sweep": {}, "rebuild": {}, "events": {}, "corpus": {},
+        "limits": {}, "platform": {}, "uncertainty": [],
+    }
+
+boundaries = {"historical-validation": 0, "final-authority-check": 0}
+try:
+    with open(integration_receipt, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            kind = record.get("kind") if isinstance(record, dict) else None
+            if kind in boundaries:
+                boundaries[kind] += 1
+except OSError:
+    pass
+
+doc["canonical"] = {
+    "canonicalScans": number(scans),
+    "subprocesses": number(scans),
+    "historicalValidations": boundaries["historical-validation"],
+    "finalAuthorityChecks": boundaries["final-authority-check"],
+    "integrated": number(integrated),
+    "failedIntegrations": number(failed),
+    "selection": selection,
+}
+try:
+    stream_bytes = os.path.getsize(event_stream)
+except OSError:
+    stream_bytes = 0
+doc["controlPlane"] = {
+    "eventStreamBytes": stream_bytes,
+    "note": "reconcile's own control-state, snapshot and event writes are "
+            "reported here, separately from sweep and canonical work",
+}
+destination_path = os.path.abspath(destination)
+os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+temporary = destination_path + ".tmp-%d" % os.getpid()
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(doc, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, destination_path)
+PY
 }
 
 singular_append_event() {
