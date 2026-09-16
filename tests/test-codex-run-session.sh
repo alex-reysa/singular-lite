@@ -285,6 +285,28 @@ SINGULAR_INVOCATION_ENVELOPE_BINDING="sha256:bbbb" MOCK_RESULT='{"status":"x"}' 
 [[ ! -f "$args" ]] || fail "f: codex must not be invoked when the envelope changed"
 pass "f retained envelope binding change -> exit 86 (resume refused, fresh required)"
 
+# --- Case f2: the binding is persisted by the REAL session-meta write path -------
+# Audit F1 on the first candidate: no production writer recorded envelopeBinding,
+# so the gate above only ever fired on hand-authored metas. Create the session
+# through the runner's own meta write under one binding, then resume under a
+# different binding: the retained meta must carry the first binding and the
+# resume must be refused with exit 86.
+r="$workroot/f2"; new_repo "$r"; o="$(out)"; args="$workroot/f2.args"; ec=0
+meta="$workroot/f2-meta.json"
+SINGULAR_INVOCATION_ENVELOPE_BINDING="sha256:first" MOCK_RESULT='{"status":"x"}' \
+  run_codex_run "$r" --level l2 -C "$r" --run-id RUN-SESSION-F2 \
+  --output-last-message "$o" --session-meta "$meta" >/dev/null 2>&1 || true
+[[ -f "$meta" ]] || fail "f2: runner did not write the session meta"
+[[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("envelopeBinding",""))' "$meta")" == "sha256:first" ]] \
+  || fail "f2: real write path did not persist envelopeBinding ($(cat "$meta"))"
+sid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sessionId",""))' "$meta")"
+SINGULAR_INVOCATION_ENVELOPE_BINDING="sha256:second" MOCK_RESULT='{"status":"x"}' MOCK_ARGS_OUT="$args" \
+  run_codex_run "$r" --level l2 -C "$r" --output-last-message "$o" \
+  --session-meta "$meta" --resume-session "${sid:-s}" >/dev/null 2>&1 || ec=$?
+[[ "$ec" -eq 86 ]] || fail "f2: resume after a real-path binding change should exit 86 (got $ec)"
+[[ ! -f "$args" ]] || fail "f2: codex must not be invoked when the retained binding differs"
+pass "f2 binding persisted by the real write path; changed binding refused (exit 86)"
+
 # An identical retained binding still resumes: the gate is a comparison, not a
 # blanket refusal of every retained session.
 r="$workroot/f2"; new_repo "$r"; o="$(out)"; args="$workroot/f2.args"

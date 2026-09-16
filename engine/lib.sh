@@ -8206,7 +8206,7 @@ singular_session_meta_write_provider() {
   [[ -n "$path" ]] || return 0
   local created; created="$(singular_timestamp 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
   python3 - "$path" "$provider" "$session_id" "$model" "$effort" "$cwd" "$exit_code" "$created" <<'PY' 2>/dev/null || true
-import json, sys
+import json, os, sys
 path, provider, sid, model, effort, cwd, ec, created = sys.argv[1:9]
 try:
     rc = int(ec)
@@ -8222,6 +8222,12 @@ doc = {
     "exitCode": rc,
     "createdAt": created,
 }
+# The resume-refusal gate compares the CURRENT invocation envelope binding
+# against the one retained with the session; a session created without it
+# can never be refused, so the binding is persisted at creation (audit F1).
+envelope = os.environ.get("SINGULAR_INVOCATION_ENVELOPE_BINDING", "")
+if envelope:
+    doc["envelopeBinding"] = envelope
 with open(path, "w", encoding="utf-8") as f:
     json.dump(doc, f, indent=2)
     f.write("\n")
