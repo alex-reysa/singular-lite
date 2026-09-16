@@ -1,0 +1,118 @@
+{
+  "schema": "singular.orchestration.audit-verdict.v1",
+  "taskId": "TASK-1115",
+  "runId": "RUN-20260916T091945Z-27580",
+  "branch": "codex/brain-rescue/TASK-1115",
+  "verdict": "accepted",
+  "evidenceReviewed": [
+    "evidence-manifest.json (compact) — artifacts list, checks{gate,scope,secret}=passed, campaignBinding A16",
+    "audit-verification.json — outcome not-rerun-evidence-verified, evidenceOnly=true, headSha d8da0233f9542ff7f1e09b2ae0966801c8f2c7b4, treeSha 037b2a2b, sourceIntegrity.status=verified with changedPaths=[], unexpectedFailures=[], infrastructureSignals=[]",
+    "packet.json (sha256 85e7097e…) — state-packet.v0, status needs-review, baseRef 512ac4a4, headSha d8da0233, 12 changed files, red/green/regression command records, ac14-pending and gate-deviation disclosures, createdAt 2026-09-16T09:31:48Z",
+    "manifest command records: red (exit 1, test-codex-run-session.sh), green (exit 0), declared nine-script gate (exit 0, 9 passed / 0 failed)",
+    "git rev-parse HEAD = d8da0233f9542ff7f1e09b2ae0966801c8f2c7b4 and git status --porcelain empty — branch head matches the host-verified head, working tree clean",
+    "git diff --name-status 512ac4a4..HEAD — 12 paths, all within the owned set, no forbidden path",
+    "git show d8da023 — round-2 delta: tests/test-codex-run-session.sh only, 2 insertions / 2 deletions (f2 → f2b fixture repo/args/meta path split)",
+    "git show 424f1c5 — F1 closure commit (engine/lib.sh, tests/test-codex-run-session.sh)",
+    "engine/lib.sh session-meta write path — persists envelopeBinding from SINGULAR_INVOCATION_ENVELOPE_BINDING at session creation; host resume decider compares envelopeBinding as a fresh trigger",
+    "engine/codex-run.sh resume gate — reads the retained binding and exits 86 on mismatch",
+    "engine/evidence_delivery.py _provider_launch_env and the real provider-launch call sites — the binding digest is exported at the host invocation boundary",
+    "tests/test-codex-run-session.sh cases f, f2 (real write path) and the f2b identical-binding resume sub-case",
+    "campaign-binding:campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A16:sha256:1146f87581d8f41b907d268a4e609833adc19ce1051bae30acd0d9fc12479da6:epoch:42d287f87cd56fea6d12bf28977958c6f449d190f59d1386",
+    "reviewed-head-sha:d8da0233f9542ff7f1e09b2ae0966801c8f2c7b4"
+  ],
+  "verificationResults": [
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "test -f tests/test-invocation-context-budget.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-invocation-context-budget.sh test-context-service-e2e.sh test-context-invocation-e2e.sh test-readonly-evidence-access.sh test-codex-run.sh test-codex-run-session.sh test-l1-drive-paired-audit-hook.sh test-memory-lifecycle-e2e.sh test-context-evaluation-e2e.sh",
+      "evidenceRefs": [
+        "audit-verification.json",
+        "gate-report.json",
+        "gate-check.log",
+        "worker-evidence/regression.log",
+        "packet.json"
+      ],
+      "rationale": "The host did not rerun the gate; it hash-bound the worker's own gate evidence to the committed head (evidenceOnly=true, evidenceBindingSha256 4cf9ab54…, evidenceSourceCommandIdentity equal to commandSha256 658959b3…, headSha d8da0233 matching the branch head I independently observed, sourceIntegrity verified with no changed paths). The bound evidence records 9 passed / 0 failed with no unexpected failures and no infrastructure signals. Reported at the host's exact classification; not upgraded to passed.",
+      "exitCode": 0
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "SINGULAR_TEST_JOBS=1 bash tests/run.sh test-codex-run-session.sh (red, pre-fix)",
+      "evidenceRefs": [
+        "worker-evidence/red.log",
+        "evidence-manifest.json#commands/packet-command-1",
+        "packet.json"
+      ],
+      "rationale": "The red excerpt shows 0 passed / 1 failed with 'PASS: f2 binding persisted by the real write path…' followed by 'nothing to commit, working tree clean' — the F1 assertion already held and the failure was the duplicated f2 fixture-repo re-init aborting under set -e, exactly as the packet states. Evidence-verified only; not rerun in this read-only worktree.",
+      "exitCode": 1
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "SINGULAR_TEST_JOBS=1 bash tests/run.sh test-codex-run-session.sh (green, post-fix)",
+      "evidenceRefs": [
+        "worker-evidence/green.log",
+        "evidence-manifest.json#commands/packet-command-2"
+      ],
+      "rationale": "The green excerpt shows 1 passed / 0 failed after the f2b fixture-path split. The committed delta I inspected (d8da023) changes only the fixture repo/args/meta paths of the 'identical retained binding still resumes' sub-case; every assertion in that sub-case and in case f2 is unchanged, so the green is not obtained by weakening a check. Not rerun here.",
+      "exitCode": 0
+    },
+    {
+      "status": "not-rerun-evidence-verified",
+      "command": "scope-check + secret-scan (host checks recorded in evidence-manifest.json#checks)",
+      "evidenceRefs": [
+        "scope-check-result.json",
+        "scope-check.log",
+        "secret-scan-result.json",
+        "secret-scan.log"
+      ],
+      "rationale": "Both recorded passed by the host rather than rerun by me. Independently corroborated with read-only git: diff --name-status 512ac4a4..HEAD lists 12 paths, all in the owned set (docs/invocation-context-budget.md, engine/{capability_policy.py,codex-run.sh,context_service.py,evidence_delivery.py,lib.sh}, both schema copies, four owned tests); no forbidden path (.singular-state/, .worktrees/, tools/brain-campaign/, docs/orchestration/, campaign.md, singular.config.*, engine/memory_service.py, tests/test-brain-ingestion-e2e.sh) is touched, and the working tree is clean at the verified head.",
+      "exitCode": 0
+    }
+  ],
+  "commandsRun": [
+    "git rev-parse HEAD",
+    "git status --porcelain",
+    "git diff --name-status 512ac4a4da0f8467993098d95daf94403e9b3d3e HEAD",
+    "git show --stat d8da023 && git show d8da023",
+    "git show --stat 424f1c5 && git show 424f1c5",
+    "sed -n '8200,8250p;8320,8380p' engine/lib.sh",
+    "sed -n '295,340p' engine/codex-run.sh",
+    "sed -n '280,325p' tests/test-codex-run-session.sh",
+    "sed -n '350,410p;795,825p' engine/evidence_delivery.py",
+    "grep -rn SINGULAR_INVOCATION_ENVELOPE_BINDING --include=*.sh --include=*.py .",
+    "cat .singular-state/runs/RUN-20260916T091945Z-27580/evidence-manifest.json"
+  ],
+  "findings": [
+    "F2 (P3): the round-2 directive said 'no further edits', but the attempt committed a two-line fixture-path change to tests/test-codex-run-session.sh (d8da023). It is confined to an owned test file, changes no production code, no assertion and no case semantics, and the worker disclosed it explicitly in the packet's gate-deviation evidence. Process note only.",
+    "F3 (P3): sessions whose meta is written outside the host evidence-delivery boundary (SINGULAR_INVOCATION_ENVELOPE_BINDING unset) still record no envelopeBinding, and both gates treat an absent retained binding as 'predates this contract' rather than refusing. This is the documented compatibility choice for retained bundles (AC2/AC10) and is comment-documented in engine/codex-run.sh; recorded so the residual coverage limit stays visible, not as a defect of the F1 delta."
+  ],
+  "requiredFixes": [],
+  "classifiedFindings": [
+    {
+      "id": "F2",
+      "severity": "P3",
+      "summary": "Round-2 'no further edits' deviation: a disclosed two-line fixture-path fix in an owned test file (d8da023); no assertion or production change."
+    },
+    {
+      "id": "F3",
+      "severity": "P3",
+      "summary": "Absent retained envelopeBinding is treated as legacy-compatible rather than refused, so the AC10 gate covers only host-boundary-launched sessions; documented compatibility choice, visibility note only."
+    }
+  ],
+  "rationale": "Final-round scope was strictly (1) is F1 closed by the delta and (2) does the delta regress anything. F1 is closed on the real write path, not only in fixtures: engine/lib.sh persists envelopeBinding into session-meta at creation from SINGULAR_INVOCATION_ENVELOPE_BINDING; engine/evidence_delivery.py exports that digest from _provider_launch_env, which is used at both real provider-launch call sites, so live invocations populate it; engine/codex-run.sh refuses resume with exit 86 when the retained binding differs, and the host resume decider in engine/lib.sh goes fresh on the same mismatch. Test case f2 creates the session through the runner's own meta write under binding sha256:first, asserts the retained meta carries it, then resumes under sha256:second and asserts exit 86 plus that the codex mock args file was never written — a provider-launch-count assertion, not a helper return. The complementary f2b sub-case proves the gate is a comparison, not a blanket refusal. No regression: the only round-2 commit (d8da023) is a two-line fixture-path split in an owned test file; assertions, production code and case semantics are unchanged, and the bound evidence moves that member from 1 failed to 1 passed and the full declared nine-script gate to 9 passed / 0 failed. Scope is clean — all 12 changed paths are owned, no forbidden path touched, working tree clean at the verified head d8da0233, matching the host's verified headSha and treeSha with sourceIntegrity verified. I reproduced the host classification exactly: the gate was not rerun, so every verificationResult is not-rerun-evidence-verified rather than passed, and no infrastructure limitation was converted into a product finding. AC14's outstanding obligation — the complete canonical host suite on the final exact integration tree — is correctly declared pending and unclaimed by the worker, as are the backlogged host-failure members test-capability-runtime.sh and test-session-affinity.sh; accepting this focused gate is not a claim that the final host obligation ran, nor any runtime-adoption or operational claim. Round-1 P2/P3 items remain recorded backlog per the directive and are not grounds for needs-fix; the two findings above are likewise P3 backlog notes. With F1 closed on evidence and no regression, the verdict is accepted.",
+  "reviewPolicy": {
+    "version": 1,
+    "logicalChange": "invocation-envelope",
+    "round": 2,
+    "maxRounds": 2,
+    "originalVerdict": "accepted",
+    "effectiveVerdict": "accepted",
+    "blocking": [],
+    "backlog": [
+      "F2",
+      "F3"
+    ],
+    "downgraded": [],
+    "unclassifiedCount": 0,
+    "appliedAt": "2026-09-16T09:39:07Z"
+  }
+}
