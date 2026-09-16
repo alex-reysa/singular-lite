@@ -2,6 +2,13 @@
 
 ## Decision Log
 
+### 2026-09-16T08:22:28Z — TASK-1115 — unpark
+
+- Run: `ORIGIN-20260916T082228Z-84209`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: user directive 2026-09-16: one final bounded attempt on A16 from preserved WIP d501f1fe; 45 min / $10
+
 ### 2026-09-15T21:21:26Z — TASK-1115 — escalate-parked
 
 - Run: `RUN-20260915T210233Z-91054`

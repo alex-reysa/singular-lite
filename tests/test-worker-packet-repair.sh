@@ -54,10 +54,6 @@ if singular_extract_json "$tmp/prose.json" "$tmp/prose.out" 2>"$tmp/err4"; then 
 grep -q "no parseable JSON object found" "$tmp/err4" || fail "unexpected prose error: $(cat "$tmp/err4")"
 pass "prose without an object is still refused"
 # 5. A complete packet lacking only createdAt is defaulted by the host, not refused.
-python3 - "$ROOT/tests/fixtures/worker-packet/stray-bracket-field-run.json" "$tmp/nocreated.json" <<'PY'
-import json, sys
-src = open(sys.argv[1]).read().replace('"]', '"', 1) if False else None
-PY
 singular_extract_json "$fixture" "$tmp/base.json" 2>/dev/null
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("createdAt"); json.dump(d, open(sys.argv[2],"w"))' "$tmp/base.json" "$tmp/nocreated.json"
 SINGULAR_PACKET_SCHEMA="$ROOT/schemas/orchestration/state-packet.v0.schema.json" singular_validate_packet_basic "$tmp/nocreated.json" 2>"$tmp/err5" || fail "packet without createdAt refused: $(cat "$tmp/err5")"
