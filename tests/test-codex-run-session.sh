@@ -269,4 +269,74 @@ assert rec.get("verified") is True, rec
 PY
 pass "e run dir records a verified provider session (pid == pgid)"
 
+# --- Case f: retained session envelope binding changed -> exit 86 --------------
+# A warning to ignore revoked history is not enough. Before reusing a session the
+# runner compares the CURRENT authorization/model/provider/policy/capability
+# envelope binding against the one retained with the session. A difference means
+# unauthorized historical content cannot be verifiably removed, so the resume is
+# refused and the host reconstructs a fresh authorized invocation.
+r="$workroot/f"; new_repo "$r"; o="$(out)"; args="$workroot/f.args"; ec=0
+meta="$workroot/f-meta.json"
+cat >"$meta" <<JSON
+{"schema":"singular.orchestration.session-meta.v0","provider":"codex","sessionId":"s","cwd":"$r","exitCode":0,"createdAt":"2026-01-01T00:00:00Z","envelopeBinding":"sha256:aaaa"}
+JSON
+SINGULAR_INVOCATION_ENVELOPE_BINDING="sha256:bbbb" MOCK_RESULT='{"status":"x"}' MOCK_ARGS_OUT="$args"   run_codex_run "$r" --level l2 -C "$r" --output-last-message "$o"   --session-meta "$meta" --resume-session "s" >/dev/null 2>&1 || ec=$?
+[[ "$ec" -eq 86 ]] || fail "f: envelope-binding change should exit 86 (got $ec)"
+[[ ! -f "$args" ]] || fail "f: codex must not be invoked when the envelope changed"
+pass "f retained envelope binding change -> exit 86 (resume refused, fresh required)"
+
+# --- Case f2: the binding is persisted by the REAL session-meta write path -------
+# Audit F1 on the first candidate: no production writer recorded envelopeBinding,
+# so the gate above only ever fired on hand-authored metas. Create the session
+# through the runner's own meta write under one binding, then resume under a
+# different binding: the retained meta must carry the first binding and the
+# resume must be refused with exit 86.
+r="$workroot/f2"; new_repo "$r"; o="$(out)"; args="$workroot/f2.args"; ec=0
+meta="$workroot/f2-meta.json"
+SINGULAR_INVOCATION_ENVELOPE_BINDING="sha256:first" MOCK_RESULT='{"status":"x"}' \
+  run_codex_run "$r" --level l2 -C "$r" --run-id RUN-SESSION-F2 \
+  --output-last-message "$o" --session-meta "$meta" >/dev/null 2>&1 || true
+[[ -f "$meta" ]] || fail "f2: runner did not write the session meta"
+[[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("envelopeBinding",""))' "$meta")" == "sha256:first" ]] \
+  || fail "f2: real write path did not persist envelopeBinding ($(cat "$meta"))"
+sid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sessionId",""))' "$meta")"
+SINGULAR_INVOCATION_ENVELOPE_BINDING="sha256:second" MOCK_RESULT='{"status":"x"}' MOCK_ARGS_OUT="$args" \
+  run_codex_run "$r" --level l2 -C "$r" --output-last-message "$o" \
+  --session-meta "$meta" --resume-session "${sid:-s}" >/dev/null 2>&1 || ec=$?
+[[ "$ec" -eq 86 ]] || fail "f2: resume after a real-path binding change should exit 86 (got $ec)"
+[[ ! -f "$args" ]] || fail "f2: codex must not be invoked when the retained binding differs"
+pass "f2 binding persisted by the real write path; changed binding refused (exit 86)"
+
+# An identical retained binding still resumes: the gate is a comparison, not a
+# blanket refusal of every retained session.
+r="$workroot/f2b"; new_repo "$r"; o="$(out)"; args="$workroot/f2b.args"
+meta="$workroot/f2b-meta.json"
+cat >"$meta" <<JSON
+{"schema":"singular.orchestration.session-meta.v0","provider":"codex","sessionId":"s2","cwd":"$r","exitCode":0,"createdAt":"2026-01-01T00:00:00Z","envelopeBinding":"sha256:aaaa"}
+JSON
+SINGULAR_INVOCATION_ENVELOPE_BINDING="sha256:aaaa" MOCK_RESULT='{"status":"x"}' MOCK_ARGS_OUT="$args"   run_codex_run "$r" --level l2 -C "$r" --output-last-message "$o"   --session-meta "$meta" --resume-session "s2" >/dev/null 2>&1
+grep -q -- "exec resume s2" "$args"   || fail "f2: identical envelope binding must still resume (got: $(cat "$args"))"
+pass "f2 identical retained envelope binding still resumes"
+
+# --- Case g: the host resume decision refuses a changed envelope binding -------
+r="$workroot/g"; new_repo "$r"
+meta="$workroot/g-meta.json"
+head_sha="$(git -C "$r" rev-parse HEAD)"
+prompt_file="$workroot/g-prompt.md"; printf 'PROMPT\n' >"$prompt_file"
+prompt_sha="$(shasum -a 256 "$prompt_file" | awk '{print $1}')"
+created="$(python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"))')"
+cat >"$meta" <<JSON
+{"schema":"singular.orchestration.session-meta.v0","provider":"codex","sessionId":"sid-g","role":"implementer","taskId":"TASK-0001","runId":"RUN-G","runner":"codex-run.sh","promptSha256":"$prompt_sha","createdAt":"$created","headShaAtCreate":"$head_sha","cwd":"$r","envelopeBinding":"sha256:aaaa"}
+JSON
+decide() {
+  SINGULAR_ROOT="$r" SINGULAR_STATE_DIR="$r/.singular-state"   SINGULAR_INVOCATION_ENVELOPE_BINDING="$1"     "${SINGULAR_BASH_BIN:-bash}" -c '
+      source "$1/engine/lib.sh"
+      singular_session_resume_decide "$2" implementer TASK-0001 RUN-G \
+        codex-run.sh "$3" "$4" "$5"
+    ' decide-test "$ENGINE_HOME" "$meta" "$prompt_sha" "$r" "$head_sha"
+}
+[[ "$(decide 'sha256:aaaa')" == "resume sid-g" ]]   || fail "g: identical envelope binding should resume (got: $(decide 'sha256:aaaa'))"
+[[ "$(decide 'sha256:bbbb')" == "fresh envelope-changed" ]]   || fail "g: changed envelope binding should be refused (got: $(decide 'sha256:bbbb'))"
+pass "g host resume decision refuses a changed retained envelope binding"
+
 echo "ALL CODEX-RUN SESSION CONTRACT TESTS PASSED"

@@ -20,9 +20,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 try:  # Import works both as engine.context_service and as an installed script.
-    from engine import brain_documents, memory_service
+    from engine import brain_documents, capability_policy, memory_service
 except ImportError:  # pragma: no cover - exercised by the installed CLI
     import brain_documents  # type: ignore
+    import capability_policy  # type: ignore
     import memory_service  # type: ignore
 
 
@@ -33,6 +34,49 @@ EXPLAIN_SCHEMA = "singular.context.explain.v1"
 POLICY_VERSION = "singular.context.policy.v1"
 POLICY_BINDING_VERSION = "singular.context.policy-binding.v1"
 RETRIEVAL_VERSION = "exact-lexical.v1"
+ENVELOPE_VERSION = "singular.context.envelope.v1"
+ESTIMATOR_IDENTITY = "utf8-exact.v1"
+#: Every host binding the envelope publishes. A value of ``None`` is preserved
+#: explicitly and named in ``unknownBindings``; it is never silently dropped and
+#: never reported as a zero or an empty string.
+ENVELOPE_IDENTITY_FIELDS = (
+    "taskContractSha256",
+    "runId",
+    "attemptId",
+    "sessionId",
+    "candidateRevision",
+    "requestedModel",
+    "effectiveModel",
+    "providerName",
+    "providerExecutable",
+    "providerBuild",
+    "capabilityProfile",
+    "campaignBinding",
+)
+#: Bindings a STRICT admission must have. ``sessionId`` and ``providerBuild``
+#: are genuinely unknowable at some supported entrypoints, so they stay
+#: explicitly unknown rather than blocking an otherwise fully bound invocation.
+ENVELOPE_REQUIRED_BINDINGS = tuple(
+    name for name in ENVELOPE_IDENTITY_FIELDS
+    if name not in {"sessionId", "providerBuild"}
+)
+#: Prompt components the host neither composes nor can measure. They are
+#: reported as unknown; they are never assumed to be zero.
+UNKNOWN_PROMPT_COMPONENTS = (
+    "provider_system_content",
+    "tool_schemas",
+    "session_history",
+    "model_output",
+)
+OUTPUT_RESERVE_ENFORCEMENT = (
+    "host-requested output reserve; no provider-enforced output cap is "
+    "demonstrated for any supported provider build, so this reserve is a host "
+    "budgeting decision and not a provider guarantee"
+)
+OVERLAP_RULE = (
+    "accounts partition the delivered prompt: every delivered byte is charged "
+    "exactly once, to exactly one account, and no byte is counted twice"
+)
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
@@ -174,6 +218,193 @@ class Source:
     @property
     def text(self) -> str:
         return self.raw.decode("utf-8", "replace") if self.raw is not None else ""
+
+
+def _output_reserve_record(
+    value: Mapping[str, Any] | None, provider: str | None = None
+) -> dict[str, Any]:
+    """Normalize a requested output reserve without inventing a conversion.
+
+    A reserve declared in ``utf8-bytes`` is exact host-managed accounting and is
+    subtracted from the byte allowance. A reserve declared in ``tokens`` has no
+    supported byte conversion for any provider Singular launches, so it is
+    recorded and explicitly NOT subtracted from a byte limit.
+    """
+    record: dict[str, Any] = {
+        "requested": None,
+        "conversion": None,
+        "reservedBytes": None,
+        "appliedToByteLimit": False,
+        "enforcement": OUTPUT_RESERVE_ENFORCEMENT,
+    }
+    if value is None:
+        return record
+    if not isinstance(value, Mapping):
+        raise ContextError("output reserve must be an object")
+    unit = value.get("unit")
+    amount = value.get("value")
+    if unit not in {"tokens", "utf8-bytes"}:
+        raise ContextError("output reserve unit must be tokens or utf8-bytes")
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
+        raise ContextError("output reserve value must be a non-negative integer")
+    record["requested"] = dict(value)
+    if unit == "utf8-bytes":
+        record["reservedBytes"] = amount
+        record["appliedToByteLimit"] = True
+        return record
+    conversion = capability_policy.output_reserve_conversion(provider or "")
+    record["conversion"] = conversion
+    if conversion is not None:  # pragma: no cover - no provider declares one yet
+        record["reservedBytes"] = int(amount * conversion["bytesPerToken"])
+        record["appliedToByteLimit"] = True
+    return record
+
+
+def _budget_record(
+    *,
+    limit_bytes: int,
+    used_bytes: int,
+    mandatory_bytes: int,
+    optional_bytes: int,
+    evidence_bytes: int,
+    reserve: dict[str, Any],
+) -> dict[str, Any]:
+    """One budget block with separated, disjoint host accounts."""
+    reserved = reserve["reservedBytes"] or 0
+    return {
+        "unit": "utf8-bytes",
+        "limitBytes": limit_bytes,
+        "usedBytes": used_bytes,
+        "remainingBytes": limit_bytes - reserved - used_bytes,
+        "mandatoryBytes": mandatory_bytes,
+        "optionalBytes": optional_bytes,
+        "estimator": ESTIMATOR_IDENTITY,
+        "accountingBoundary": "host-invocation",
+        "providerVisibleBytes": None,
+        "unknownComponents": list(UNKNOWN_PROMPT_COMPONENTS),
+        "accounts": {
+            "mandatoryTaskPolicyBytes": mandatory_bytes - evidence_bytes,
+            "requiredEvidenceBytes": evidence_bytes,
+            "optionalSelectedBytes": optional_bytes,
+            # Provider-supplied components are outside the host boundary.
+            # Missing is unknown, never zero.
+            "visibleHistoryBytes": None,
+            "toolSkillContentBytes": None,
+            "providerSystemBytes": None,
+        },
+        "outputReserve": reserve,
+        "measurement": {
+            "hostManagedExactBytes": used_bytes,
+            "providerObservableBytes": None,
+            "coverage": "host-composed-prompt-only",
+            "overlapRule": OVERLAP_RULE,
+            "tokenizer": None,
+            "estimatorIdentity": ESTIMATOR_IDENTITY,
+            "cumulativeUsageNote": (
+                "cumulative input and cached-input usage reported by a provider "
+                "is neither instantaneous context occupancy nor money"
+            ),
+        },
+    }
+
+
+def build_envelope(
+    *,
+    role: str,
+    phase: str | None,
+    worktree: str,
+    revision: str | None,
+    policy_sha256: str | None,
+    source_versions: list[dict[str, Any]] | None = None,
+    task_digest: str | None = None,
+    snapshot_id: str | None = None,
+    binding: Mapping[str, Any] | None = None,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Compose one host-bound invocation envelope from what the host knows.
+
+    This is deliberately independent of :class:`ContextService` so the host
+    delivery boundary can publish an attributable envelope even for a launch
+    that carries no context bundle. An identity the host does not know is
+    preserved as ``None`` and named in ``unknownBindings``; it is never dropped
+    and never reported as a zero or an empty string. Strict admission refuses
+    outright when a required binding is unavailable.
+    """
+    supplied: dict[str, Any] = {}
+    for key, value in dict(binding or {}).items():
+        if isinstance(value, str):
+            value = value.strip()
+        supplied[key] = value or None
+    versions = list(source_versions or [])
+    record: dict[str, Any] = {
+        "version": ENVELOPE_VERSION,
+        "taskContractSha256": supplied.get("taskContractSha256") or task_digest,
+        "role": role,
+        "phase": phase,
+        "runId": supplied.get("runId"),
+        "attemptId": supplied.get("attemptId"),
+        "sessionId": supplied.get("sessionId"),
+        "candidateRevision": supplied.get("candidateRevision") or revision,
+        "worktree": worktree,
+        "requestedModel": supplied.get("requestedModel"),
+        "effectiveModel": supplied.get("effectiveModel"),
+        "providerName": supplied.get("providerName"),
+        "providerExecutable": supplied.get("providerExecutable"),
+        "providerBuild": supplied.get("providerBuild"),
+        "capabilityProfile": supplied.get("capabilityProfile"),
+        "policyVersion": POLICY_VERSION,
+        "policySha256": policy_sha256,
+        "sourceVersions": versions,
+        "sourceVersionsSha256": _sha256(_canonical(versions)),
+        "campaignBinding": supplied.get("campaignBinding"),
+        "bundleSnapshotId": snapshot_id,
+        "unknownBindings": [],
+        "strict": bool(strict),
+    }
+    # Resolve against the final values: a derived default (task digest,
+    # candidate revision) is known even when the caller supplied nothing.
+    record["unknownBindings"] = sorted(
+        name for name in ENVELOPE_IDENTITY_FIELDS if record.get(name) is None
+    )
+    if strict:
+        missing = [
+            name for name in ENVELOPE_REQUIRED_BINDINGS if record.get(name) is None
+        ]
+        if missing:
+            raise ContextError(
+                "strict-binding: required invocation envelope binding(s) "
+                "unavailable: " + ", ".join(missing)
+            )
+    return record
+
+
+def envelope_binding_digest(envelope: Mapping[str, Any]) -> str:
+    """Digest the authorization/identity fields a retained session is bound to.
+
+    Session reuse compares this digest, not a warning: a change in
+    authorization, model, provider, policy or capability identity means the
+    retained history cannot be verifiably re-authorized.
+    """
+    bound = {
+        key: envelope.get(key)
+        for key in (
+            "role", "requestedModel", "effectiveModel", "providerName",
+            "providerExecutable", "providerBuild", "capabilityProfile",
+            "policyVersion", "policySha256", "sourceVersionsSha256",
+            "campaignBinding", "taskContractSha256",
+        )
+    }
+    return _sha256(_canonical(bound))
+
+
+def _number_optional_selections(provenance: list[dict[str, Any]]) -> None:
+    """Stamp the deterministic admission order onto every optional selection."""
+    order = 0
+    for item in provenance:
+        if item.get("priority") != "optional":
+            continue
+        order += 1
+        item["selectionOrder"] = order
 
 
 class ContextService:
@@ -458,6 +689,42 @@ class ContextService:
             memory_membership_inputs=tuple(sorted(
                 memory_membership_inputs.items(), key=lambda item: str(item[0])
             )),
+        )
+
+    def envelope(
+        self,
+        *,
+        phase: str | None,
+        task_digest: str,
+        snapshot_id: str,
+        binding: Mapping[str, Any] | None = None,
+        strict: bool = False,
+    ) -> dict[str, Any]:
+        """Publish one host-bound invocation envelope.
+
+        Everything the host actually knows is bound here: the task-contract
+        digest, role/phase, run and attempt/session, the candidate worktree
+        revision, requested and effective model, provider executable and build,
+        capability profile, policy and source versions, campaign identity and
+        the immutable bundle snapshot. An identity the host does not know is
+        preserved as ``None`` and named in ``unknownBindings``. Strict admission
+        refuses outright when a required binding is unavailable.
+        """
+        return build_envelope(
+            role=self.role,
+            phase=phase,
+            worktree=str(self.root),
+            revision=self.revision,
+            policy_sha256=self.config_hash,
+            source_versions=[
+                {"ref": item.ref, "sha256": item.source_hash,
+                 "validity": item.validity}
+                for item in self.sources
+            ],
+            task_digest=task_digest,
+            snapshot_id=snapshot_id,
+            binding=binding,
+            strict=strict,
         )
 
     def describe(self) -> dict[str, Any]:
@@ -852,6 +1119,9 @@ class ContextService:
         final_budget_bytes: int | None = None,
         invocation_id: str | None = None,
         campaign_binding: str | None = None,
+        envelope: Mapping[str, Any] | None = None,
+        envelope_strict: bool = False,
+        output_reserve: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         invocation = {
             "invocationId": invocation_id,
@@ -874,14 +1144,11 @@ class ContextService:
                 "promptSha256": _sha256(prompt),
                 "provenance": [],
                 "omissions": [],
-                "budget": {
-                    "unit": "utf8-bytes", "limitBytes": budget_bytes,
-                    "usedBytes": 0, "remainingBytes": budget_bytes,
-                    "mandatoryBytes": 0, "optionalBytes": 0,
-                    "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
-                    "providerVisibleBytes": None,
-                    "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
-                },
+                "budget": _budget_record(
+                    limit_bytes=budget_bytes, used_bytes=0, mandatory_bytes=0,
+                    optional_bytes=0, evidence_bytes=0,
+                    reserve=_output_reserve_record(output_reserve),
+                ),
                 "limitations": LEXICAL_LIMIT,
             }
             result["bundleId"] = _sha256(_canonical(result))
@@ -901,6 +1168,9 @@ class ContextService:
                 final_budget_bytes=final_budget_bytes,
                 invocation_id=invocation_id,
                 campaign_binding=campaign_binding,
+                envelope=envelope,
+                envelope_strict=envelope_strict,
+                output_reserve=output_reserve,
             )
         task_raw_value = os.fspath(task)
         if re.fullmatch(r"TASK-[0-9]{4,}", task_raw_value):
@@ -948,11 +1218,19 @@ class ContextService:
                     end,
                     line,
                 ))
+        reserve = _output_reserve_record(output_reserve)
+        reserved_bytes = reserve["reservedBytes"] or 0
+        allowance = budget_bytes - reserved_bytes
         mandatory_bytes = sum(len(part) for _, part, _, _, _, _, _ in mandatory_parts)
-        if mandatory_bytes > budget_bytes:
+        if mandatory_bytes > allowance:
+            label = (
+                "mandatory-reserve-overflow" if reserved_bytes
+                and mandatory_bytes <= budget_bytes else "mandatory-overflow"
+            )
             raise ContextOverflow(
-                "mandatory-overflow: task constraints and open/violated obligations "
-                f"require {mandatory_bytes} UTF-8 bytes but budget is {budget_bytes}"
+                f"{label}: task constraints and open/violated obligations "
+                f"require {mandatory_bytes} UTF-8 bytes with a declared "
+                f"{reserved_bytes}-byte output reserve but budget is {budget_bytes}"
             )
 
         prompt_parts = [part for _, part, _, _, _, _, _ in mandatory_parts]
@@ -990,14 +1268,16 @@ class ContextService:
                 omissions.append({"ref": source.ref, "reason": "no_lexical_match"})
         ranked.sort(key=lambda item: (-item[0], item[1]))
         for _, _, reasons, source in ranked:
-            available = budget_bytes - used
+            available = allowance - used
             header = f"=== retrieved:{source.ref} ===\n".encode()
             if available <= len(header):
-                omissions.append({"ref": source.ref, "reason": "aggregate_byte_budget"})
+                omissions.append({"ref": source.ref, "reason": "aggregate_byte_budget",
+                                  "priority": "optional"})
                 continue
             excerpt, start, end, truncated = self._excerpt(source, query_text, available - len(header))
             if not excerpt:
-                omissions.append({"ref": source.ref, "reason": "aggregate_byte_budget"})
+                omissions.append({"ref": source.ref, "reason": "aggregate_byte_budget",
+                                  "priority": "optional"})
                 continue
             block = header + excerpt + (b"" if excerpt.endswith(b"\n") else b"\n")
             if len(block) > available:  # newline can consume the final byte
@@ -1028,6 +1308,7 @@ class ContextService:
             bundle_identity["snapshotId"] = _sha256(_canonical({
                 "sourceSnapshotId": self.identity["snapshotId"], "phase": phase,
             }))
+        _number_optional_selections(provenance)
         bundle: dict[str, Any] = {
             "schema": BUNDLE_SCHEMA,
             "contractVersion": 1,
@@ -1035,18 +1316,20 @@ class ContextService:
             "identity": bundle_identity,
             "policy": self.policy_identity,
             "invocation": invocation,
+            "envelope": self.envelope(
+                phase=phase, task_digest=_sha256(task_raw),
+                snapshot_id=bundle_identity["snapshotId"],
+                binding=envelope, strict=envelope_strict,
+            ),
             "prompt": prompt,
             "promptSha256": _sha256(prompt_bytes),
             "provenance": provenance,
             "omissions": sorted(omissions, key=lambda item: (item["ref"], item["reason"])),
-            "budget": {
-                "unit": "utf8-bytes", "limitBytes": budget_bytes,
-                "usedBytes": len(prompt_bytes), "remainingBytes": budget_bytes - len(prompt_bytes),
-                "mandatoryBytes": mandatory_bytes, "optionalBytes": optional_used,
-                "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
-                "providerVisibleBytes": None,
-                "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
-            },
+            "budget": _budget_record(
+                limit_bytes=budget_bytes, used_bytes=len(prompt_bytes),
+                mandatory_bytes=mandatory_bytes, optional_bytes=optional_used,
+                evidence_bytes=0, reserve=reserve,
+            ),
             "limitations": LEXICAL_LIMIT,
         }
         bundle["bundleId"] = _sha256(_canonical(bundle))
@@ -1066,6 +1349,9 @@ class ContextService:
         final_budget_bytes: int | None,
         invocation_id: str | None,
         campaign_binding: str | None,
+        envelope: Mapping[str, Any] | None = None,
+        envelope_strict: bool = False,
+        output_reserve: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the exact provider prompt from one immutable source snapshot.
 
@@ -1177,10 +1463,35 @@ class ContextService:
             source.ref for source in self.sources
             if previous.get(source.ref) != source.source_hash
         )
-        parts = [base_raw]
-        mandatory_bytes = len(base_raw)
-        optional_used = 0
-        provenance: list[dict[str, Any]] = [{
+        # Admission identity first. A strict refusal must happen before any
+        # composition, publication or provider launch, not after it.
+        invocation_envelope = self.envelope(
+            phase=phase, task_digest=_sha256(task_raw),
+            snapshot_id=self.identity["snapshotId"],
+            binding=envelope, strict=envelope_strict,
+        )
+        reserve = _output_reserve_record(
+            output_reserve, invocation_envelope.get("providerName")
+        )
+        reserved_bytes = reserve["reservedBytes"] or 0
+        allowance = budget_bytes - reserved_bytes
+
+        # Compose in ordered segments. Each segment records the bytes it would
+        # contribute and how many of those are mandatory, so optional material
+        # can be trimmed deterministically without ever dropping a mandatory
+        # task obligation, required review artifact, or revocation notice.
+        segments: list[dict[str, Any]] = []
+
+        def segment(data: bytes, *, mandatory: int, provenance: list[dict[str, Any]],
+                    ref: str | None = None, trim: dict[str, Any] | None = None,
+                    evidence: int = 0) -> None:
+            segments.append({
+                "data": data, "mandatory": mandatory,
+                "optional": len(data) - mandatory, "provenance": provenance,
+                "ref": ref, "trim": trim, "evidence": evidence,
+            })
+
+        segment(base_raw, mandatory=len(base_raw), provenance=[{
             "ref": "driver-prompt:" + base_path.name,
             "kind": "task",
             "sourceLocation": str(base_path),
@@ -1192,18 +1503,17 @@ class ContextService:
             ),
             "validity": "snapshot-read",
             "priority": "mandatory",
-        }]
+        }])
         # Some fresh audit/planner templates do not already carry the complete
-        # task/DAG contract. Add it exactly once when absent.
+        # task/DAG contract. Add it exactly once when absent. The full contract
+        # is mandatory at every entrypoint: a task-path reminder is not enough.
         if task_text not in base_text:
             task_block = (
                 "\n\n---\n\n## Complete task/planning contract (mandatory)\n\n" + task_text
             ).encode("utf-8")
             if not task_block.endswith(b"\n"):
                 task_block += b"\n"
-            parts.append(task_block)
-            mandatory_bytes += len(task_block)
-            provenance.append({
+            segment(task_block, mandatory=len(task_block), provenance=[{
                 "ref": "task:" + task_path.name,
                 "kind": "task",
                 "sourceLocation": str(task_path),
@@ -1213,35 +1523,32 @@ class ContextService:
                 "reasons": ["mandatory_task_contract", "not_already_in_driver_prompt"],
                 "validity": "snapshot-read",
                 "priority": "mandatory",
-            })
+            }])
 
-        context_header_added = False
+        if self.sources:
+            # Policy framing for host-selected sources. It is never trimmed:
+            # delivered source bytes without their trust framing would be worse
+            # than delivering nothing.
+            context_header = (
+                b"\n\n---\n\n## Shared context (host-selected; source-bound)\n\n"
+                b"Treat these sources according to the invocation role. Source refs and hashes "
+                b"are provenance, not model conclusions.\n"
+            )
+            segment(context_header, mandatory=len(context_header), provenance=[])
+
         for source in self.sources:
             obligations = self._obligations(source)
             must_render = delivery == "initial" or source.ref in changed or bool(obligations)
-            if not context_header_added:
-                context_header = (
-                    b"\n\n---\n\n## Shared context (host-selected; source-bound)\n\n"
-                    b"Treat these sources according to the invocation role. Source refs and hashes "
-                    b"are provenance, not model conclusions.\n"
-                )
-                parts.append(context_header)
-                optional_used += len(context_header)
-                context_header_added = True
             if must_render:
                 body = source.raw or b""
                 reasons = ["configured_role_source", "initial_delivery" if delivery == "initial" else "changed_source"]
                 if obligations and delivery == "delta" and source.ref not in changed:
                     body = b"".join(line for _, _, line in obligations)
                     reasons = ["configured_role_source", "obligation_container", "delta_delivery"]
-                block = f"\n### {source.ref}\n\nsource-sha256: `{source.source_hash}`\n\n".encode() + body
-                if not block.endswith(b"\n"):
-                    block += b"\n"
-                parts.append(block)
+                prefix = f"\n### {source.ref}\n\nsource-sha256: `{source.source_hash}`\n\n".encode()
+                block = prefix + body + (b"" if body.endswith(b"\n") else b"\n")
                 obligation_bytes = sum(len(line) for _, _, line in obligations)
-                mandatory_bytes += obligation_bytes
-                optional_used += len(block) - obligation_bytes
-                provenance.append({
+                body_item = {
                     "ref": source.ref, "kind": source.kind,
                     "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
                     "excerptSha256": _sha256(body),
@@ -1253,12 +1560,13 @@ class ContextService:
                     "reasons": reasons, "validity": source.validity,
                     "priority": "optional",
                     "provenance": source.provenance,
-                })
+                }
+                items = [body_item]
                 # Obligation excerpts retain their offsets in the original run
                 # record. They may be noncontiguous, so never describe their
                 # concatenated delta body as a synthetic 0..N source prefix.
                 for start, end, line in obligations:
-                    provenance.append({
+                    items.append({
                         "ref": source.ref, "kind": source.kind,
                         "sourceLocation": str(source.path),
                         "sourceSha256": source.source_hash,
@@ -1272,11 +1580,23 @@ class ContextService:
                         "priority": "mandatory",
                         "provenance": source.provenance,
                     })
+                # A source that carries mandatory obligations keeps its framing
+                # prefix mandatory too, so the obligation-only rendering below is
+                # always affordable once the mandatory account has been admitted.
+                head_mandatory = len(prefix) if obligations else 0
+                segment(
+                    block, mandatory=head_mandatory + obligation_bytes,
+                    provenance=items, ref=source.ref,
+                    trim={
+                        "kind": "source-body", "prefix": prefix, "body": body,
+                        "source": source, "item": body_item,
+                        "obligations": obligations, "reasons": reasons,
+                        "prefixOptional": 0 if obligations else len(prefix),
+                    },
+                )
             else:
                 ref_line = f"\n- {source.ref} unchanged at `{source.source_hash}`; use this immutable reference.\n".encode()
-                parts.append(ref_line)
-                optional_used += len(ref_line)
-                provenance.append({
+                segment(ref_line, mandatory=0, ref=source.ref, provenance=[{
                     "ref": source.ref, "kind": source.kind,
                     "sourceLocation": str(source.path), "sourceSha256": source.source_hash,
                     "excerptSha256": _sha256(ref_line),
@@ -1284,12 +1604,12 @@ class ContextService:
                     "reasons": ["unchanged_immutable_reference", "delta_delivery"],
                     "validity": source.validity, "priority": "optional",
                     "provenance": source.provenance,
-                })
+                }], trim={"kind": "droppable"})
+
         if revoked:
             revoked_notice = ("\nRevoked since the prior bundle: " + ", ".join(revoked) +
                               ". Do not rely on prior bytes.\n").encode()
-            parts.append(revoked_notice)
-            mandatory_bytes += len(revoked_notice)
+            segment(revoked_notice, mandatory=len(revoked_notice), provenance=[])
 
         if prior and prior_path is not None:
             prior_notice = (
@@ -1297,13 +1617,13 @@ class ContextService:
                 "(" + str(prior.get("bundleId")) + "). Unchanged-source references "
                 "resolve through this immutable host artifact.\n"
             ).encode()
-            parts.append(prior_notice)
-            optional_used += len(prior_notice)
+            segment(prior_notice, mandatory=0, ref="prior-bundle",
+                    provenance=[], trim={"kind": "droppable"})
 
         if required_evidence:
             evidence_header = b"\n\n## Complete host-delivered review evidence\n"
-            parts.append(evidence_header)
-            mandatory_bytes += len(evidence_header)
+            segment(evidence_header, mandatory=len(evidence_header), provenance=[],
+                    evidence=len(evidence_header))
             for item in required_evidence:
                 ref = item.get("ref")
                 data = item.get("data")
@@ -1315,9 +1635,7 @@ class ContextService:
                     ("\nArtifact: " + ref + " SHA256: " + digest.removeprefix("sha256:") + "\n").encode()
                     + data + b"\n"
                 )
-                parts.append(block)
-                mandatory_bytes += len(block)
-                provenance.append({
+                segment(block, mandatory=len(block), evidence=len(block), provenance=[{
                     "ref": "evidence:" + ref,
                     # Required review evidence is part of the invocation's
                     # task contract. Keep the strict v1 kind vocabulary while
@@ -1331,7 +1649,87 @@ class ContextService:
                     "validity": "snapshot-read",
                     "priority": "mandatory",
                     "provenance": {"origin": "host-evidence", "evidenceRef": ref},
+                }])
+
+        mandatory_bytes = sum(item["mandatory"] for item in segments)
+        evidence_bytes = sum(item["evidence"] for item in segments)
+        if mandatory_bytes > allowance:
+            label = (
+                "mandatory-reserve-overflow"
+                if reserved_bytes and mandatory_bytes <= budget_bytes
+                else "mandatory-overflow"
+            )
+            raise ContextOverflow(
+                f"{label}: mandatory task contract, open/violated obligations and "
+                f"required review evidence need {mandatory_bytes} UTF-8 bytes with a "
+                f"declared {reserved_bytes}-byte output reserve, but the composed "
+                f"budget is {budget_bytes}"
+            )
+
+        # Optional material is admitted in this exact declared order into the
+        # remaining allowance. Overflow here is optional overflow: it never
+        # becomes a mandatory-overflow refusal and never drops mandatory bytes.
+        remaining = allowance - mandatory_bytes
+        parts: list[bytes] = []
+        provenance: list[dict[str, Any]] = []
+        omissions: list[dict[str, str]] = [
+            {"ref": ref, "reason": "revoked_since_prior_bundle"} for ref in revoked
+        ]
+        for item in segments:
+            optional_cost = item["optional"]
+            if optional_cost == 0 or optional_cost <= remaining:
+                remaining -= optional_cost
+                parts.append(item["data"])
+                provenance.extend(item["provenance"])
+                continue
+            trim = item["trim"]
+            if trim is None or trim["kind"] == "droppable":
+                omissions.append({
+                    "ref": item["ref"] or "context", "reason": "aggregate_byte_budget",
+                    "priority": "optional",
                 })
+                continue
+            prefix, body = trim["prefix"], trim["body"]
+            source, body_item = trim["source"], trim["item"]
+            obligations = trim["obligations"]
+            if obligations:
+                # Degrade deterministically to the mandatory obligation lines.
+                kept = b"".join(line for _, _, line in obligations)
+                block = prefix + kept + (b"" if kept.endswith(b"\n") else b"\n")
+                body_item["excerptSha256"] = _sha256(kept)
+                body_item["range"] = {"startByte": 0, "endByte": 0}
+                body_item["reasons"] = list(trim["reasons"]) + ["optional_body_trimmed_to_obligations"]
+                body_item["truncated"] = True
+                remaining = max(0, remaining - (len(block) - item["mandatory"]))
+                parts.append(block)
+                provenance.extend(item["provenance"])
+                omissions.append({
+                    "ref": source.ref, "reason": "aggregate_byte_budget",
+                    "priority": "optional",
+                })
+                continue
+            available_body = remaining - trim["prefixOptional"] - 1
+            if available_body <= 0:
+                omissions.append({
+                    "ref": source.ref, "reason": "aggregate_byte_budget",
+                    "priority": "optional",
+                })
+                continue
+            kept, truncated = _utf8_prefix(body, available_body)
+            if not kept:
+                omissions.append({
+                    "ref": source.ref, "reason": "aggregate_byte_budget",
+                    "priority": "optional",
+                })
+                continue
+            block = prefix + kept + (b"" if kept.endswith(b"\n") else b"\n")
+            body_item["excerptSha256"] = _sha256(kept)
+            body_item["range"] = {"startByte": 0, "endByte": len(kept)}
+            body_item["reasons"] = list(trim["reasons"]) + ["optional_truncated_to_remaining_allowance"]
+            body_item["truncated"] = bool(truncated)
+            remaining -= len(block)
+            parts.append(block)
+            provenance.extend(item["provenance"])
 
         prompt_raw = b"".join(parts)
         if len(prompt_raw) > budget_bytes:
@@ -1354,6 +1752,11 @@ class ContextService:
         self.validate_snapshot()
         identity = dict(self.identity)
         identity["phase"] = phase
+        _number_optional_selections(provenance)
+        # Every delivered byte is charged to exactly one account. Mandatory
+        # bytes are never trimmed, so the delivered optional total is the exact
+        # remainder of the composed prompt.
+        optional_delivered = max(0, len(prompt_raw) - mandatory_bytes)
         bundle: dict[str, Any] = {
             "schema": BUNDLE_SCHEMA,
             "contractVersion": 1,
@@ -1365,22 +1768,21 @@ class ContextService:
                 "campaignBinding": campaign_binding,
                 "workspace": str(self.root),
             },
+            "envelope": invocation_envelope,
             "prompt": prompt_raw.decode("utf-8"),
             "promptSha256": _sha256(prompt_raw),
             "provenance": provenance,
-            "omissions": [
-                {"ref": ref, "reason": "revoked_since_prior_bundle"}
-                for ref in revoked
-            ],
-            "budget": {
-                "unit": "utf8-bytes", "limitBytes": budget_bytes,
-                "usedBytes": len(prompt_raw), "remainingBytes": budget_bytes - len(prompt_raw),
-                "mandatoryBytes": mandatory_bytes,
-                "optionalBytes": optional_used,
-                "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
-                "providerVisibleBytes": None,
-                "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
-            },
+            # Optional overflow is recorded as an optional omission. It is never
+            # relabelled as a mandatory overflow, which is a refusal, not a
+            # selection outcome.
+            "omissions": sorted(
+                omissions, key=lambda item: (item["ref"], item["reason"])
+            ),
+            "budget": _budget_record(
+                limit_bytes=budget_bytes, used_bytes=len(prompt_raw),
+                mandatory_bytes=mandatory_bytes, optional_bytes=optional_delivered,
+                evidence_bytes=evidence_bytes, reserve=reserve,
+            ),
             "limitations": LEXICAL_LIMIT,
         }
         bundle["bundleId"] = _sha256(_canonical(bundle))

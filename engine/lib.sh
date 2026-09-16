@@ -8206,7 +8206,7 @@ singular_session_meta_write_provider() {
   [[ -n "$path" ]] || return 0
   local created; created="$(singular_timestamp 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
   python3 - "$path" "$provider" "$session_id" "$model" "$effort" "$cwd" "$exit_code" "$created" <<'PY' 2>/dev/null || true
-import json, sys
+import json, os, sys
 path, provider, sid, model, effort, cwd, ec, created = sys.argv[1:9]
 try:
     rc = int(ec)
@@ -8222,6 +8222,12 @@ doc = {
     "exitCode": rc,
     "createdAt": created,
 }
+# The resume-refusal gate compares the CURRENT invocation envelope binding
+# against the one retained with the session; a session created without it
+# can never be refused, so the binding is persisted at creation (audit F1).
+envelope = os.environ.get("SINGULAR_INVOCATION_ENVELOPE_BINDING", "")
+if envelope:
+    doc["envelopeBinding"] = envelope
 with open(path, "w", encoding="utf-8") as f:
     json.dump(doc, f, indent=2)
     f.write("\n")
@@ -8323,7 +8329,8 @@ def g(k):
     v = m.get(k, "")
     return "" if v is None else str(v).replace("\n", " ")
 for val in (g("provider"), g("sessionId"), g("role"), g("taskId"), g("runId"),
-            g("runner"), g("promptSha256"), g("createdAt"), g("headShaAtCreate"), g("cwd")):
+            g("runner"), g("promptSha256"), g("createdAt"), g("headShaAtCreate"), g("cwd"),
+            g("envelopeBinding")):
     print(val)
 PY
 )"
@@ -8335,6 +8342,7 @@ PY
   local m_provider="${m_fields[0]:-}" m_sid="${m_fields[1]:-}" m_role="${m_fields[2]:-}"
   local m_task="${m_fields[3]:-}" m_run="${m_fields[4]:-}" m_runner="${m_fields[5]:-}"
   local m_psha="${m_fields[6]:-}" m_created="${m_fields[7]:-}" m_head="${m_fields[8]:-}" m_cwd="${m_fields[9]:-}"
+  local m_envelope="${m_fields[10]:-}"
 
   # Gate 3: provider or sessionId empty.
   if [[ -z "$m_provider" || -z "$m_sid" ]]; then
@@ -8355,6 +8363,15 @@ PY
   # Gate 7: prompt template changed.
   if [[ "$m_psha" != "$prompt_sha" ]]; then
     printf 'fresh prompt-template-changed\n'; return 0
+  fi
+  # Gate 7b: the retained invocation envelope binding changed. Authorization,
+  # model/provider identity, policy and capability profile are all folded into
+  # this digest. A difference means the retained history cannot be verifiably
+  # re-authorized and cannot be removed, so the host must reconstruct a fresh
+  # authorized invocation instead of warning the model about revoked content.
+  # A meta with no retained binding predates this contract and is not refused.
+  if [[ -n "$m_envelope" && "$m_envelope" != "${SINGULAR_INVOCATION_ENVELOPE_BINDING:-}" ]]; then
+    printf 'fresh envelope-changed\n'; return 0
   fi
   # Gate 8: expired.
   local max_age="${SINGULAR_SESSION_MAX_AGE_SEC:-14400}"

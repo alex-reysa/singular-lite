@@ -17,6 +17,7 @@
     "promptSha256": {"$ref": "#/$defs/hash"},
     "provenance": {"type": "array", "items": {"$ref": "#/$defs/provenance"}},
     "omissions": {"type": "array", "items": {"$ref": "#/$defs/omission"}},
+    "envelope": {"$ref": "#/$defs/envelope"},
     "budget": {"$ref": "#/$defs/budget"},
     "limitations": {"type": "string", "minLength": 1},
     "bundleId": {"$ref": "#/$defs/hash"}
@@ -87,7 +88,10 @@
     "omission": {
       "type": "object", "additionalProperties": false,
       "required": ["ref", "reason"],
-      "properties": {"ref": {"type": "string"}, "reason": {"type": "string"}}
+      "properties": {
+        "ref": {"type": "string"}, "reason": {"type": "string"},
+        "priority": {"enum": ["mandatory", "optional"]}
+      }
     },
     "budget": {
       "type": "object",
@@ -103,7 +107,88 @@
         "estimator": {"const": "utf8-exact.v1"},
         "accountingBoundary": {"const": "host-invocation"},
         "providerVisibleBytes": {"type": ["integer", "null"], "minimum": 0},
-        "unknownComponents": {"type": "array", "items": {"type": "string"}}
+        "unknownComponents": {"type": "array", "items": {"type": "string"}},
+        "accounts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mandatoryTaskPolicyBytes", "requiredEvidenceBytes", "optionalSelectedBytes", "visibleHistoryBytes", "toolSkillContentBytes", "providerSystemBytes"],
+          "properties": {
+            "mandatoryTaskPolicyBytes": {"type": "integer", "minimum": 0},
+            "requiredEvidenceBytes": {"type": "integer", "minimum": 0},
+            "optionalSelectedBytes": {"type": "integer", "minimum": 0},
+            "visibleHistoryBytes": {"type": ["integer", "null"], "minimum": 0},
+            "toolSkillContentBytes": {"type": ["integer", "null"], "minimum": 0},
+            "providerSystemBytes": {"type": ["integer", "null"], "minimum": 0}
+          }
+        },
+        "outputReserve": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested", "conversion", "reservedBytes", "appliedToByteLimit", "enforcement"],
+          "properties": {
+            "requested": {"type": ["object", "null"]},
+            "conversion": {"type": ["object", "null"]},
+            "reservedBytes": {"type": ["integer", "null"], "minimum": 0},
+            "appliedToByteLimit": {"type": "boolean"},
+            "enforcement": {"type": "string", "minLength": 1}
+          }
+        },
+        "measurement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hostManagedExactBytes", "providerObservableBytes", "coverage", "overlapRule", "tokenizer", "estimatorIdentity", "cumulativeUsageNote"],
+          "properties": {
+            "hostManagedExactBytes": {"type": "integer", "minimum": 0},
+            "providerObservableBytes": {"type": ["integer", "null"], "minimum": 0},
+            "coverage": {"type": "string", "minLength": 1},
+            "overlapRule": {"type": "string", "minLength": 1},
+            "tokenizer": {"type": ["string", "null"]},
+            "estimatorIdentity": {"const": "utf8-exact.v1"},
+            "cumulativeUsageNote": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "taskContractSha256", "role", "phase", "runId", "attemptId", "sessionId", "candidateRevision", "worktree", "requestedModel", "effectiveModel", "providerName", "providerExecutable", "providerBuild", "capabilityProfile", "policyVersion", "policySha256", "sourceVersions", "sourceVersionsSha256", "campaignBinding", "bundleSnapshotId", "unknownBindings", "strict"],
+      "properties": {
+        "version": {"const": "singular.context.envelope.v1"},
+        "taskContractSha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "role": {"type": "string", "minLength": 1},
+        "phase": {"type": ["string", "null"]},
+        "runId": {"type": ["string", "null"]},
+        "attemptId": {"type": ["string", "null"]},
+        "sessionId": {"type": ["string", "null"]},
+        "candidateRevision": {"type": ["string", "null"]},
+        "worktree": {"type": ["string", "null"]},
+        "requestedModel": {"type": ["string", "null"]},
+        "effectiveModel": {"type": ["string", "null"]},
+        "providerName": {"type": ["string", "null"]},
+        "providerExecutable": {"type": ["string", "null"]},
+        "providerBuild": {"type": ["string", "null"]},
+        "capabilityProfile": {"type": ["string", "null"]},
+        "policyVersion": {"const": "singular.context.policy.v1"},
+        "policySha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "sourceVersions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref", "sha256", "validity"],
+            "properties": {
+              "ref": {"type": "string", "minLength": 1},
+              "sha256": {"$ref": "#/$defs/hash"},
+              "validity": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "sourceVersionsSha256": {"$ref": "#/$defs/hash"},
+        "campaignBinding": {"type": ["string", "null"]},
+        "bundleSnapshotId": {"type": ["string", "null"]},
+        "unknownBindings": {"type": "array", "items": {"type": "string"}},
+        "strict": {"type": "boolean"}
       }
     }
   }

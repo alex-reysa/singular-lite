@@ -23,7 +23,7 @@ from engine.campaign_manifest import (
     resolved_settings_projection,
     runner_child_environment,
 )
-from engine.context_service import ContextError, ContextService
+from engine.context_service import ContextError, ContextOverflow, ContextService
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -945,6 +945,100 @@ fi
             self.assertEqual(completed.returncode, 0, completed.stdout)
         return config, stub, capture
 
+    def assert_envelope_binding(self, bundle: dict, *, role: str, run_id: str,
+                                attempt: str, task_path: Path,
+                                provider: Path | None = None) -> None:
+        envelope = bundle["envelope"]
+        self.assertEqual(envelope["version"], "singular.context.envelope.v1")
+        self.assertEqual(envelope["role"], role)
+        self.assertEqual(envelope["role"], bundle["identity"]["role"])
+        self.assertEqual(envelope["phase"], bundle["identity"]["phase"])
+        self.assertEqual(envelope["runId"], run_id)
+        self.assertIn(attempt, envelope["attemptId"])
+        self.assertEqual(
+            envelope["taskContractSha256"],
+            "sha256:" + hashlib.sha256(task_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(envelope["policySha256"], bundle["policy"]["configSha256"])
+        self.assertEqual(envelope["campaignBinding"],
+                         bundle["invocation"]["campaignBinding"])
+        self.assertEqual(envelope["bundleSnapshotId"], bundle["identity"]["snapshotId"])
+        self.assertEqual(envelope["candidateRevision"], bundle["identity"]["revision"])
+        if provider is not None:
+            self.assertEqual(envelope["providerExecutable"], str(provider))
+        for key in ("requestedModel", "effectiveModel", "providerBuild",
+                    "sessionId", "capabilityProfile"):
+            self.assertIn(key, envelope)
+            if envelope[key] is None:
+                self.assertIn(key, envelope["unknownBindings"])
+
+    def test_real_planner_bundle_publishes_a_host_bound_envelope(self) -> None:
+        config, stub = self.planner_fixture()
+        result = run([str(BASH), str(ROOT / "engine/generate-tasks.sh"),
+                      "--node", "context-node", "--count", "1"],
+                     cwd=self.repo, env=self.planner_env(config, stub))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        bundle_path = next((self.repo / ".singular-state/runs").glob(
+            "*/context-planner.bundle.json"))
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        run_id = bundle_path.parent.name
+        self.assert_envelope_binding(
+            bundle, role="planner", run_id=run_id, attempt="context-node",
+            task_path=self.repo / "docs/orchestration/dag.v0.json", provider=stub,
+        )
+        self.assertEqual(bundle["envelope"]["capabilityProfile"], "planner-core")
+        events = [json.loads(line) for line in
+                  (self.repo / ".singular-state/events.ndjson").read_text().splitlines()]
+        selected = next(event["data"] for event in events
+                        if event.get("type") == "context.bundle_selected")
+        self.assertEqual(selected["envelope"], bundle["envelope"])
+
+    def test_worker_retry_and_fresh_audit_publish_host_bound_envelopes(self) -> None:
+        config, stub, capture = self.worker_fixture()
+        env = self.worker_env(config, stub, SINGULAR_MAX_RETRIES="1",
+                              DRIVER_STUB_RETRY="1")
+        result = run([str(BASH), str(ROOT / "engine/l1-drive.sh"), "TASK-0001"],
+                     cwd=self.repo, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        run_dir = self.run_dir()
+        run_id = run_dir.name
+        packet = json.loads((run_dir / "packet.json").read_text(encoding="utf-8"))
+        worktree = Path(packet["workspace"])
+        task_path = worktree / "docs/orchestration/tasks/TASK-0001.md"
+        seen_roles = set()
+        for path in sorted(run_dir.glob("context-*.bundle.json")):
+            bundle = json.loads(path.read_text(encoding="utf-8"))
+            role = bundle["identity"]["role"]
+            seen_roles.add(role)
+            attempt = "attempt-2" if "attempt-2" in path.name else "attempt-1"
+            self.assert_envelope_binding(
+                bundle, role=role, run_id=run_id, attempt=attempt,
+                task_path=task_path, provider=stub,
+            )
+            if role == "implementer":
+                self.assertEqual(bundle["envelope"]["capabilityProfile"],
+                                 "implementer-core")
+            else:
+                self.assertNotIn(
+                    "run", {item["kind"] for item in bundle["provenance"]},
+                    "a fresh auditor envelope must not bind worker run records",
+                )
+        self.assertEqual(seen_roles, {"implementer", "review-target"})
+        attempts = {
+            "attempt-1" if "attempt-1" in path.name else "attempt-2"
+            for path in run_dir.glob("context-implementer-*.bundle.json")
+        }
+        self.assertEqual(attempts, {"attempt-1", "attempt-2"},
+                         "the retry entrypoint must publish its own envelope")
+        events = [json.loads(line) for line in
+                  (self.repo / ".singular-state/events.ndjson").read_text().splitlines()]
+        envelopes = [event["data"]["envelope"] for event in events
+                     if event.get("type") == "context.bundle_selected"]
+        self.assertTrue(envelopes)
+        for envelope in envelopes:
+            self.assertEqual(envelope["runId"], run_id)
+            self.assertEqual(envelope["version"], "singular.context.envelope.v1")
+
     def commit_context_enabled(self, config: Path, enabled: bool) -> None:
         value = json.loads(config.read_text(encoding="utf-8"))
         value["contextService"]["enabled"] = enabled
@@ -1429,6 +1523,326 @@ fi
                 )
                 record = json.loads((run_dir / "paired-audit.json").read_text())
                 self.assertNotEqual(record["runnerExit"], 0)
+
+
+def _schema_check(test: unittest.TestCase, value: object, schema: dict,
+                  root: dict, path: str = "$") -> None:
+    """Minimal draft-2020-12 subset validator for the two bundle schema copies."""
+    if "$ref" in schema:
+        target = root
+        for part in schema["$ref"].removeprefix("#/").split("/"):
+            target = target[part]
+        _schema_check(test, value, target, root, path)
+        return
+    if "const" in schema:
+        test.assertEqual(value, schema["const"], path)
+    if "enum" in schema:
+        test.assertIn(value, schema["enum"], path)
+    kinds = schema.get("type")
+    if kinds:
+        kinds = [kinds] if isinstance(kinds, str) else kinds
+        matches = {
+            "object": isinstance(value, dict),
+            "array": isinstance(value, list),
+            "string": isinstance(value, str),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
+            "null": value is None,
+        }
+        test.assertTrue(any(matches.get(kind, False) for kind in kinds),
+                        (path, kinds, value))
+    if isinstance(value, dict):
+        missing = set(schema.get("required", [])) - set(value)
+        test.assertFalse(missing, (path, missing))
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            extra = set(value) - set(properties)
+            test.assertFalse(extra, (path, extra))
+        for key, child in value.items():
+            if key in properties:
+                _schema_check(test, child, properties[key], root, f"{path}.{key}")
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, child in enumerate(value):
+            _schema_check(test, child, schema["items"], root, f"{path}[{index}]")
+    if isinstance(value, str) and "pattern" in schema:
+        test.assertRegex(value, schema["pattern"], path)
+
+
+class InvocationEnvelopeBudgetTest(unittest.TestCase):
+    """Host-bound envelope, separated accounting and deterministic admission.
+
+    These are the directly coupled checks for the new invocation-context budget
+    gate. They exercise the real service API rather than the whole driver, so
+    the gate stays finite and local; the driver/host entrypoints are covered by
+    the behavioural cases in ContextInvocationTest above.
+    """
+
+    maxDiff = None
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="singular-envelope.", dir="/tmp")
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        write(self.repo / "context/shared.md", "ENVELOPE-CONTEXT shared widget invariant\n")
+        self.task = self.repo / "task.md"
+        write(self.task, "# TASK-ENVELOPE\n\nImplement the shared widget invariant.\n")
+        self.base = self.repo / "base.md"
+        write(self.base, "BASE DRIVER PROMPT\n")
+        self.config_path = self.repo / "singular.config.json"
+        write(self.config_path, json.dumps({
+            "contextService": {
+                "enabled": True,
+                "projectId": "envelope-fixture",
+                "revision": "envelope-revision",
+                "budgetBytes": 16384,
+                "codePaths": ["context/shared.md"],
+                "rolePolicy": {"implementer": ["code"], "planner": ["code"]},
+            }
+        }, sort_keys=True))
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def service(self, role: str = "implementer") -> ContextService:
+        return ContextService.from_config(
+            self.config_path, role=role, workspace=self.repo, environment={},
+        )
+
+    def binding(self, **overrides: object) -> dict[str, object]:
+        value: dict[str, object] = {
+            "runId": "RUN-envelope",
+            "attemptId": "attempt-1:try-0",
+            "sessionId": None,
+            "candidateRevision": "envelope-revision",
+            "requestedModel": "claude-opus-5",
+            "effectiveModel": "claude-opus-5",
+            "providerName": "claude",
+            "providerExecutable": "/engine/claude-run.sh",
+            "providerBuild": None,
+            "capabilityProfile": "implementer-core",
+            "campaignBinding": "campaign:envelope:sha256:" + "0" * 64,
+        }
+        value.update(overrides)
+        return value
+
+    def build(self, **kwargs: object) -> dict:
+        service = kwargs.pop("service", None) or self.service()
+        arguments: dict[str, object] = {
+            "task": self.task,
+            "phase": "implement-first",
+            "budget_bytes": 16384,
+            "base_prompt": self.base,
+            "delivery": "initial",
+            "invocation_id": "RUN-envelope:TASK-ENVELOPE:implementer:attempt-1",
+            "campaign_binding": "campaign:envelope:sha256:" + "0" * 64,
+            "envelope": self.binding(),
+        }
+        arguments.update(kwargs)
+        return service.build(**arguments)
+
+    # --- AC2: one host-bound envelope -------------------------------------
+    def test_envelope_binds_task_contract_role_run_model_provider_and_bundle(self) -> None:
+        bundle = self.build()
+        envelope = bundle["envelope"]
+        self.assertEqual(envelope["version"], "singular.context.envelope.v1")
+        self.assertEqual(
+            envelope["taskContractSha256"],
+            "sha256:" + hashlib.sha256(self.task.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(envelope["role"], "implementer")
+        self.assertEqual(envelope["phase"], "implement-first")
+        self.assertEqual(envelope["runId"], "RUN-envelope")
+        self.assertEqual(envelope["attemptId"], "attempt-1:try-0")
+        self.assertEqual(envelope["candidateRevision"], "envelope-revision")
+        # The envelope binds the SAME worktree identity the immutable bundle
+        # publishes; comparing the resolved directory keeps this exact on hosts
+        # where /tmp aliases /private/tmp.
+        self.assertEqual(envelope["worktree"], bundle["identity"]["worktree"])
+        self.assertEqual(Path(envelope["worktree"]).resolve(), self.repo.resolve())
+        self.assertEqual(envelope["requestedModel"], "claude-opus-5")
+        self.assertEqual(envelope["effectiveModel"], "claude-opus-5")
+        self.assertEqual(envelope["providerExecutable"], "/engine/claude-run.sh")
+        self.assertEqual(envelope["capabilityProfile"], "implementer-core")
+        self.assertEqual(envelope["policyVersion"], "singular.context.policy.v1")
+        self.assertEqual(envelope["policySha256"], bundle["policy"]["configSha256"])
+        self.assertEqual(envelope["campaignBinding"],
+                         bundle["invocation"]["campaignBinding"])
+        self.assertEqual(envelope["bundleSnapshotId"], bundle["identity"]["snapshotId"])
+        self.assertEqual(
+            [item["ref"] for item in envelope["sourceVersions"]],
+            [source.ref for source in self.service().sources],
+        )
+
+    def test_unknown_identity_fields_are_preserved_explicitly_not_dropped(self) -> None:
+        bundle = self.build()
+        envelope = bundle["envelope"]
+        self.assertIsNone(envelope["sessionId"])
+        self.assertIsNone(envelope["providerBuild"])
+        self.assertEqual(sorted(envelope["unknownBindings"]),
+                         ["providerBuild", "sessionId"])
+        self.assertFalse(envelope["strict"])
+
+    def test_strict_admission_refuses_when_a_required_binding_is_unavailable(self) -> None:
+        with self.assertRaises(ContextError) as caught:
+            self.build(envelope=self.binding(effectiveModel=None), envelope_strict=True)
+        self.assertIn("strict-binding", str(caught.exception))
+        self.assertIn("effectiveModel", str(caught.exception))
+        # An optional/unknown identity field never blocks strict admission.
+        strict = self.build(envelope=self.binding(), envelope_strict=True)
+        self.assertTrue(strict["envelope"]["strict"])
+        self.assertEqual(strict["envelope"]["unknownBindings"],
+                         ["providerBuild", "sessionId"])
+
+    def test_both_schema_copies_accept_the_envelope_and_retained_bundles(self) -> None:
+        bundle = self.build()
+        copies = [
+            json.loads((ROOT / relative).read_text(encoding="utf-8"))
+            for relative in ("schemas/context-bundle.v1.schema.json",
+                             "schemas/orchestration/context-bundle.v1.schema.json")
+        ]
+        self.assertEqual(copies[0], copies[1], "both schema copies must stay identical")
+        retained = {key: value for key, value in bundle.items()
+                    if key not in {"envelope", "bundleId"}}
+        retained["budget"] = {
+            key: value for key, value in bundle["budget"].items()
+            if key in {"unit", "limitBytes", "usedBytes", "remainingBytes",
+                       "mandatoryBytes", "optionalBytes", "estimator",
+                       "accountingBoundary", "providerVisibleBytes",
+                       "unknownComponents"}
+        }
+        retained["bundleId"] = bundle["bundleId"]
+        for schema in copies:
+            _schema_check(self, bundle, schema, schema)
+            # A bundle retained before this contract extension still validates.
+            _schema_check(self, retained, schema, schema)
+
+    # --- AC3: separated accounting ----------------------------------------
+    def test_accounts_partition_delivered_bytes_and_keep_unknowns_unknown(self) -> None:
+        evidence = [{"ref": "packet.json", "data": b'{"packet": true}',
+                     "sourceLocation": str(self.repo / "packet.json")}]
+        bundle = self.build(required_evidence=evidence)
+        budget = bundle["budget"]
+        accounts = budget["accounts"]
+        self.assertEqual(
+            accounts["mandatoryTaskPolicyBytes"]
+            + accounts["requiredEvidenceBytes"]
+            + accounts["optionalSelectedBytes"],
+            budget["usedBytes"],
+        )
+        self.assertGreater(accounts["requiredEvidenceBytes"], 0)
+        self.assertGreater(accounts["optionalSelectedBytes"], 0)
+        for unknown in ("visibleHistoryBytes", "toolSkillContentBytes",
+                        "providerSystemBytes"):
+            self.assertIsNone(accounts[unknown], unknown)
+        measurement = budget["measurement"]
+        self.assertEqual(measurement["hostManagedExactBytes"], budget["usedBytes"])
+        self.assertIsNone(measurement["providerObservableBytes"])
+        self.assertIsNone(measurement["tokenizer"])
+        self.assertEqual(measurement["estimatorIdentity"], "utf8-exact.v1")
+        self.assertEqual(measurement["coverage"], "host-composed-prompt-only")
+        self.assertIn("exactly once", measurement["overlapRule"])
+
+    def test_token_reserve_is_never_subtracted_from_a_byte_limit(self) -> None:
+        bundle = self.build(output_reserve={"unit": "tokens", "value": 32000,
+                                            "source": "fixture"})
+        reserve = bundle["budget"]["outputReserve"]
+        self.assertEqual(reserve["requested"], {"unit": "tokens", "value": 32000,
+                                                "source": "fixture"})
+        self.assertIsNone(reserve["conversion"])
+        self.assertIsNone(reserve["reservedBytes"])
+        self.assertFalse(reserve["appliedToByteLimit"])
+        self.assertIn("not", reserve["enforcement"])
+        self.assertEqual(bundle["budget"]["limitBytes"], 16384)
+
+    def test_declared_byte_reserve_is_applied_and_overflows_before_invocation(self) -> None:
+        composed = self.build()["budget"]["usedBytes"]
+        admitted = self.build(output_reserve={"unit": "utf8-bytes", "value": 64,
+                                              "source": "fixture"})
+        reserve = admitted["budget"]["outputReserve"]
+        self.assertEqual(reserve["reservedBytes"], 64)
+        self.assertTrue(reserve["appliedToByteLimit"])
+        self.assertEqual(admitted["budget"]["remainingBytes"],
+                         16384 - 64 - admitted["budget"]["usedBytes"])
+        with self.assertRaises(ContextOverflow) as caught:
+            self.build(budget_bytes=composed + 32,
+                       output_reserve={"unit": "utf8-bytes", "value": 4096,
+                                       "source": "fixture"})
+        self.assertIn("mandatory-reserve-overflow", str(caught.exception))
+
+    # --- AC5: deterministic optional admission ----------------------------
+    def test_optional_overflow_trims_deterministically_without_mandatory_label(self) -> None:
+        write(self.repo / "context/shared.md", "ENVELOPE-CONTEXT " + ("x" * 4000) + "\n")
+        write(self.repo / "context/second.md", "ENVELOPE-CONTEXT " + ("y" * 4000) + "\n")
+        value = json.loads(self.config_path.read_text(encoding="utf-8"))
+        value["contextService"]["codePaths"] = ["context/second.md", "context/shared.md"]
+        write(self.config_path, json.dumps(value, sort_keys=True))
+        full = self.build()
+        mandatory = full["budget"]["accounts"]["mandatoryTaskPolicyBytes"]
+        trimmed = self.build(budget_bytes=mandatory + 2200)
+        self.assertEqual(trimmed["status"], "ok")
+        optional = [item for item in trimmed["provenance"]
+                    if item["priority"] == "optional"]
+        self.assertTrue(optional)
+        self.assertEqual([item["selectionOrder"] for item in optional],
+                         list(range(1, len(optional) + 1)))
+        prompt = trimmed["prompt"].encode()
+        self.assertLessEqual(len(prompt), mandatory + 2200)
+        # Delivered excerpt hashes must match the delivered bytes exactly.
+        for item in optional:
+            if item.get("truncated"):
+                start, end = item["range"]["startByte"], item["range"]["endByte"]
+                source = (self.repo / "context/second.md")
+                if item["ref"].endswith("shared.md"):
+                    source = self.repo / "context/shared.md"
+                excerpt = source.read_bytes()[start:end]
+                self.assertEqual(
+                    item["excerptSha256"],
+                    "sha256:" + hashlib.sha256(excerpt).hexdigest(), item["ref"],
+                )
+                self.assertIn(excerpt, prompt)
+        # Optional overflow is recorded as optional, never as mandatory overflow.
+        reasons = {item["reason"] for item in trimmed["omissions"]}
+        self.assertNotIn("mandatory_overflow", reasons)
+        self.assertNotIn("mandatory-overflow", reasons)
+        budget_omissions = [item for item in trimmed["omissions"]
+                            if item["reason"] == "aggregate_byte_budget"]
+        self.assertTrue(budget_omissions, trimmed["omissions"])
+        for item in budget_omissions:
+            self.assertEqual(item["priority"], "optional", item)
+        # Deterministic: the same inputs reproduce the same admitted bundle.
+        self.assertEqual(self.build(budget_bytes=mandatory + 2200)["promptSha256"],
+                         trimmed["promptSha256"])
+
+    def test_mandatory_overflow_is_still_refused_before_any_optional_trimming(self) -> None:
+        with self.assertRaises(ContextOverflow) as caught:
+            self.build(budget_bytes=32)
+        self.assertIn("mandatory-overflow", str(caught.exception))
+
+    # --- AC7/AC8: finite provider support matrix ---------------------------
+    def test_provider_context_control_matrix_is_finite_and_evidence_classed(self) -> None:
+        from engine import capability_policy
+
+        matrix = capability_policy.context_control_support("codex")
+        self.assertEqual(sorted(matrix), sorted(capability_policy.CONTEXT_CONTROLS))
+        for control, record in matrix.items():
+            self.assertIn(record["support"],
+                          {"supported", "unsupported", "partial", "unknown"}, control)
+            self.assertIn(record["evidence"],
+                          capability_policy.CONTROL_EVIDENCE_CLASSES, control)
+            self.assertTrue(record["note"], control)
+        self.assertEqual(capability_policy.context_control_support("no-such-provider"),
+                         capability_policy.unverified_context_controls())
+
+    def test_strict_whole_provider_guarantee_is_refused_with_named_gaps(self) -> None:
+        from engine import capability_policy
+
+        for provider in capability_policy.PROVIDER_CONTEXT_CONTROLS:
+            guarantee = capability_policy.managed_boundary_guarantee(provider)
+            self.assertFalse(guarantee["strictWholeProviderGuarantee"], provider)
+            self.assertEqual(guarantee["enforcedScope"], "host-composed-prompt")
+            self.assertTrue(guarantee["coverageGaps"], provider)
+            self.assertIsNone(capability_policy.output_reserve_conversion(provider),
+                              provider)
 
 
 if __name__ == "__main__":

@@ -156,6 +156,76 @@ assert sum(len(p.stdout) for p in results)==4115-1  # len(full packet)
                                 '/does-not-exist/claude-run.sh'], capture_output=True)
     assert result.returncode and b'OS-enforced' in result.stderr
 
+    # --- Host-bound invocation envelope at the actual delivery boundary -------
+    # The envelope is published on the receipt even without a context bundle, so
+    # a host-managed launch is always attributable. Strict admission refuses
+    # before the provider is launched when a required binding is unavailable.
+    publish_required()
+    envelope_receipt = t / 'envelope-receipt.json'
+    complete_envelope = {
+        'runId': 'RUN-required',
+        'attemptId': 'attempt-1:try-0',
+        'sessionId': None,
+        'candidateRevision': 'a' * 40,
+        'requestedModel': 'claude-opus-5',
+        'effectiveModel': 'claude-opus-5',
+        'providerName': 'fixture',
+        'providerBuild': 'fixture-build-1',
+        'capabilityProfile': 'auditor-core',
+        'taskContractSha256': 'sha256:' + hashlib.sha256(b'task').hexdigest(),
+    }
+    marker_file.unlink(missing_ok=True)
+    envelope_env = dict(fixture_env)
+    envelope_env['SINGULAR_INVOCATION_ENVELOPE'] = json.dumps(complete_envelope)
+    envelope_env['SINGULAR_INVOCATION_ENVELOPE_STRICT'] = '1'
+    result = fixture_run(
+        host + ['--manifest', str(manifest), '--ledger', str(ledger),
+                '--required', 'packet.json', '--required', 'audit-verification.json',
+                '--receipt', str(envelope_receipt), '--',
+                sys.executable, str(provider), '--prompt-file', str(prompt),
+                str(marker_file)],
+        capture_output=True, env=envelope_env,
+    )
+    assert result.returncode == 0 and marker_file.exists(), result.stderr
+    admitted_envelope = json.loads(envelope_receipt.read_text())
+    assert admitted_envelope['status'] == 'admitted', admitted_envelope
+    published = admitted_envelope['envelope']
+    assert published['version'] == 'singular.context.envelope.v1', published
+    assert published['strict'] is True, published
+    assert published['runId'] == 'RUN-required', published
+    assert published['effectiveModel'] == 'claude-opus-5', published
+    assert published['providerBuild'] == 'fixture-build-1', published
+    assert published['capabilityProfile'] == 'auditor-core', published
+    assert published['unknownBindings'] == ['sessionId'], published
+    assert published['providerExecutable'] == sys.executable, published
+
+    with sqlite3.connect(ledger) as db:
+        before = db.execute('select coalesce(sum(bytes),0) from deliveries').fetchone()[0]
+    marker_file.unlink()
+    for absent in ('effectiveModel', 'capabilityProfile', 'taskContractSha256'):
+        partial = {key: value for key, value in complete_envelope.items() if key != absent}
+        strict_env = dict(fixture_env)
+        strict_env['SINGULAR_INVOCATION_ENVELOPE'] = json.dumps(partial)
+        strict_env['SINGULAR_INVOCATION_ENVELOPE_STRICT'] = '1'
+        denied_receipt = t / ('strict-denied-' + absent + '.json')
+        result = fixture_run(
+            host + ['--manifest', str(manifest), '--ledger', str(ledger),
+                    '--required', 'packet.json', '--required', 'audit-verification.json',
+                    '--receipt', str(denied_receipt), '--',
+                    sys.executable, str(provider), '--prompt-file', str(prompt),
+                    str(marker_file)],
+            capture_output=True, env=strict_env,
+        )
+        assert result.returncode and not marker_file.exists(), (absent, result.stderr)
+        denial = json.loads(denied_receipt.read_text())
+        assert denial['status'] == 'denied', denial
+        assert denial['denial']['reason'] == 'envelope-binding-unavailable', denial
+        assert absent in denial['denial']['message'], denial
+        assert denial['retrievalDebitBytes'] == 0, denial
+        with sqlite3.connect(ledger) as db:
+            after = db.execute('select coalesce(sum(bytes),0) from deliveries').fetchone()[0]
+        assert after == before, (absent, before, after)
+
     # Direct unit checks of admit_read_only_adapter (capability, not name).
     sys.path.insert(0, str(root / 'engine'))
     import evidence_delivery as delivery
