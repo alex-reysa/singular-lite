@@ -53,4 +53,11 @@ printf 'I could not produce a packet.\n' >"$tmp/prose.json"
 if singular_extract_json "$tmp/prose.json" "$tmp/prose.out" 2>"$tmp/err4"; then fail "prose accepted as a packet"; fi
 grep -q "no parseable JSON object found" "$tmp/err4" || fail "unexpected prose error: $(cat "$tmp/err4")"
 pass "prose without an object is still refused"
+# 5. A complete packet lacking only createdAt is defaulted by the host, not refused.
+singular_extract_json "$fixture" "$tmp/base.json" 2>/dev/null
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("createdAt"); json.dump(d, open(sys.argv[2],"w"))' "$tmp/base.json" "$tmp/nocreated.json"
+SINGULAR_PACKET_SCHEMA="$ROOT/schemas/orchestration/state-packet.v0.schema.json" singular_validate_packet_basic "$tmp/nocreated.json" 2>"$tmp/err5" || fail "packet without createdAt refused: $(cat "$tmp/err5")"
+grep -q "defaulted missing createdAt" "$tmp/err5" || fail "createdAt default not logged"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["createdAt"].endswith("Z"), d' "$tmp/nocreated.json"
+pass "missing createdAt is defaulted by the host"
 echo "test-worker-packet-repair: ok"

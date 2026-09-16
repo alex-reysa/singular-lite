@@ -1,0 +1,29 @@
+{
+  "command": "bash tests/run.sh test-incremental-reconcile.sh",
+  "commandSha256": "2b60188a295d01ef9a7e17f4ef5ccdd0260deefd557b38dcf36758bf99fb8255",
+  "durationMs": 0,
+  "evidenceBindingSha256": "46a660c5270aa3bafbd3e699ce6f385db55e9d8c36dfb877d704fcbff16bc62e",
+  "evidenceOnly": false,
+  "expectedFailures": [],
+  "failureSignals": [],
+  "headSha": "813fae81942aa46adf8a65a4e91d8a298392c39a",
+  "infrastructureSignals": [],
+  "logBytes": 65,
+  "logPath": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/docs/orchestration/gates/evidence/reconciliation-discovery.regression.txt",
+  "logRef": "docs/orchestration/gates/evidence/reconciliation-discovery.regression.txt",
+  "logSha256": "d4252b57a4a53693d699b1578edba9b0ccf26ef8a52df4f1686ec65954d15018",
+  "outcome": "passed",
+  "phase": "integration",
+  "rawExitCode": 0,
+  "recordedAt": "2026-09-16T08:04:22Z",
+  "resolvedExpectedFailures": [],
+  "runId": "ORIGIN-20260916T080305Z-71711",
+  "schema": "singular.orchestration.gate-report.v0",
+  "sourceIntegrity": {
+    "changedPaths": [],
+    "status": "not-checked"
+  },
+  "taskId": "TASK-1114",
+  "unexpectedFailures": [],
+  "workspaceKind": "integration"
+}

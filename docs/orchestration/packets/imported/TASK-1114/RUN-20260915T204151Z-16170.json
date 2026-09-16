@@ -1,0 +1,166 @@
+{
+  "schema": "singular.orchestration.state-packet.v0",
+  "packetId": "RUN-20260915T204151Z-16170",
+  "runId": "RUN-20260915T204151Z-16170",
+  "taskId": "TASK-1114",
+  "area": "brain",
+  "role": "l2-developer",
+  "status": "accepted",
+  "baseRef": "ada2f1d0785a0fef7705b1833047a896a78a0d43",
+  "branch": "codex/brain-rescue/TASK-1114",
+  "headSha": "de588048edb5dcc7c36e5ac350b9994805c3747a",
+  "workspace": "/Users/alejandro/Desktop/999. PROJECTS/singular-lite-brain-integration/.worktrees/TASK-1114",
+  "ownedFiles": [
+    "engine/reconcile_index.py",
+    "engine/reconcile.sh",
+    "engine/integrate.sh",
+    "engine/lib.sh",
+    "engine/ops.sh",
+    "tests/test-incremental-reconcile.sh",
+    "tests/test-ops-health.sh",
+    "docs/incremental-reconciliation.md"
+  ],
+  "changedFiles": [
+    "docs/incremental-reconciliation.md",
+    "engine/integrate.sh",
+    "engine/lib.sh",
+    "engine/ops.sh",
+    "engine/reconcile.sh",
+    "engine/reconcile_index.py",
+    "tests/test-incremental-reconcile.sh",
+    "tests/test-ops-health.sh"
+  ],
+  "commands": [
+    {
+      "cmd": "bash .singular-evidence/red-baseline.sh",
+      "exitCode": 1,
+      "logRef": ".singular-evidence/red.log",
+      "rationale": "red: same pinned fixture corpus run against the pre-implementation base engine tree ada2f1d0785a, extracted read-only into a temp dir via git archive (no checkout or git state mutated). Phase 1 (real reconcile --actuate into the production integrate.sh, INCREMENTAL_RECONCILE_SKIP_UNIT=1) fails with 'FAIL: no instrumented historical validation in the baseline cycle'; phase 2 (whole fixture) fails with 'reconcile_index.py: error: unrecognized arguments: --audits ... --events ... --max-events ... --max-sweep-entries ... --max-sweep-dirs ... --max-sweep-bytes ... --hash-block-bytes ...' because the bounded event/directory-entry/content-byte work limits do not exist at the base. Script exits 1 only when both phases fail."
+    },
+    {
+      "cmd": "bash tests/test-incremental-reconcile.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "green (focused file, run against this checkout before the gate): PASS: test-incremental-reconcile, 60s wall clock. Included in the gate run recorded in green.log."
+    },
+    {
+      "cmd": "test -f tests/test-incremental-reconcile.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-incremental-reconcile.sh test-task-lifecycle.sh test-dynamic-dispatch.sh test-integration-exact-tree.sh test-ops-health.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/green.log",
+      "rationale": "green: declared focused gate on the exact source, 5 passed, 0 failed."
+    },
+    {
+      "cmd": "test -f tests/test-incremental-reconcile.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-incremental-reconcile.sh test-task-lifecycle.sh test-dynamic-dispatch.sh test-integration-exact-tree.sh test-ops-health.sh",
+      "exitCode": 0,
+      "logRef": ".singular-evidence/regression.log",
+      "rationale": "regression: second independent execution of the declared gate after the doc and fixture edits, 5 passed, 0 failed."
+    }
+  ],
+  "tests": [
+    {
+      "name": "tests/test-incremental-reconcile.sh (real reconcile --actuate / integrate.sh section, baseline engine ada2f1d0785a)",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "tests/test-incremental-reconcile.sh (whole fixture, baseline engine ada2f1d0785a)",
+      "phase": "red",
+      "status": "failed",
+      "logRef": ".singular-evidence/red.log"
+    },
+    {
+      "name": "test-incremental-reconcile.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-ops-health.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-integration-exact-tree.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-task-lifecycle.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test-dynamic-dispatch.sh",
+      "phase": "green",
+      "status": "passed",
+      "logRef": ".singular-evidence/green.log"
+    },
+    {
+      "name": "test -f tests/test-incremental-reconcile.sh && SINGULAR_TEST_JOBS=2 bash tests/run.sh test-incremental-reconcile.sh test-task-lifecycle.sh test-dynamic-dispatch.sh test-integration-exact-tree.sh test-ops-health.sh",
+      "phase": "regression",
+      "status": "passed",
+      "logRef": ".singular-evidence/regression.log"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "red-log",
+      "ref": ".singular-evidence/red.log"
+    },
+    {
+      "kind": "red-repro-script",
+      "ref": ".singular-evidence/red-baseline.sh"
+    },
+    {
+      "kind": "green-log",
+      "ref": ".singular-evidence/green.log"
+    },
+    {
+      "kind": "regression-log",
+      "ref": ".singular-evidence/regression.log"
+    },
+    {
+      "kind": "note",
+      "ref": "This run qualifies the supervisor-adopted candidate on exact source and adds two changes of its own, both in owned files. (1) tests/test-incremental-reconcile.sh: the engine under test is now resolved once, before the unit section, from INCREMENTAL_ENGINE_HOME (unset, and therefore for every gate run, it is this checkout byte for byte), so the whole fixture -- not only the real-entrypoint section -- can be compared against another engine tree on the same pinned corpus. This is what makes the baseline comparison in AC-1 reproducible rather than historical. (2) the INCREMENTAL_RETROSPECTIVE_BASELINE probe now reports the stabilizing cycle's canonical-pass count instead of asserting it equals 2: that count is a property of the engine under test, and asserting it stopped the probe before it reached its own subject, the restored packed candidate ref. docs/incremental-reconciliation.md gains a 'Comparing against another engine tree' section documenting both, with the exact baseline failure strings."
+    },
+    {
+      "kind": "note",
+      "ref": "Scope: git status shows exactly two modified paths, docs/incremental-reconciliation.md and tests/test-incremental-reconcile.sh; git diff --name-only against ada2f1d0785a shows exactly the eight owned files and nothing else. No forbidden path was read for writing or modified. The red reproduction uses git archive read-only into mktemp; no commit, branch, checkout or index operation was performed in this worktree."
+    },
+    {
+      "kind": "note",
+      "ref": "Fixture results are not native acceptance. No claim is made here of B1 completion, runtime adoption, operational improvement or unattended delivery. TASK-1009 at 3a47a736 and its historical 214/214 evidence, the TASK-1010/TASK-1011 recovery, B1-B3 integration, subsequent B4/B5 work and all unsuccessful attempts remain retained and unchanged."
+    },
+    {
+      "kind": "platform",
+      "ref": "darwin 25.6.0 arm64; /opt/homebrew/bin/bash; /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12; SINGULAR_TEST_JOBS=2; shared host, elapsed figures not controlled for unrelated load."
+    },
+    {
+      "kind": "gate-report",
+      "ref": "runs/RUN-20260915T204151Z-16170/gate-report.json"
+    },
+    {
+      "kind": "campaign-binding",
+      "ref": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15B:sha256:33424c14601909eaf783e10b28c97c7c26b080fd29f51da9c0947ee180a35beb:epoch:6009cbe667ac807f93bd70eb9d712d1fac3554c3a71fa2a0"
+    },
+    {
+      "kind": "audit",
+      "ref": "runs/RUN-20260915T204151Z-16170/audit.json"
+    },
+    {
+      "kind": "audit-verification",
+      "ref": "runs/RUN-20260915T204151Z-16170/audit-verification.json"
+    },
+    {
+      "kind": "evidence-manifest",
+      "ref": "runs/RUN-20260915T204151Z-16170/evidence-manifest.json"
+    }
+  ],
+  "blockers": [],
+  "nextAction": "import into control state and reconcile",
+  "createdAt": "2026-09-15T20:52:38Z"
+}

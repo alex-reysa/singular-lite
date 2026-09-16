@@ -1,0 +1,103 @@
+{
+  "schema": "singular.orchestration.gate-result.v1",
+  "node": "reconciliation-discovery",
+  "status": "passed",
+  "authoritative": true,
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A16:sha256:1146f87581d8f41b907d268a4e609833adc19ce1051bae30acd0d9fc12479da6:epoch:42d287f87cd56fea6d12bf28977958c6f449d190f59d1386",
+  "evidenceClass": "deterministic-proof",
+  "evidence": [
+    {
+      "kind": "source-path",
+      "ref": "tests/test-incremental-reconcile.sh",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "0c3203ebb544af38bb5148c3ba5b907cf5ff8e7228299ea5c5928e6cb1c7dab8"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/run.sh",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "b8bf1a2333426e6c6565292d43153e6edb1c15cd8d5da59434a44f3f9604fe47"
+    },
+    {
+      "kind": "source-path",
+      "ref": "tests/test-ops-health.sh",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "50eb85cc8b7d2ad49f2116d344f0be2ef698f17d9fd733f8c087c9dbac8956ce"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/reconcile_index.py",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "ba391dd415f608e68e4a608575105a605ef9628aa33e2637b10c7f81cef6e434"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/reconcile.sh",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "92593a59db1d8028cf638c9a0e8d8d8ee2fc713b951c1493b9dcba64b3976dca"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/integrate.sh",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "9ec8b3f6fd836ebc23e1601492f0fff62eb735a76b8f1f665509f33dd767c55c"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/lib.sh",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "f1beb2804df2b5ab64bd076209f8488fca6a2652168e69fbe171027c23142d2f"
+    },
+    {
+      "kind": "source-path",
+      "ref": "engine/ops.sh",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "2b8d3afa15f19286eb8da4a75597844803091591d5f749f8270c1bfaa1c5ee02"
+    },
+    {
+      "kind": "source-path",
+      "ref": "docs/incremental-reconciliation.md",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "97e4b8c3ac1c888966917367ccb86567831358b0f9c3aa297a04f22ef0304af4"
+    },
+    {
+      "kind": "source-path",
+      "ref": "docs/orchestration/rescue-tasks/TASK-1114.md",
+      "description": "Explicit reconciliation-discovery implementation or acceptance-test input for the promoted gate.",
+      "sha256": "2c1f114de8cd5565366b1951fafac8d2ca0736b5733d5b9f52506e175e328d8e"
+    },
+    {
+      "kind": "task-set",
+      "ref": "reconciliation-discovery-integrated-tasks",
+      "description": "Integrated task slices cited by the reconciliation-discovery gate-result candidate.",
+      "taskIds": [
+        "TASK-1114"
+      ],
+      "sha256": "8a4f9d6a3e48807502e3cc9303ac753078740bf599a4ea7dfeead424e4ef7775"
+    },
+    {
+      "kind": "command-log",
+      "ref": "reconciliation-discovery-regression",
+      "description": "Authoritative registered acceptance command captured on the exact promoted tree during integration or L0 gate promotion.",
+      "command": "bash tests/run.sh test-incremental-reconcile.sh",
+      "exitCode": 0,
+      "logRef": "docs/orchestration/gates/evidence/reconciliation-discovery.regression.txt",
+      "sha256": "d4252b57a4a53693d699b1578edba9b0ccf26ef8a52df4f1686ec65954d15018",
+      "headSha": "813fae81942aa46adf8a65a4e91d8a298392c39a"
+    },
+    {
+      "kind": "gate-report",
+      "ref": "docs/orchestration/gates/evidence/reconciliation-discovery.gate-report.json",
+      "sha256": "fef948096b56a67ade4918484313e5aa650bba8f1dbd0c0186b77ea52e196f1b",
+      "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
+    }
+  ],
+  "upstreamGates": [
+    "context-evaluation"
+  ],
+  "decidedBy": "l0-gate-promoter",
+  "rationale": "Integrated audited end-to-end acceptance for reconciliation-discovery plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
+  "recordedAt": "2026-09-16T08:04:21Z",
+  "verificationClassification": "passed",
+  "gateReportRef": "docs/orchestration/gates/evidence/reconciliation-discovery.gate-report.json"
+}

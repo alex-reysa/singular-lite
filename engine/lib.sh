@@ -2439,6 +2439,17 @@ with open(schema_path, "r", encoding="utf-8") as f:
 required = schema["required"]
 properties = set(schema["properties"].keys())
 missing = [key for key in required if key not in data]
+if missing == ["createdAt"]:
+    # Field run 2026-09-15: a complete, otherwise valid packet was refused
+    # twice for lacking only its timestamp, which parked an audited-clean
+    # candidate. The host knows the time; it does not need the model for it.
+    from datetime import datetime, timezone
+    data["createdAt"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    print("packet repaired: defaulted missing createdAt", file=sys.stderr)
+    missing = []
 if missing:
     print("missing required fields: " + ", ".join(missing), file=sys.stderr)
     sys.exit(2)

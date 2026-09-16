@@ -3,7 +3,7 @@
   "node": "context-evaluation",
   "status": "passed",
   "authoritative": true,
-  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A15B:sha256:33424c14601909eaf783e10b28c97c7c26b080fd29f51da9c0947ee180a35beb:epoch:6009cbe667ac807f93bd70eb9d712d1fac3554c3a71fa2a0",
+  "campaignBinding": "campaign:BRAIN-RESCUE-20260910-OPUS-HIGH-ASTRA-LOW-OPUS-MEDIUM-A16:sha256:1146f87581d8f41b907d268a4e609833adc19ce1051bae30acd0d9fc12479da6:epoch:42d287f87cd56fea6d12bf28977958c6f449d190f59d1386",
   "evidenceClass": "deterministic-proof",
   "evidence": [
     {
@@ -77,12 +77,12 @@
       "exitCode": 0,
       "logRef": "docs/orchestration/gates/evidence/context-evaluation.regression.txt",
       "sha256": "af0e51bfe249c50b0b5a6d1267804aee10f31dae0e5fa3dfe0fdbdeb367da993",
-      "headSha": "a5aafe72278e481ee0498380d61e02c7b9a9f518"
+      "headSha": "813fae81942aa46adf8a65a4e91d8a298392c39a"
     },
     {
       "kind": "gate-report",
       "ref": "docs/orchestration/gates/evidence/context-evaluation.gate-report.json",
-      "sha256": "0164bebf0b4c6a875d5ad9a2ae15596e8f0d6c87b8b926247d27707684b83126",
+      "sha256": "f2ffc7f36dc2def2821265779f5af85fc1de8c77fa7bd894a6ff90102b3daabe",
       "description": "Strict gate-report.v0 bound to the promoted command, log, and worker head."
     }
   ],
@@ -91,7 +91,7 @@
   ],
   "decidedBy": "l0-gate-promoter",
   "rationale": "Integrated audited end-to-end acceptance for context-evaluation plus its registered host acceptance test and unchanged source identity; completion contract is docs/brain-build-plan/campaign.md.",
-  "recordedAt": "2026-09-15T19:18:14Z",
+  "recordedAt": "2026-09-16T08:03:19Z",
   "verificationClassification": "passed",
   "gateReportRef": "docs/orchestration/gates/evidence/context-evaluation.gate-report.json"
 }

@@ -2,6 +2,34 @@
 
 ## Decision Log
 
+### 2026-09-16T08:22:28Z — TASK-1115 — unpark
+
+- Run: `ORIGIN-20260916T082228Z-84209`
+- Branch: `n/a`
+- Authority: operator
+- Rationale: user directive 2026-09-16: one final bounded attempt on A16 from preserved WIP d501f1fe; 45 min / $10
+
+### 2026-09-15T21:21:26Z — TASK-1115 — escalate-parked
+
+- Run: `RUN-20260915T210233Z-91054`
+- Branch: `codex/brain-rescue/TASK-1115`
+- Authority: l1
+- Rationale: no product progress: attempt 2 left the exact candidate unchanged after worker-no-packet; another implement/audit pass would evaluate identical source.
+
+### 2026-09-15T21:21:18Z — TASK-1115 — decide:retry
+
+- Run: `RUN-20260915T210233Z-91054`
+- Branch: `codex/brain-rescue/TASK-1115`
+- Authority: policy
+- Rationale: fast-path: worker-no-packet -> retry
+
+### 2026-09-15T21:02:28Z — TASK-1114 — integrate
+
+- Run: `ORIGIN-20260915T205923Z-55224`
+- Branch: `codex/brain-rescue/TASK-1114`
+- Authority: origin
+- Rationale: merged codex/brain-rescue/TASK-1114 (de588048edb5dcc7c36e5ac350b9994805c3747a) into codex/brain-integration as 58720304c280fcd9023d41f10bea62330f2ce399; gate green; acceptance=accepted
+
 ### 2026-09-15T20:59:19Z — TASK-1114 — accept
 
 - Run: `RUN-20260915T204151Z-16170`
