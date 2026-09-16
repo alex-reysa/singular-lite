@@ -309,8 +309,8 @@ pass "f2 binding persisted by the real write path; changed binding refused (exit
 
 # An identical retained binding still resumes: the gate is a comparison, not a
 # blanket refusal of every retained session.
-r="$workroot/f2"; new_repo "$r"; o="$(out)"; args="$workroot/f2.args"
-meta="$workroot/f2-meta.json"
+r="$workroot/f2b"; new_repo "$r"; o="$(out)"; args="$workroot/f2b.args"
+meta="$workroot/f2b-meta.json"
 cat >"$meta" <<JSON
 {"schema":"singular.orchestration.session-meta.v0","provider":"codex","sessionId":"s2","cwd":"$r","exitCode":0,"createdAt":"2026-01-01T00:00:00Z","envelopeBinding":"sha256:aaaa"}
 JSON
