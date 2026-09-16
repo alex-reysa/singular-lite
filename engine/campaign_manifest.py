@@ -299,6 +299,10 @@ def resolved_settings_projection(
     for key, value in sorted(source.items()):
         if not key.startswith("SINGULAR_"):
             continue
+        if key in PER_RUN_SETTINGS:
+            # Per-run values the reconciler sets for one integration; never
+            # part of the frozen identity (2026-09-16 integration drift).
+            continue
         raw = value.encode("utf-8")
         identities[classify_resolved_setting(key)][key] = {
             "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()

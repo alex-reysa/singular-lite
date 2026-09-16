@@ -7,6 +7,13 @@ and the plugin negotiate on `schemaVersion`.
 
 ---
 
+## [0.23.2] — 2026-09-16 — Correction to the 0.23.1 drift fix
+
+- The 0.23.1 exclusion of `SINGULAR_INTEGRATION_RECEIPT_FILE` from the
+  frozen campaign identity was applied to the wrong projection path and had
+  no effect; it now applies in `resolved_settings_projection`, which feeds
+  campaign drift verification. No other change.
+
 ## [0.23.1] — 2026-09-16 — Host-managed invocation admission
 
 - **Host-managed invocation admission and observability (TASK-1115).** The
