@@ -1,0 +1,521 @@
+{
+  "generatedAt": "2026-09-15T19:18:26.989743+00:00",
+  "providerInvocations": 90,
+  "byProviderRole": {
+    "codex/implementer": {
+      "n": 40,
+      "succeeded": 33,
+      "inputTokens": 174860016,
+      "cachedInputTokens": 170807808,
+      "outputTokens": 788192,
+      "costUsd": 0.0,
+      "durationSec": 0
+    },
+    "codex/auditor": {
+      "n": 28,
+      "succeeded": 28,
+      "inputTokens": 24879544,
+      "cachedInputTokens": 22885632,
+      "outputTokens": 187572,
+      "costUsd": 0.0,
+      "durationSec": 0
+    },
+    "codex/planner": {
+      "n": 5,
+      "succeeded": 5,
+      "inputTokens": 2784133,
+      "cachedInputTokens": 2323328,
+      "outputTokens": 17120,
+      "costUsd": 0.0,
+      "durationSec": 0
+    },
+    "codex/decider": {
+      "n": 4,
+      "succeeded": 4,
+      "inputTokens": 89662,
+      "cachedInputTokens": 43520,
+      "outputTokens": 739,
+      "costUsd": 0.0,
+      "durationSec": 0
+    },
+    "claude/implementer": {
+      "n": 8,
+      "succeeded": 4,
+      "inputTokens": 696,
+      "cachedInputTokens": 47042887,
+      "outputTokens": 416841,
+      "costUsd": 44.4694185,
+      "durationSec": 8288
+    },
+    "claude/auditor": {
+      "n": 5,
+      "succeeded": 4,
+      "inputTokens": 62,
+      "cachedInputTokens": 1964439,
+      "outputTokens": 42067,
+      "costUsd": 4.508014500000001,
+      "durationSec": 538
+    }
+  },
+  "claudeCostUsd": 48.98,
+  "tasks": {
+    "TASK-1101": {
+      "firstEvent": "2026-09-11T08:19:03+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-11T08:32:30+00:00",
+      "audits": [
+        "accepted"
+      ],
+      "accepted": "2026-09-11T08:55:57+00:00",
+      "integrated": "2026-09-11T09:18:53+00:00",
+      "dispatchToIntegrationMin": 46.4,
+      "terminals": [],
+      "workerCompleted": 1,
+      "gatePassed": 1,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1102": {
+      "firstEvent": "2026-09-11T09:18:55+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-11T09:18:56+00:00",
+      "audits": [],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [],
+      "workerCompleted": 0,
+      "gatePassed": 0,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1109": {
+      "firstEvent": "2026-09-11T10:02:00+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-11T10:02:02+00:00",
+      "audits": [
+        "needs-fix",
+        "accepted"
+      ],
+      "accepted": "2026-09-11T10:24:14+00:00",
+      "integrated": "2026-09-11T10:26:20+00:00",
+      "dispatchToIntegrationMin": 24.3,
+      "terminals": [],
+      "workerCompleted": 2,
+      "gatePassed": 2,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1107": {
+      "firstEvent": "2026-09-11T10:26:22+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-11T10:26:23+00:00",
+      "audits": [
+        "needs-fix",
+        "needs-fix"
+      ],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [
+        [
+          "2026-09-11T11:40:43",
+          "audit-needs-fix"
+        ]
+      ],
+      "workerCompleted": 2,
+      "gatePassed": 2,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1108": {
+      "firstEvent": "2026-09-11T23:28:42+00:00",
+      "dispatches": 2,
+      "firstDispatch": "2026-09-11T23:28:44+00:00",
+      "audits": [
+        "needs-fix"
+      ],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [
+        [
+          "2026-09-12T11:06:31",
+          "audit-needs-fix"
+        ]
+      ],
+      "workerCompleted": 2,
+      "gatePassed": 1,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 1
+    },
+    "TASK-1111": {
+      "firstEvent": "2026-09-12T12:30:02+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-12T12:30:03+00:00",
+      "audits": [
+        "needs-fix"
+      ],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [
+        [
+          "2026-09-12T12:40:28",
+          "audit-needs-fix"
+        ]
+      ],
+      "workerCompleted": 1,
+      "gatePassed": 1,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 1,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 1
+    },
+    "TASK-1112": {
+      "firstEvent": "2026-09-12T14:10:56+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-12T14:10:58+00:00",
+      "audits": [
+        "accepted"
+      ],
+      "accepted": "2026-09-12T14:22:02+00:00",
+      "integrated": "2026-09-12T14:27:23+00:00",
+      "dispatchToIntegrationMin": 16.4,
+      "terminals": [],
+      "workerCompleted": 1,
+      "gatePassed": 1,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1103": {
+      "firstEvent": "2026-09-12T17:29:46+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-12T17:29:48+00:00",
+      "audits": [
+        "needs-fix",
+        "accepted"
+      ],
+      "accepted": "2026-09-12T17:51:39+00:00",
+      "integrated": "2026-09-12T17:53:45+00:00",
+      "dispatchToIntegrationMin": 23.9,
+      "terminals": [],
+      "workerCompleted": 2,
+      "gatePassed": 2,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1104": {
+      "firstEvent": "2026-09-12T17:53:48+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-12T17:53:50+00:00",
+      "audits": [
+        "needs-fix",
+        "needs-fix"
+      ],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [
+        [
+          "2026-09-12T18:47:38",
+          "audit-needs-fix"
+        ]
+      ],
+      "workerCompleted": 2,
+      "gatePassed": 2,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 1
+    },
+    "TASK-1113": {
+      "firstEvent": "2026-09-12T21:42:57+00:00",
+      "dispatches": 2,
+      "firstDispatch": "2026-09-12T21:42:57+00:00",
+      "audits": [
+        "accepted"
+      ],
+      "accepted": "2026-09-12T23:19:53+00:00",
+      "integrated": "2026-09-12T23:23:50+00:00",
+      "dispatchToIntegrationMin": 100.9,
+      "terminals": [
+        [
+          "2026-09-12T21:57:02",
+          "audit-infra"
+        ]
+      ],
+      "workerCompleted": 2,
+      "gatePassed": 2,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1105": {
+      "firstEvent": "2026-09-13T05:13:48+00:00",
+      "dispatches": 1,
+      "firstDispatch": "2026-09-13T05:13:50+00:00",
+      "audits": [
+        "needs-fix",
+        "needs-fix"
+      ],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [
+        [
+          "2026-09-13T05:58:02",
+          "audit-needs-fix"
+        ]
+      ],
+      "workerCompleted": 2,
+      "gatePassed": 2,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 0
+    },
+    "TASK-1116": {
+      "firstEvent": "2026-09-14T04:37:36+00:00",
+      "dispatches": 4,
+      "firstDispatch": "2026-09-14T05:17:54+00:00",
+      "audits": [],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [],
+      "workerCompleted": 1,
+      "gatePassed": 1,
+      "reservationRefused": 24,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 0,
+      "superseded": 1
+    },
+    "TASK-1117": {
+      "firstEvent": "2026-09-14T15:19:53+00:00",
+      "dispatches": 2,
+      "firstDispatch": "2026-09-14T15:19:55+00:00",
+      "audits": [
+        "accepted"
+      ],
+      "accepted": "2026-09-14T17:00:04+00:00",
+      "integrated": "2026-09-14T17:03:35+00:00",
+      "dispatchToIntegrationMin": 103.7,
+      "terminals": [
+        [
+          "2026-09-14T15:29:03",
+          "worker-no-packet"
+        ]
+      ],
+      "workerCompleted": 2,
+      "gatePassed": 1,
+      "reservationRefused": 4,
+      "refusalParked": 1,
+      "unchangedCandidateParked": 1,
+      "baseRefreshed": 2,
+      "packetFormatRetry": 0,
+      "unparked": 2,
+      "superseded": 0
+    },
+    "TASK-1106": {
+      "firstEvent": "2026-09-14T17:03:41+00:00",
+      "dispatches": 2,
+      "firstDispatch": "2026-09-14T17:03:44+00:00",
+      "audits": [
+        "accepted"
+      ],
+      "accepted": "2026-09-15T13:13:34+00:00",
+      "integrated": "2026-09-15T14:57:29+00:00",
+      "dispatchToIntegrationMin": 1313.8,
+      "terminals": [
+        [
+          "2026-09-14T17:22:32",
+          "worker-no-packet"
+        ]
+      ],
+      "workerCompleted": 3,
+      "gatePassed": 1,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 1,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 1,
+      "superseded": 0
+    },
+    "TASK-1114": {
+      "firstEvent": "2026-09-15T14:57:34+00:00",
+      "dispatches": 2,
+      "firstDispatch": "2026-09-15T14:57:36+00:00",
+      "audits": [],
+      "accepted": null,
+      "integrated": null,
+      "dispatchToIntegrationMin": null,
+      "terminals": [
+        [
+          "2026-09-15T17:10:18",
+          "worker-infra"
+        ]
+      ],
+      "workerCompleted": 1,
+      "gatePassed": 0,
+      "reservationRefused": 0,
+      "refusalParked": 0,
+      "unchangedCandidateParked": 0,
+      "baseRefreshed": 0,
+      "packetFormatRetry": 0,
+      "unparked": 1,
+      "superseded": 0
+    }
+  },
+  "eventCountsSince0912": {
+    "origin.reconcile_started": 1152,
+    "origin.reconcile_completed": 1152,
+    "origin.resource_plan": 1149,
+    "origin.control_state_deferred": 156,
+    "integration.completed": 148,
+    "origin.dispatch": 108,
+    "origin.capacity_released": 104,
+    "origin.dispatch_reaped": 104,
+    "origin.control_state_committed": 31,
+    "runner.completed": 30,
+    "decision.recorded": 29,
+    "gate_promotion.started": 28,
+    "gate_promotion.completed": 28,
+    "origin.reservation_refused": 28,
+    "context.strategy_selected": 27,
+    "context.bundle_selected": 20,
+    "l1.retry_budget_configured": 19,
+    "l1.dispatch_started": 15,
+    "l1.worker_completed": 15,
+    "gate_check.completed": 15,
+    "l1.attempt_archived": 14,
+    "l1.review_policy_bound": 14,
+    "autonomate.started": 13,
+    "l1.worktree_created": 13,
+    "l1.provisioned": 13,
+    "l1.bootstrap_completed": 13,
+    "l1.gate_passed": 11,
+    "autonomate.stopped": 11,
+    "autonomate.exited": 11,
+    "audit.verification_skipped": 10,
+    "audit.evidence_only_verified": 10,
+    "campaign.started": 9,
+    "operator.resume_requested": 9,
+    "findings.ledger_updated": 9,
+    "l1.audit_completed": 9,
+    "operator.stop_requested": 9,
+    "l1.committed": 8,
+    "decider.fast_path": 6,
+    "l1.task_terminal": 6,
+    "l1.product_repair_budget_consumed": 5,
+    "l1.task_accepted": 4,
+    "packet.imported": 4,
+    "integration.started": 4,
+    "integration.promotion_attempted": 4,
+    "integration.integrated": 4,
+    "l1.frozen": 4,
+    "task.unparked": 4,
+    "provider.error": 4,
+    "l1.no_changes_reconciled": 3,
+    "recovery.action": 3,
+    "l1.aborted": 3,
+    "l1.worker_runner_selected": 3,
+    "dag.evaluation_failed": 2,
+    "l1.product_repair_budget_exhausted": 2,
+    "task.superseded": 2,
+    "campaign.drift_detected": 2,
+    "worker.infra_retry": 2,
+    "breaker.reset": 2,
+    "l1.unchanged_candidate_parked": 2,
+    "l1.base_refreshed": 2
+  },
+  "reviewLedger": {
+    "memory-lifecycle": {
+      "rounds": 3,
+      "status": "accepted",
+      "exceptions": 2
+    },
+    "context-invocations": {
+      "rounds": 3,
+      "status": "accepted",
+      "exceptions": 1
+    },
+    "maintenance:post-B3-cycles-1-7": {
+      "rounds": 1,
+      "status": "accepted",
+      "exceptions": 0
+    },
+    "maintenance:a12-engine-boundary": {
+      "rounds": 3,
+      "status": "open",
+      "exceptions": 1
+    },
+    "maintenance:a13-implementer-containment": {
+      "rounds": 4,
+      "status": "accepted",
+      "exceptions": 0
+    },
+    "maintenance:outcome-unknown-continuation": {
+      "rounds": 1,
+      "status": "accepted",
+      "exceptions": 0
+    },
+    "context-evaluation": {
+      "rounds": 1,
+      "status": "accepted",
+      "exceptions": 0
+    }
+  }
+}
