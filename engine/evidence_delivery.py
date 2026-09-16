@@ -26,14 +26,20 @@ import threading
 from datetime import datetime, timezone
 
 try:
-    from engine.context_service import ContextError, ContextOverflow, ContextService
+    from engine.context_service import (
+        ContextError, ContextOverflow, ContextService, build_envelope,
+        envelope_binding_digest,
+    )
     from engine.campaign_manifest import (
         SETTING_PROJECTION_VERSION,
         resolved_settings_projection,
         runner_child_environment,
     )
 except ImportError:  # installed execution from engine/
-    from context_service import ContextError, ContextOverflow, ContextService
+    from context_service import (  # type: ignore
+        ContextError, ContextOverflow, ContextService, build_envelope,
+        envelope_binding_digest,
+    )
     from campaign_manifest import (  # type: ignore
         SETTING_PROJECTION_VERSION,
         resolved_settings_projection,
@@ -47,6 +53,83 @@ class AdmissionDenied(ValueError):
     def __init__(self, reason, message):
         super().__init__(message)
         self.reason = reason
+
+
+#: The host publishes one invocation envelope for EVERY managed launch, with or
+#: without a context bundle, so an admitted provider invocation is always
+#: attributable. Explicit host bindings arrive as JSON in
+#: ``SINGULAR_INVOCATION_ENVELOPE``; anything the caller did not state is
+#: derived from what this boundary actually observes, and whatever remains
+#: unknown stays explicitly unknown.
+ENVELOPE_ENV = 'SINGULAR_INVOCATION_ENVELOPE'
+ENVELOPE_STRICT_ENV = 'SINGULAR_INVOCATION_ENVELOPE_STRICT'
+
+
+def envelope_strict_requested(environment=None):
+    environment = os.environ if environment is None else environment
+    return environment.get(ENVELOPE_STRICT_ENV, '') == '1'
+
+
+def envelope_binding(args, command, campaign_binding, environment=None):
+    """Collect the host bindings for this launch without inventing any.
+
+    Explicit bindings win. Derived bindings come only from what this boundary
+    genuinely observes: the invocation id the host minted, the adapter it is
+    about to launch, the runner capability profile, and the verified campaign
+    identity. An unobservable binding is left absent so the envelope reports it
+    as unknown rather than as an empty string.
+    """
+    environment = os.environ if environment is None else environment
+    raw = environment.get(ENVELOPE_ENV, '').strip()
+    supplied = {}
+    if raw:
+        try:
+            supplied = json.loads(raw)
+        except ValueError as exc:
+            raise AdmissionDenied(
+                'envelope-binding-unavailable',
+                'invocation envelope binding is not valid JSON: ' + str(exc),
+            ) from exc
+        if not isinstance(supplied, dict):
+            raise AdmissionDenied(
+                'envelope-binding-unavailable',
+                'invocation envelope binding must be a JSON object',
+            )
+    derived = {}
+    invocation_id = args.context_invocation_id or ''
+    if invocation_id:
+        head, _, rest = invocation_id.partition(':')
+        derived['runId'] = head
+        derived['attemptId'] = rest or invocation_id
+    if command:
+        derived['providerExecutable'] = command[0]
+        name = Path(command[0]).name
+        if name.endswith('-run.sh'):
+            derived['providerName'] = name[:-len('-run.sh')]
+    for key, variable in (
+        ('capabilityProfile', 'SINGULAR_RUNNER_CAPABILITY_PROFILE'),
+        ('sessionId', 'SINGULAR_RUNNER_SESSION_ID'),
+        ('requestedModel', 'SINGULAR_RUNNER_REQUESTED_MODEL'),
+        ('effectiveModel', 'SINGULAR_RUNNER_EFFECTIVE_MODEL'),
+        ('providerBuild', 'SINGULAR_RUNNER_PROVIDER_BUILD'),
+    ):
+        value = environment.get(variable, '').strip()
+        if value:
+            derived[key] = value
+    if campaign_binding:
+        derived['campaignBinding'] = campaign_binding
+    derived.update({key: value for key, value in supplied.items()})
+    return derived
+
+
+def envelope_or_denied(builder):
+    """Run an envelope build, turning a strict refusal into a host denial."""
+    try:
+        return builder()
+    except ContextError as exc:
+        if 'strict-binding' in str(exc):
+            raise AdmissionDenied('envelope-binding-unavailable', str(exc)) from exc
+        raise
 
 
 def sha(data):
@@ -293,10 +376,16 @@ def admit_read_only_adapter(command, engine_dir, system):
             )
 
 
-def _provider_launch_env(require_os_readonly=False):
+def _provider_launch_env(require_os_readonly=False, envelope=None):
     env = runner_child_environment()
     if require_os_readonly:
         env['SINGULAR_RUNNER_REQUIRE_OS_READONLY'] = '1'
+    if envelope is not None:
+        # The runner compares this digest with the one retained alongside a
+        # provider session before it agrees to resume. It is the current
+        # authorization/model/provider/policy/capability identity, not a
+        # warning about revoked history.
+        env['SINGULAR_INVOCATION_ENVELOPE_BINDING'] = envelope_binding_digest(envelope)
     return env
 
 
@@ -467,6 +556,7 @@ def context_event(
     return {
         'role': bundle['identity']['role'],
         'phase': bundle['identity']['phase'],
+        'envelope': bundle['envelope'],
         'bundleId': bundle['bundleId'],
         'promptSha256': bundle['promptSha256'],
         'promptBytes': len(bundle['prompt'].encode()),
@@ -576,12 +666,17 @@ def run(args):
 
     bundle = None
     bundle_path = None
+    envelope = None
+    binding = envelope_binding(
+        args, command, args.campaign_binding or admitted_campaign['binding']
+    )
+    envelope_strict = envelope_strict_requested()
     delivery = 'delta' if args.context_prior_bundle else 'initial'
     if context_enabled:
         if not args.context_task or not args.context_bundle or not args.context_invocation_id:
             raise ValueError('enabled context invocation is missing task/bundle/invocation identity')
         budget = context.budget_bytes
-        bundle = context.build(
+        bundle = envelope_or_denied(lambda: context.build(
             task=args.context_task,
             phase=args.context_phase,
             budget_bytes=budget,
@@ -592,7 +687,10 @@ def run(args):
             final_budget_bytes=final_cap,
             invocation_id=args.context_invocation_id,
             campaign_binding=args.campaign_binding,
-        )
+            envelope=binding,
+            envelope_strict=envelope_strict,
+        ))
+        envelope = bundle['envelope']
         prompt = bundle['prompt'].encode()
     else:
         base_snapshot = base_prompt.read_bytes() if base_prompt else b''
@@ -607,6 +705,15 @@ def run(args):
         prompt = b''.join(chunks)
         if final_cap is not None and len(prompt) > final_cap:
             raise ValueError('complete review input exceeds composed budget')
+        envelope = envelope_or_denied(lambda: build_envelope(
+            role=args.context_role or args.role,
+            phase=args.context_phase,
+            worktree=args.context_workspace,
+            revision=None,
+            policy_sha256=setting_evidence['policySha256'],
+            binding=binding,
+            strict=envelope_strict,
+        ))
 
     # Recheck every mutable input after final composition and before publishing
     # or charging. The published prompt is thereafter the only provider input.
@@ -669,6 +776,7 @@ def run(args):
         'bundleId': bundle.get('bundleId') if bundle else None,
         'requiredEvidence': required_records,
         'retrievalDebitBytes': required_bytes,
+        'envelope': envelope,
         'policy': {
             **(bundle.get('policy') if bundle else (
                 context.policy_identity if context else {}
@@ -699,10 +807,12 @@ def run(args):
         command[prompt_index] = str(prompt_path)
 
     if evidence is None:
-        return subprocess.call(command, env=_provider_launch_env(require_os_readonly))
+        return subprocess.call(
+            command, env=_provider_launch_env(require_os_readonly, envelope)
+        )
 
     with tempfile.TemporaryDirectory(prefix='singular-delivery-') as temporary:
-        env = _provider_launch_env(require_os_readonly)
+        env = _provider_launch_env(require_os_readonly, envelope)
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         env['SINGULAR_EVIDENCE_SOCKET'] = str(Path(temporary) / 'broker.sock')
         env['SINGULAR_EVIDENCE_CAPABILITY'] = secrets.token_hex(32)

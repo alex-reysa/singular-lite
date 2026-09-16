@@ -75,7 +75,7 @@ OUTPUT_RESERVE_ENFORCEMENT = (
 )
 OVERLAP_RULE = (
     "accounts partition the delivered prompt: every delivered byte is charged "
-    "to exactly one account, and no byte is counted twice"
+    "exactly once, to exactly one account, and no byte is counted twice"
 )
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
@@ -306,6 +306,95 @@ def _budget_record(
             ),
         },
     }
+
+
+def build_envelope(
+    *,
+    role: str,
+    phase: str | None,
+    worktree: str,
+    revision: str | None,
+    policy_sha256: str | None,
+    source_versions: list[dict[str, Any]] | None = None,
+    task_digest: str | None = None,
+    snapshot_id: str | None = None,
+    binding: Mapping[str, Any] | None = None,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Compose one host-bound invocation envelope from what the host knows.
+
+    This is deliberately independent of :class:`ContextService` so the host
+    delivery boundary can publish an attributable envelope even for a launch
+    that carries no context bundle. An identity the host does not know is
+    preserved as ``None`` and named in ``unknownBindings``; it is never dropped
+    and never reported as a zero or an empty string. Strict admission refuses
+    outright when a required binding is unavailable.
+    """
+    supplied: dict[str, Any] = {}
+    for key, value in dict(binding or {}).items():
+        if isinstance(value, str):
+            value = value.strip()
+        supplied[key] = value or None
+    versions = list(source_versions or [])
+    record: dict[str, Any] = {
+        "version": ENVELOPE_VERSION,
+        "taskContractSha256": supplied.get("taskContractSha256") or task_digest,
+        "role": role,
+        "phase": phase,
+        "runId": supplied.get("runId"),
+        "attemptId": supplied.get("attemptId"),
+        "sessionId": supplied.get("sessionId"),
+        "candidateRevision": supplied.get("candidateRevision") or revision,
+        "worktree": worktree,
+        "requestedModel": supplied.get("requestedModel"),
+        "effectiveModel": supplied.get("effectiveModel"),
+        "providerName": supplied.get("providerName"),
+        "providerExecutable": supplied.get("providerExecutable"),
+        "providerBuild": supplied.get("providerBuild"),
+        "capabilityProfile": supplied.get("capabilityProfile"),
+        "policyVersion": POLICY_VERSION,
+        "policySha256": policy_sha256,
+        "sourceVersions": versions,
+        "sourceVersionsSha256": _sha256(_canonical(versions)),
+        "campaignBinding": supplied.get("campaignBinding"),
+        "bundleSnapshotId": snapshot_id,
+        "unknownBindings": [],
+        "strict": bool(strict),
+    }
+    # Resolve against the final values: a derived default (task digest,
+    # candidate revision) is known even when the caller supplied nothing.
+    record["unknownBindings"] = sorted(
+        name for name in ENVELOPE_IDENTITY_FIELDS if record.get(name) is None
+    )
+    if strict:
+        missing = [
+            name for name in ENVELOPE_REQUIRED_BINDINGS if record.get(name) is None
+        ]
+        if missing:
+            raise ContextError(
+                "strict-binding: required invocation envelope binding(s) "
+                "unavailable: " + ", ".join(missing)
+            )
+    return record
+
+
+def envelope_binding_digest(envelope: Mapping[str, Any]) -> str:
+    """Digest the authorization/identity fields a retained session is bound to.
+
+    Session reuse compares this digest, not a warning: a change in
+    authorization, model, provider, policy or capability identity means the
+    retained history cannot be verifiably re-authorized.
+    """
+    bound = {
+        key: envelope.get(key)
+        for key in (
+            "role", "requestedModel", "effectiveModel", "providerName",
+            "providerExecutable", "providerBuild", "capabilityProfile",
+            "policyVersion", "policySha256", "sourceVersionsSha256",
+            "campaignBinding", "taskContractSha256",
+        )
+    }
+    return _sha256(_canonical(bound))
 
 
 def _number_optional_selections(provenance: list[dict[str, Any]]) -> None:
@@ -621,55 +710,22 @@ class ContextService:
         preserved as ``None`` and named in ``unknownBindings``. Strict admission
         refuses outright when a required binding is unavailable.
         """
-        supplied: dict[str, Any] = {}
-        for key, value in dict(binding or {}).items():
-            if isinstance(value, str):
-                value = value.strip()
-            supplied[key] = value or None
-        source_versions = [
-            {"ref": item.ref, "sha256": item.source_hash, "validity": item.validity}
-            for item in self.sources
-        ]
-        record: dict[str, Any] = {
-            "version": ENVELOPE_VERSION,
-            "taskContractSha256": supplied.get("taskContractSha256") or task_digest,
-            "role": self.role,
-            "phase": phase,
-            "runId": supplied.get("runId"),
-            "attemptId": supplied.get("attemptId"),
-            "sessionId": supplied.get("sessionId"),
-            "candidateRevision": supplied.get("candidateRevision") or self.revision,
-            "worktree": str(self.root),
-            "requestedModel": supplied.get("requestedModel"),
-            "effectiveModel": supplied.get("effectiveModel"),
-            "providerName": supplied.get("providerName"),
-            "providerExecutable": supplied.get("providerExecutable"),
-            "providerBuild": supplied.get("providerBuild"),
-            "capabilityProfile": supplied.get("capabilityProfile"),
-            "policyVersion": POLICY_VERSION,
-            "policySha256": self.config_hash,
-            "sourceVersions": source_versions,
-            "sourceVersionsSha256": _sha256(_canonical(source_versions)),
-            "campaignBinding": supplied.get("campaignBinding"),
-            "bundleSnapshotId": snapshot_id,
-            "unknownBindings": [],
-            "strict": bool(strict),
-        }
-        # Resolve against the final values: a derived default (task digest,
-        # candidate revision) is known even when the caller supplied nothing.
-        record["unknownBindings"] = sorted(
-            name for name in ENVELOPE_IDENTITY_FIELDS if record.get(name) is None
+        return build_envelope(
+            role=self.role,
+            phase=phase,
+            worktree=str(self.root),
+            revision=self.revision,
+            policy_sha256=self.config_hash,
+            source_versions=[
+                {"ref": item.ref, "sha256": item.source_hash,
+                 "validity": item.validity}
+                for item in self.sources
+            ],
+            task_digest=task_digest,
+            snapshot_id=snapshot_id,
+            binding=binding,
+            strict=strict,
         )
-        if strict:
-            missing = [
-                name for name in ENVELOPE_REQUIRED_BINDINGS if record.get(name) is None
-            ]
-            if missing:
-                raise ContextError(
-                    "strict-binding: required invocation envelope binding(s) "
-                    "unavailable: " + ", ".join(missing)
-                )
-        return record
 
     def describe(self) -> dict[str, Any]:
         """Effective invocation configuration and source provenance."""
@@ -1407,7 +1463,16 @@ class ContextService:
             source.ref for source in self.sources
             if previous.get(source.ref) != source.source_hash
         )
-        reserve = _output_reserve_record(output_reserve)
+        # Admission identity first. A strict refusal must happen before any
+        # composition, publication or provider launch, not after it.
+        invocation_envelope = self.envelope(
+            phase=phase, task_digest=_sha256(task_raw),
+            snapshot_id=self.identity["snapshotId"],
+            binding=envelope, strict=envelope_strict,
+        )
+        reserve = _output_reserve_record(
+            output_reserve, invocation_envelope.get("providerName")
+        )
         reserved_bytes = reserve["reservedBytes"] or 0
         allowance = budget_bytes - reserved_bytes
 
@@ -1666,7 +1731,6 @@ class ContextService:
             parts.append(block)
             provenance.extend(item["provenance"])
 
-        optional_used = allowance - mandatory_bytes - remaining
         prompt_raw = b"".join(parts)
         if len(prompt_raw) > budget_bytes:
             raise ContextOverflow(
@@ -1688,6 +1752,11 @@ class ContextService:
         self.validate_snapshot()
         identity = dict(self.identity)
         identity["phase"] = phase
+        _number_optional_selections(provenance)
+        # Every delivered byte is charged to exactly one account. Mandatory
+        # bytes are never trimmed, so the delivered optional total is the exact
+        # remainder of the composed prompt.
+        optional_delivered = max(0, len(prompt_raw) - mandatory_bytes)
         bundle: dict[str, Any] = {
             "schema": BUNDLE_SCHEMA,
             "contractVersion": 1,
@@ -1699,22 +1768,21 @@ class ContextService:
                 "campaignBinding": campaign_binding,
                 "workspace": str(self.root),
             },
+            "envelope": invocation_envelope,
             "prompt": prompt_raw.decode("utf-8"),
             "promptSha256": _sha256(prompt_raw),
             "provenance": provenance,
-            "omissions": [
-                {"ref": ref, "reason": "revoked_since_prior_bundle"}
-                for ref in revoked
-            ],
-            "budget": {
-                "unit": "utf8-bytes", "limitBytes": budget_bytes,
-                "usedBytes": len(prompt_raw), "remainingBytes": budget_bytes - len(prompt_raw),
-                "mandatoryBytes": mandatory_bytes,
-                "optionalBytes": optional_used,
-                "estimator": "utf8-exact.v1", "accountingBoundary": "host-invocation",
-                "providerVisibleBytes": None,
-                "unknownComponents": ["provider_system_content", "tool_schemas", "session_history", "model_output"],
-            },
+            # Optional overflow is recorded as an optional omission. It is never
+            # relabelled as a mandatory overflow, which is a refusal, not a
+            # selection outcome.
+            "omissions": sorted(
+                omissions, key=lambda item: (item["ref"], item["reason"])
+            ),
+            "budget": _budget_record(
+                limit_bytes=budget_bytes, used_bytes=len(prompt_raw),
+                mandatory_bytes=mandatory_bytes, optional_bytes=optional_delivered,
+                evidence_bytes=evidence_bytes, reserve=reserve,
+            ),
             "limitations": LEXICAL_LIMIT,
         }
         bundle["bundleId"] = _sha256(_canonical(bundle))

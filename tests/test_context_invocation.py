@@ -1654,7 +1654,11 @@ class InvocationEnvelopeBudgetTest(unittest.TestCase):
         self.assertEqual(envelope["runId"], "RUN-envelope")
         self.assertEqual(envelope["attemptId"], "attempt-1:try-0")
         self.assertEqual(envelope["candidateRevision"], "envelope-revision")
-        self.assertEqual(envelope["worktree"], str(self.repo))
+        # The envelope binds the SAME worktree identity the immutable bundle
+        # publishes; comparing the resolved directory keeps this exact on hosts
+        # where /tmp aliases /private/tmp.
+        self.assertEqual(envelope["worktree"], bundle["identity"]["worktree"])
+        self.assertEqual(Path(envelope["worktree"]).resolve(), self.repo.resolve())
         self.assertEqual(envelope["requestedModel"], "claude-opus-5")
         self.assertEqual(envelope["effectiveModel"], "claude-opus-5")
         self.assertEqual(envelope["providerExecutable"], "/engine/claude-run.sh")

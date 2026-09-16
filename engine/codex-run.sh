@@ -295,10 +295,20 @@ fi
 # whose recorded model/effort no longer match what THIS runner derives now,
 # refuse (exit 86) so the host goes fresh instead of feeding a model-shifted
 # session. This keeps model knowledge entirely on the runner side.
+# The same gate compares the retained ENVELOPE BINDING too. A warning telling
+# the model to ignore revoked history is not a control: when the current
+# authorization/model/provider/policy/capability identity differs from the one
+# retained with the session, unauthorized historical content cannot be
+# verifiably removed here, so refuse and let the host reconstruct a fresh
+# authorized invocation. A meta carrying no retained binding predates this
+# contract and is left to the host's own gates.
 if [[ -n "$resume_session_id" && -n "$session_meta_path" && -f "$session_meta_path" ]]; then
-  if ! python3 - "$session_meta_path" "$codex_model" "$codex_reasoning_effort" <<'PY'
+  session_gate_rc=0
+  python3 - "$session_meta_path" "$codex_model" "$codex_reasoning_effort" \
+    "${SINGULAR_INVOCATION_ENVELOPE_BINDING:-}" <<'PY' || session_gate_rc=$?
 import json, sys
 path, model_now, effort_now = sys.argv[1], sys.argv[2], sys.argv[3]
+envelope_now = sys.argv[4] if len(sys.argv) > 4 else ""
 try:
     with open(path, "r", encoding="utf-8") as f:
         m = json.load(f)
@@ -306,13 +316,19 @@ except Exception:
     sys.exit(0)  # unparseable meta -> let the host's own gates decide; don't refuse here
 prev_model = str(m.get("model", "") or "")
 prev_effort = str(m.get("effort", "") or "")
+prev_envelope = str(m.get("envelopeBinding", "") or "")
 if prev_model and prev_model != model_now:
     sys.exit(1)
 if prev_effort and prev_effort != effort_now:
     sys.exit(1)
+if prev_envelope and prev_envelope != envelope_now:
+    sys.exit(2)
 sys.exit(0)
 PY
-  then
+  if [[ "$session_gate_rc" -eq 2 ]]; then
+    echo "codex-run: resume-refused (envelope binding changed vs $session_meta_path)" >&2
+    exit 86
+  elif [[ "$session_gate_rc" -ne 0 ]]; then
     echo "codex-run: resume-refused (model/effort changed vs $session_meta_path)" >&2
     exit 86
   fi
