@@ -7,6 +7,25 @@ and the plugin negotiate on `schemaVersion`.
 
 ---
 
+## [0.23.1] — 2026-09-16 — Host-managed invocation admission
+
+- **Host-managed invocation admission and observability (TASK-1115).** The
+  invocation envelope (authorization, model, provider, policy, capability)
+  is bound at the host boundary, budgeted and observable; a retained
+  session whose envelope binding has changed is refused for resume
+  (exit 86) instead of being fed history it may no longer be authorized
+  for, and the binding is persisted into the session-meta at creation so
+  that check is live on real sessions (round-2 audit finding F1, closed).
+  Gate: the declared nine-script gate, host-executed; fresh claude-opus-5
+  audit accepted in round 2 of 2. Round-1 P2/P3 findings stay on the
+  backlog.
+- **Fix: integration refused as "campaign drift" under 0.23.0.** The
+  reconciler sets `SINGULAR_INTEGRATION_RECEIPT_FILE` per integration run;
+  the campaign manifest captured every `SINGULAR_*` setting, so any manifest
+  frozen before that variable existed reported drift at integration entry.
+  Per-run settings are now excluded from the frozen identity. TASK-1115
+  itself was merged by hand for this reason (recorded in the merge commit).
+
 ## [0.23.0] — 2026-09-16 — Fair incremental reconciliation
 
 Closes the brain rescue campaign. `schemaVersion` stays **v2**.

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 SCHEMA = "singular.orchestration.campaign-manifest.v1"
 SETTING_PROJECTION_VERSION = "singular.campaign.resolved-settings.v1"
+PER_RUN_SETTINGS = frozenset({"SINGULAR_INTEGRATION_RECEIPT_FILE"})
 
 # Invocation-local outputs are not campaign policy.  They are populated by a
 # runner while a model call is in flight (or by the test harness) and would make
@@ -264,6 +265,12 @@ def model_identity() -> dict[str, dict[str, Any]]:
     # a credential; resolvedSettings already proves equality using digests.
     identity: dict[str, dict[str, Any]] = {}
     for key, value in sorted(os.environ.items()):
+        if key in PER_RUN_SETTINGS:
+            # Set by the reconciler for one integration run (TASK-1114's
+            # integration receipt); never part of the frozen configuration.
+            # Capturing it made every integration under a manifest created
+            # before it existed report "drift" (2026-09-16).
+            continue
         if not key.startswith("SINGULAR_"):
             continue
         if "MODEL" not in key and "EFFORT" not in key and key not in {
