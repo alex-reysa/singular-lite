@@ -17,7 +17,7 @@ missing; nothing is inferred from a single before/after run.
 | B4 reviewed memory | TASK-1117 (successor of 1105 → 1116) | accepted on exact source, no blocking finding; integrated in 104 min | 0.22.0 |
 | B5 evaluation harness | TASK-1106 | accepted; integrated after a 100-min integration refusal (see §4) | 0.22.1 |
 | Reconciliation discovery | TASK-1114 | worker candidate (81 min, 8 owned files, +1,918/−483) parked on two packet-format slips; adopted under supervisor provenance, exact-source qualified: gate 5/5, audit **accepted** (1 P2 + 3 P3 backlog), integrated 21:02Z | unreleased (on `codex/brain-integration`) |
-| Invocation admission | TASK-1115 | single attempt (20 min, +1,119 lines) cut off by the account's Claude session limit; partial candidate fails 4/9 gate members; **parked**, WIP preserved on its branch | — |
+| Invocation admission | TASK-1115 | attempt 1 cut off by the account's session limit; final bounded attempt on A16 (32 min, $7.68) fixed the four failing members and **passed the nine-script host gate**, but the fresh audit returned needs-fix (1 P1: session-meta never records the envelope binding, so the new resume-refusal gate is inert; 2 P2, 1 P3). Not recovered per directive; **parked** with candidate `698e75da` preserved | — |
 
 Releases: **0.22.0** (`49cb3d37`, tag `v0.22.0`) and **0.22.1** (`e57feb13`,
 `v0.22.1`) on the public repository; installed as the machine's current
@@ -42,8 +42,8 @@ canary and re-published gates, and is the active campaign runtime.
 | claude (opus-5) / implementer | 12 | 6 | 58 M | 546 k | **$59.34** |
 | claude / auditor | 7 | 6 | 2.3 M | 62 k | **$7.02** |
 
-Claude implementer cost (total **$66.36** across the campaign, $17.38 of it
-after the 2026-09-15 20:05Z authorization) is dominated by: B5 ($15.63,
+Claude implementer cost (total **$75.55** across the campaign, $26.57 of it
+after the 2026-09-15 20:05Z authorization, $9.19 for the final 1115 attempt) is dominated by: B5 ($15.63,
 35 min, 130 k output tokens), the two TASK-1114 one-hour timeouts ($15.15,
 ~147 k output tokens, zero source edits), the productive TASK-1114 worker
 ($3.19, 81 min under the 3 h clock) plus its exact-source qualification

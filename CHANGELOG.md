@@ -7,6 +7,35 @@ and the plugin negotiate on `schemaVersion`.
 
 ---
 
+## [0.23.0] — 2026-09-16 — Fair incremental reconciliation
+
+Closes the brain rescue campaign. `schemaVersion` stays **v2**.
+
+- **Fair incremental reconciliation discovery (TASK-1114).** The reconciler
+  keeps a durable reconcile index (`engine/reconcile_index.py`) so steady
+  cycles examine only what changed since the last acknowledged sweep instead
+  of re-observing every retained artifact; `integrate.sh` and `ops.sh` read
+  and settle the same index, `singular ops health` reports it, and
+  `docs/incremental-reconciliation.md` records the contract. Worker
+  candidate produced by a contained claude-opus-5/high implementer, adopted
+  under supervisor provenance after two packet-format slips, then qualified
+  on exact source: gate green, fresh claude-opus-5 audit accepted (1 P2,
+  3 P3 backlog). Proof: `tests/test-incremental-reconcile.sh`,
+  `tests/test-ops-health.sh`.
+- **Packet hygiene.** A complete state packet that lacks only `createdAt`
+  is stamped by the host instead of refused (`packet repaired: defaulted
+  missing createdAt`); the omission had parked an audited-clean candidate.
+- **Campaign evaluation.** `claudedocs/brain-campaign-evaluation-20260916.md`
+  and its raw metrics: spend, cycle times, where the time went, and the
+  engine recommendations that follow from six days of field operation.
+- **Known limits.** TASK-1115 (host-managed invocation admission and
+  observability) is parked: its final bounded attempt passed the host gate but the fresh
+  audit found one P1 (the envelope binding is never persisted into the
+  session-meta, so the new resume-refusal check is inert); the candidate is
+  preserved on its branch for a future round. The two lifecycle deadlocks documented
+  in the 2026-09-14 audit remain open. Final host regression on this tree:
+  228 pass / 15 pre-existing host failures (245 scripts).
+
 ## [0.22.1] — 2026-09-15 — B5: evaluation harness and campaign analysis
 
 Completes the brain campaign. TASK-1106 was accepted by the fresh
